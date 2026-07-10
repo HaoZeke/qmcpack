@@ -315,7 +315,6 @@ void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComp
       // whole buffer and marks the device e-I tables resident for every walker, so a
       // skipped walker's rows must reflect its current host distance tables (previous
       // accepts were patched on device only, never into this host pack buffer).
-#pragma omp parallel for schedule(static)
       for (int iw = 0; iw < nw; ++iw)
       {
         auto& P                = p_list[iw];
@@ -357,7 +356,6 @@ void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComp
                                         mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), mem.mw_Uat_batch.data(),
                                         mem.mw_dUat_batch.data(), mem.mw_d2Uat_batch.data());
 
-#pragma omp parallel for schedule(static)
       for (int iw = 0; iw < nw; ++iw)
       {
         auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
@@ -384,8 +382,7 @@ void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComp
   }
 #endif
 
-  // Host multi-walker: OpenMP over walkers (dense recompute when use_offload_)
-#pragma omp parallel for schedule(dynamic)
+  // Host fallback (dense recompute when use_offload_); serial — crowds own walker parallelism
   for (int iw = 0; iw < nw; iw++)
   {
     auto& jeei = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
@@ -688,7 +685,6 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
   // thread-local workspace holds another owner's (or no) resident tables.
   const bool need_full = mem.cuda_full_dirty || !jeei_cuda::default_workspace().ownsFull(&mem);
 
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; ++iw)
   {
     auto& P              = p_list[iw];
@@ -830,7 +826,6 @@ void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
 {
   assert(this == &wfc_list.getLeader());
   const int nw = wfc_list.size();
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
   {
     if (!isAccepted[iw])
