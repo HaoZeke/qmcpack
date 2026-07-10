@@ -242,7 +242,6 @@ void JeeIOrbitalSoA<FT>::mw_evaluateLog(const RefVectorWithLeader<WaveFunctionCo
   const std::vector<bool> recompute_all(nw, true);
   mw_recompute(wfc_list, p_list, recompute_all);
 
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
   {
     auto& wfc      = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
@@ -786,9 +785,9 @@ void JeeIOrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
     return;
   }
 #endif
-  // Host multi-walker: OpenMP over independent walkers (beats serial WFC default)
+  // Host multi-walker: serial per-move loop; walker parallelism comes from crowds,
+  // and a parallel region per move costs more than these evaluations.
   const int nw = wfc_list.size();
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
     ratios[iw] = wfc_list[iw].ratio(p_list[iw], iat);
 }
@@ -815,9 +814,9 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComp
     return;
   }
 #endif
-  // Host multi-walker: OpenMP over walkers. Each walker has its own WFC/ParticleSet state.
+  // Host multi-walker: serial per-move loop; walker parallelism comes from crowds,
+  // and a parallel region per move costs more than these evaluations.
   const int nw = wfc_list.size();
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
     ratios[iw] = wfc_list[iw].ratioGrad(p_list[iw], iat, grad_new[iw]);
 }
@@ -898,7 +897,6 @@ void JeeIOrbitalSoA<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionCom
     const std::vector<bool> recompute_all(nw, true);
     mw_recompute(wfc_list, p_list, recompute_all);
   }
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
   {
     auto& wfc      = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
@@ -913,7 +911,6 @@ void JeeIOrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctio
 {
   assert(this == &wfc_list.getLeader());
   const int nw = wfc_list.size();
-#pragma omp parallel for schedule(static)
   for (int iw = 0; iw < nw; iw++)
     wfc_list[iw].evaluateRatios(vp_list[iw], ratios[iw]);
 }

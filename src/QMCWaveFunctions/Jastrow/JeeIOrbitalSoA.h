@@ -395,8 +395,8 @@ public:
     const auto& eI_dists  = P.getDistTableAB(ei_Table_ID_).getDistances();
     const auto& eI_displs = P.getDistTableAB(ei_Table_ID_).getDisplacements();
 
-    // Parallel over ions: each ion owns elecs_inside(*, iat) (no cross-ion writes)
-#pragma omp parallel for schedule(static)
+    // Serial on purpose: this runs per walker inside recompute/accept, where a
+    // parallel region costs more than the O(Nion*Nelec) distance checks.
     for (int iat = 0; iat < Nion; ++iat)
     {
       for (int jg = 0; jg < eGroups; ++jg)
