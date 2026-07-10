@@ -59,7 +59,8 @@ set(JASTROW_SRCS
     LatticeGaussianProductBuilder.cpp)
 set(JASTROW_OMPTARGET_SRCS
     Jastrow/TwoBodyJastrow.cpp
-    Jastrow/BsplineFunctor.cpp)
+    Jastrow/BsplineFunctor.cpp
+    Jastrow/JeeIOrbitalSoA.cpp)
 set(FERMION_SRCS ${FERMION_SRCS} ElectronGas/FreeOrbital.cpp ElectronGas/FreeOrbitalBuilder.cpp)
 
 # wavefunctions only availbale to 3-dim problems

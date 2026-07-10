@@ -16,21 +16,31 @@
 #if !defined(QMC_BUILD_SANDBOX_ONLY)
 #include "QMCWaveFunctions/WaveFunctionComponent.h"
 #endif
+#include <ResourceHandle.h>
 #include "Particle/DistanceTable.h"
 #include "CPU/SIMD/aligned_allocator.hpp"
 #include "CPU/SIMD/algorithm.hpp"
+#include "OMPTarget/OffloadAlignedAllocators.hpp"
+#include "PolynomialFunctor3D.h"
 #include <map>
 #include <numeric>
 #include <memory>
 
 namespace qmcplusplus
 {
+
+template<typename T>
+struct JeeIOrbitalSoAMultiWalkerMem;
+
 /** @ingroup WaveFunctionComponent
  *  @brief Specialization for three-body Jastrow function using multiple functors
  *
  *Each pair-type can have distinct function \f$u(r_{ij})\f$.
  *For electrons, distinct pair correlation functions are used
  *for spins up-up/down-down and up-down/down-up.
+ *
+ * Offload path follows TwoBodyJastrow: use_offload_ selects multi-walker device
+ * kernels when FT::isOMPoffload() is true. Default remains the host SoA path.
  */
 template<class FT>
 class JeeIOrbitalSoA : public WaveFunctionComponent
@@ -42,6 +52,10 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   ///use the same container
   using DistRow  = DistanceTable::DistRow;
   using DisplRow = DistanceTable::DisplRow;
+
+  /// if true use offload (requires FT::isOMPoffload(); otherwise host path)
+  const bool use_offload_;
+
   ///table index for el-el
   const int ee_Table_ID_;
   ///table index for i-el
@@ -108,6 +122,24 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   std::vector<std::vector<PosType>> dgrad_dalpha;
   std::vector<std::vector<Tensor<RealType, 3>>> dhess_dalpha;
 
+  ResourceHandle<JeeIOrbitalSoAMultiWalkerMem<RealType>> mw_mem_handle_;
+
+  /** Pack dual DTs + run dense dual-table VGL under PRAGMA_OFFLOAD for the walker batch. */
+  void mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                            const RefVectorWithLeader<ParticleSet>& p_list,
+                            int iat,
+                            std::vector<PsiValue>& ratios,
+                            std::vector<GradType>* grad_new,
+                            bool need_grad) const;
+
+  /** CUDA dense dual-table path (ENABLE_CUDA builds). */
+  void mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<ParticleSet>& p_list,
+                         int iat,
+                         std::vector<PsiValue>& ratios,
+                         std::vector<GradType>* grad_new,
+                         bool need_grad) const;
+
   void resizeWFOptVectors()
   {
     dLogPsi.resize(myVars.size());
@@ -147,22 +179,27 @@ public:
   ///alias FuncType
   using FuncType = FT;
 
-  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs)
-      : WaveFunctionComponent(obj_name),
-        ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        Ions(ions)
-  {
-    if (my_name_.empty())
-      throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
-    init(elecs);
-  }
+  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false);
+
+  JeeIOrbitalSoA(const JeeIOrbitalSoA& rhs) = delete;
+
+  ~JeeIOrbitalSoA() override;
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
 
+  bool isUsingOffload() const { return use_offload_; }
+
+  void createResource(ResourceCollection& collection) const override;
+
+  void acquireResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override;
+
+  void releaseResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override;
+
   std::unique_ptr<WaveFunctionComponent> makeClone(ParticleSet& elecs) const override
   {
-    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs);
+    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs, use_offload_);
     std::map<const FT*, FT*> fcmap;
     for (int iG = 0; iG < iGroups; iG++)
       for (int eG1 = 0; eG1 < eGroups; eG1++)
@@ -358,23 +395,27 @@ public:
     const auto& eI_dists  = P.getDistTableAB(ei_Table_ID_).getDistances();
     const auto& eI_displs = P.getDistTableAB(ei_Table_ID_).getDisplacements();
 
+    // Parallel over ions: each ion owns elecs_inside(*, iat) (no cross-ion writes)
+#pragma omp parallel for schedule(static)
     for (int iat = 0; iat < Nion; ++iat)
+    {
       for (int jg = 0; jg < eGroups; ++jg)
       {
         elecs_inside(jg, iat).clear();
         elecs_inside_dist(jg, iat).clear();
         elecs_inside_displ(jg, iat).clear();
+        // reserve a soft upper bound to cut realloc thrash
+        elecs_inside(jg, iat).reserve(static_cast<size_t>(P.last(jg) - P.first(jg)));
       }
-
-    for (int jg = 0; jg < eGroups; ++jg)
-      for (int jel = P.first(jg); jel < P.last(jg); jel++)
-        for (int iat = 0; iat < Nion; ++iat)
+      for (int jg = 0; jg < eGroups; ++jg)
+        for (int jel = P.first(jg); jel < P.last(jg); jel++)
           if (eI_dists[jel][iat] < Ion_cutoff[iat])
           {
             elecs_inside(jg, iat).push_back(jel);
             elecs_inside_dist(jg, iat).push_back(eI_dists[jel][iat]);
             elecs_inside_displ(jg, iat).push_back(eI_displs[jel][iat]);
           }
+    }
   }
 
   LogValue evaluateLog(const ParticleSet& P,
@@ -384,6 +425,11 @@ public:
     recompute(P);
     return log_value_ = computeGL(G, L);
   }
+
+  void mw_evaluateLog(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                      const RefVectorWithLeader<ParticleSet>& p_list,
+                      const RefVector<ParticleSet::ParticleGradient>& G_list,
+                      const RefVector<ParticleSet::ParticleLaplacian>& L_list) const override;
 
   PsiValue ratio(ParticleSet& P, int iat) override
   {
@@ -450,19 +496,50 @@ public:
     return std::exp(static_cast<PsiValue>(DiffVal));
   }
 
+  void mw_calcRatio(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                    const RefVectorWithLeader<ParticleSet>& p_list,
+                    int iat,
+                    std::vector<PsiValue>& ratios) const override;
+
+  void mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                    const RefVectorWithLeader<ParticleSet>& p_list,
+                    int iat,
+                    std::vector<PsiValue>& ratios,
+                    std::vector<GradType>& grad_new) const override;
+
   inline void restore(int iat) override {}
 
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override
   {
     const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
     const auto& ee_table = P.getDistTableAA(ee_Table_ID_);
-    // get the old value, grad, lapl
-    computeU3(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
-              ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
+    // Old side always from host (pre-move distances). Dense when offload for pair-set match.
+    if (use_offload_)
+      computeU3_dense(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
+                      ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
+    else
+      computeU3(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
+                ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
+    // New side: after CUDA/offload mw_ratioGrad (ORB_PBYP_PARTIAL), cur_*/newUk already match host
+    // (golden + agreement tests). Recompute new only for ratio-only moves that never filled VGL.
+    // Skipping the second host dense pass halves the accept cost.
     if (UpdateMode == ORB_PBYP_RATIO)
-    { //ratio-only during the move; need to compute derivatives
-      computeU3(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
-                ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
+    {
+      if (use_offload_)
+        computeU3_dense(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
+                        ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
+      else
+        computeU3(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
+                  ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
+    }
+    else if (use_offload_)
+    {
+      // PARTIAL: CUDA filled VGL buffers; only rebuild ion neighbor ids for compact-list maintenance.
+      ions_nearby_new.clear();
+      const auto& distjI_new = eI_table.getTempDists();
+      for (int jat = 0; jat < Nion; ++jat)
+        if (distjI_new[jat] < Ion_cutoff[jat])
+          ions_nearby_new.push_back(jat);
     }
 
 #pragma omp simd
@@ -546,18 +623,33 @@ public:
     }
   }
 
+  void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                            const RefVectorWithLeader<ParticleSet>& p_list,
+                            int iat,
+                            const std::vector<bool>& isAccepted,
+                            bool safe_to_delay = false) const override;
+
   inline void recompute(const ParticleSet& P) override
   {
     const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
     const auto& ee_table = P.getDistTableAA(ee_Table_ID_);
 
-    build_compact_list(P);
+    // Cut2 host: dense dual-table path when offload is on (matches CUDA recompute).
+    // Compact path remains the default for pure host builds.
+    const bool dense = use_offload_;
+    if (!dense)
+      build_compact_list(P);
 
     for (int jel = 0; jel < Nelec; ++jel)
     {
-      computeU3(P, jel, eI_table.getDistRow(jel), eI_table.getDisplRow(jel), ee_table.getDistRow(jel),
-                ee_table.getDisplRow(jel), Uat[jel], dUat_temp, d2Uat[jel], newUk, newdUk, newd2Uk, ions_nearby_new,
-                true);
+      if (dense)
+        computeU3_dense(P, jel, eI_table.getDistRow(jel), eI_table.getDisplRow(jel), ee_table.getDistRow(jel),
+                        ee_table.getDisplRow(jel), Uat[jel], dUat_temp, d2Uat[jel], newUk, newdUk, newd2Uk,
+                        ions_nearby_new, true);
+      else
+        computeU3(P, jel, eI_table.getDistRow(jel), eI_table.getDisplRow(jel), ee_table.getDistRow(jel),
+                  ee_table.getDisplRow(jel), Uat[jel], dUat_temp, d2Uat[jel], newUk, newdUk, newd2Uk, ions_nearby_new,
+                  true);
       dUat(jel) = dUat_temp;
 // add the contribution from the upper triangle
 #pragma omp simd
@@ -575,19 +667,15 @@ public:
           save_g[kel] += new_g[kel];
       }
     }
+
+    // Accept still uses compact neighbor lists on host.
+    if (dense)
+      build_compact_list(P);
   }
 
   void mw_recompute(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                     const RefVectorWithLeader<ParticleSet>& p_list,
-                    const std::vector<bool>& recompute) const override
-  {
-    for (int iw = 0; iw < wfc_list.size(); iw++)
-      if (auto& jeei = wfc_list.getCastedElement<JeeIOrbitalSoA>(iw); recompute[iw])
-        jeei.recompute(p_list[iw]);
-      else
-        // distance values may change due to recomputing and thus bring internal data up-to-date
-        jeei.build_compact_list(p_list[iw]);
-  }
+                    const std::vector<bool>& recompute) const override;
 
   inline valT computeU(const ParticleSet& P,
                        int jel,
@@ -635,6 +723,68 @@ public:
               feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(), DistkI_Compressed.data());
           kel_counter = 0;
         }
+      }
+    }
+    return Uj;
+  }
+
+  /** Dense dual-table value-only evaluate matching computeU without elecs_inside. */
+  inline valT computeU_dense(const ParticleSet& P,
+                             int jel,
+                             int jg,
+                             const DistRow& distjI,
+                             const DistRow& distjk,
+                             std::vector<int>& ions_nearby)
+  {
+    ions_nearby.clear();
+    for (int iat = 0; iat < Nion; ++iat)
+      if (distjI[iat] < Ion_cutoff[iat])
+        ions_nearby.push_back(iat);
+
+    const auto& eI_full_dists = P.getDistTableAB(ei_Table_ID_).getDistances();
+    valT Uj                   = valT(0);
+    for (int kg = 0; kg < eGroups; ++kg)
+    {
+      int kel_counter = 0;
+      int ig_batch    = -1;
+      for (int iind = 0; iind < static_cast<int>(ions_nearby.size()); ++iind)
+      {
+        const int iat   = ions_nearby[iind];
+        const int ig    = Ions.GroupID[iat];
+        const valT r_jI = distjI[iat];
+        if (kel_counter > 0 && ig != ig_batch)
+        {
+          const FT& feeI(*F(ig_batch, jg, kg));
+          Uj += feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(),
+                               DistkI_Compressed.data());
+          kel_counter = 0;
+        }
+        ig_batch = ig;
+        for (int kel = P.first(kg); kel < P.last(kg); ++kel)
+        {
+          if (kel == jel)
+            continue;
+          const valT r_kI = eI_full_dists[kel][iat];
+          if (r_kI >= Ion_cutoff[iat])
+            continue;
+          DistkI_Compressed[kel_counter] = r_kI;
+          Distjk_Compressed[kel_counter] = distjk[kel];
+          DistjI_Compressed[kel_counter] = r_jI;
+          kel_counter++;
+          if (kel_counter == static_cast<int>(Nbuffer))
+          {
+            const FT& feeI(*F(ig, jg, kg));
+            Uj += feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(),
+                                 DistkI_Compressed.data());
+            kel_counter = 0;
+          }
+        }
+      }
+      if (kel_counter > 0)
+      {
+        const FT& feeI(*F(ig_batch, jg, kg));
+        Uj += feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(),
+                             DistkI_Compressed.data());
       }
     }
     return Uj;
@@ -725,6 +875,99 @@ public:
       const int kel = DistIndice_k[kel_index];
       Uk[kel] += val[kel_index];
       d2Uk[kel] -= hessF00[kel_index];
+    }
+  }
+
+  /** Dense dual-table evaluate matching computeU3 without elecs_inside.
+   *  Scans eI full distances for partners within Ion_cutoff. Used by the
+   *  offload/batched path so multi-walker evaluation does not depend on host
+   *  compact lists (device-friendly indexing).
+   */
+  inline void computeU3_dense(const ParticleSet& P,
+                              int jel,
+                              const DistRow& distjI,
+                              const DisplRow& displjI,
+                              const DistRow& distjk,
+                              const DisplRow& displjk,
+                              valT& Uj,
+                              posT& dUj,
+                              valT& d2Uj,
+                              Vector<valT>& Uk,
+                              gContainer_type& dUk,
+                              Vector<valT>& d2Uk,
+                              std::vector<int>& ions_nearby,
+                              bool triangle = false)
+  {
+    constexpr valT czero(0);
+
+    Uj   = czero;
+    dUj  = posT();
+    d2Uj = czero;
+
+    const int jg               = P.GroupID[jel];
+    const int kelmax           = triangle ? jel : Nelec;
+    const auto& eI_table       = P.getDistTableAB(ei_Table_ID_);
+    const auto& eI_full_dists  = eI_table.getDistances();
+    const auto& eI_full_displs = eI_table.getDisplacements();
+
+    std::fill_n(Uk.data(), kelmax, czero);
+    std::fill_n(d2Uk.data(), kelmax, czero);
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+      std::fill_n(dUk.data(idim), kelmax, czero);
+
+    ions_nearby.clear();
+    for (int iat = 0; iat < Nion; ++iat)
+      if (distjI[iat] < Ion_cutoff[iat])
+        ions_nearby.push_back(iat);
+
+    for (int kg = 0; kg < eGroups; ++kg)
+    {
+      int kel_counter = 0;
+      int ig_batch    = -1;
+      for (int iind = 0; iind < static_cast<int>(ions_nearby.size()); ++iind)
+      {
+        const int iat      = ions_nearby[iind];
+        const int ig       = Ions.GroupID[iat];
+        const valT r_jI    = distjI[iat];
+        const posT disp_Ij = displjI[iat];
+
+        if (kel_counter > 0 && ig != ig_batch)
+        {
+          const FT& feeI(*F(ig_batch, jg, kg));
+          computeU3_engine(P, feeI, kel_counter, Uj, dUj, d2Uj, Uk, dUk, d2Uk);
+          kel_counter = 0;
+        }
+        ig_batch = ig;
+
+        for (int kel = P.first(kg); kel < P.last(kg) && kel < kelmax; ++kel)
+        {
+          if (kel == jel)
+            continue;
+          const valT r_kI = eI_full_dists[kel][iat];
+          if (r_kI >= Ion_cutoff[iat])
+            continue;
+
+          DistkI_Compressed[kel_counter]  = r_kI;
+          DistjI_Compressed[kel_counter]  = r_jI;
+          Distjk_Compressed[kel_counter]  = distjk[kel];
+          Disp_kI_Compressed(kel_counter) = eI_full_displs[kel][iat];
+          Disp_jI_Compressed(kel_counter) = disp_Ij;
+          Disp_jk_Compressed(kel_counter) = displjk[kel];
+          DistIndice_k[kel_counter]       = kel;
+          kel_counter++;
+          if (kel_counter == static_cast<int>(Nbuffer))
+          {
+            const FT& feeI(*F(ig, jg, kg));
+            computeU3_engine(P, feeI, kel_counter, Uj, dUj, d2Uj, Uk, dUk, d2Uk);
+            kel_counter = 0;
+          }
+        }
+      }
+      if (kel_counter > 0)
+      {
+        const FT& feeI(*F(ig_batch, jg, kg));
+        computeU3_engine(P, feeI, kel_counter, Uj, dUj, d2Uj, Uk, dUk, d2Uk);
+      }
     }
   }
 
@@ -844,6 +1087,16 @@ public:
   {
     return log_value_ = computeGL(G, L);
   }
+
+  void mw_evaluateGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                     const RefVectorWithLeader<ParticleSet>& p_list,
+                     const RefVector<ParticleSet::ParticleGradient>& G_list,
+                     const RefVector<ParticleSet::ParticleLaplacian>& L_list,
+                     bool fromscratch) const override;
+
+  void mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                         std::vector<std::vector<ValueType>>& ratios) const override;
 
   void evaluateDerivatives(ParticleSet& P,
                            const OptVariables& optvars,
@@ -1288,6 +1541,8 @@ public:
     return ion_deriv;
   }
 };
+
+extern template class JeeIOrbitalSoA<PolynomialFunctor3D>;
 
 } // namespace qmcplusplus
 #endif

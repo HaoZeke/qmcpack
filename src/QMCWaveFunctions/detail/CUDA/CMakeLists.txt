@@ -9,9 +9,14 @@
 #// File created by: Ye Luo, yeluo@anl.gov, Argonne National Laboratory
 #//////////////////////////////////////////////////////////////////////////////////////
 
-set(WFSSRCS_CUDA cuBLAS_LU.cu delayed_update_helper.cu matrix_update_helper.cu)
+set(WFSSRCS_CUDA
+    cuBLAS_LU.cu
+    delayed_update_helper.cu
+    matrix_update_helper.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Jastrow/JeeIDenseCUDA.cu)
 
 add_library(qmcwfs_cuda ${WFSSRCS_CUDA})
+target_include_directories(qmcwfs_cuda PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${CMAKE_CURRENT_SOURCE_DIR}/../../Jastrow)
 if(QMC_CUDA2HIP)
   set_source_files_properties(${WFSSRCS_CUDA} PROPERTIES LANGUAGE HIP)
 endif()
