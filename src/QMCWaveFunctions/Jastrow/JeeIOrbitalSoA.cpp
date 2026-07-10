@@ -621,12 +621,8 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunc
       for (int k = 0; k < Ne; ++k)
         wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
 
-    // Resident mode: the acceptance ratio must see partner updates from earlier
-    // accepts in this sweep, which live only on device -- vgl slot 5 carries the
-    // device-resident Uat[iat]. Legacy mode keeps the host mirror.
-    const valT uat_old = resident_mode ? static_cast<valT>(mem.mw_vgl[iw][5]) : wfc.Uat[iat];
-    wfc.DiffVal        = uat_old - wfc.cur_Uat;
-    ratios[iw]         = std::exp(static_cast<PsiValue>(wfc.DiffVal));
+    wfc.DiffVal = wfc.Uat[iat] - wfc.cur_Uat;
+    ratios[iw]  = std::exp(static_cast<PsiValue>(wfc.DiffVal));
     if (need_grad && grad_new)
       for (int idim = 0; idim < OHMMS_DIM; ++idim)
         (*grad_new)[iw][idim] += wfc.cur_dUat[idim];
