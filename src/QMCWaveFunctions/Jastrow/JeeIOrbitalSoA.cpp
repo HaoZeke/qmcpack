@@ -60,6 +60,13 @@ struct JeeIOrbitalSoAMultiWalkerMem : public Resource
   bool device_state_dirty = false;
   // Workspace holding the resident state (thread_local on the crowd's thread)
   void* resident_ws = nullptr;
+  // Coordinates resident on device (open-BC cells): temp rows generate on device
+  bool device_coords = false;
+  // Last ratioGrad used device-generated temps (proposal is resident for accept)
+  bool last_move_dev_temps = false;
+  Vector<T, OffloadPinnedAllocator<T>> mw_epos; // [nw][Nelec][3]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ipos; // [Nion][3]
+  Vector<T, OffloadPinnedAllocator<T>> mw_prop; // [nw][3]
   std::vector<int> cuda_gamma_offset;
   std::vector<int> cuda_gamma_len;
   std::vector<double> cuda_fun_cut;
@@ -390,6 +397,27 @@ void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComp
         wfc.build_compact_list(p_list[iw]);
       }
 
+      // Device-resident coordinates enable on-device temp rows (open BC only; the
+      // packed host path stays authoritative for periodic cells until the vesin
+      // neighbor path lands).
+      mem.device_coords = (p_list[0].getLattice().getSuperCellEnum() == SUPERCELL_OPEN);
+      if (mem.device_coords)
+      {
+        mem.mw_epos.resize(static_cast<size_t>(nw) * Ne * 3);
+        mem.mw_ipos.resize(static_cast<size_t>(Ni) * 3);
+        for (int iw = 0; iw < nw; ++iw)
+        {
+          auto& P = p_list[iw];
+          for (int e = 0; e < Ne; ++e)
+            for (int d = 0; d < 3; ++d)
+              mem.mw_epos[(static_cast<size_t>(iw) * Ne + e) * 3 + d] = P.R[e][d];
+        }
+        for (int i = 0; i < Ni; ++i)
+          for (int d = 0; d < 3; ++d)
+            mem.mw_ipos[static_cast<size_t>(i) * 3 + d] = leader.Ions.R[i][d];
+        jeei_cuda::default_workspace().uploadCoords(nw, Ne, Ni, mem.mw_epos.data(), mem.mw_ipos.data());
+      }
+
       mem.cuda_full_dirty    = false; // device tables just uploaded
       mem.device_state_dirty = false;
       mem.resident_ws        = &jeei_cuda::default_workspace();
@@ -503,18 +531,21 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunc
     const auto& ei_full_r  = eI_table.getDistances();
     const auto& ei_full_dr = eI_table.getDisplacements();
 
-    valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
-    valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
-    for (int k = 0; k < Ne; ++k)
-      ee_base[k] = ee_r[k];
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+    if (!dev_temps)
+    {
+      valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
+      valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
       for (int k = 0; k < Ne; ++k)
-        ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
-    for (int a = 0; a < Ni; ++a)
-      ei_base[a] = ei_r[a];
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        ee_base[k] = ee_r[k];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int k = 0; k < Ne; ++k)
+          ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
       for (int a = 0; a < Ni; ++a)
-        ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+        ei_base[a] = ei_r[a];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int a = 0; a < Ni; ++a)
+          ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+    }
 
     valT* full_r  = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
     valT* full_dr = mem.mw_ei_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nip;
@@ -715,6 +746,8 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
     rws->downloadState(nw, Nep, mem.mw_allUat.data());
     mem.device_state_dirty = false;
   }
+  // Device temp rows: resident coordinates + open BC (uploaded at recompute)
+  const bool dev_temps = resident_mode && mem.device_coords && ws.hasCoords(&mem);
   if (resident_mode && need_full)
   {
     mem.mw_ee_full_r.resize(static_cast<size_t>(nw) * Ne * Nep);
@@ -733,18 +766,21 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
     const auto& ei_r     = eI_table.getTempDists();
     const auto& ei_dr    = eI_table.getTempDispls();
 
-    valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
-    valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
-    for (int k = 0; k < Ne; ++k)
-      ee_base[k] = ee_r[k];
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+    if (!dev_temps)
+    {
+      valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
+      valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
       for (int k = 0; k < Ne; ++k)
-        ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
-    for (int a = 0; a < Ni; ++a)
-      ei_base[a] = ei_r[a];
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        ee_base[k] = ee_r[k];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int k = 0; k < Ne; ++k)
+          ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
       for (int a = 0; a < Ni; ++a)
-        ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+        ei_base[a] = ei_r[a];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int a = 0; a < Ni; ++a)
+          ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+    }
 
     if (need_full)
     {
@@ -787,8 +823,35 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
                                                    mem.cuda_fun_C.data());
     pws.uploadFullGeometry(nw, Ne, Nep, Nip, mem.mw_ee_full_r.data(), mem.mw_ee_full_dr.data(),
                            mem.mw_ei_full_r.data(), mem.mw_ei_full_dr.data(), mem.mw_allUat.data());
+    if (mem.device_coords)
+    {
+      mem.mw_epos.resize(static_cast<size_t>(nw) * Ne * 3);
+      mem.mw_ipos.resize(static_cast<size_t>(Ni) * 3);
+      for (int iw = 0; iw < nw; ++iw)
+        for (int e = 0; e < Ne; ++e)
+          for (int d = 0; d < 3; ++d)
+            mem.mw_epos[(static_cast<size_t>(iw) * Ne + e) * 3 + d] = p_list[iw].R[e][d];
+      for (int i = 0; i < Ni; ++i)
+        for (int d = 0; d < 3; ++d)
+          mem.mw_ipos[static_cast<size_t>(i) * 3 + d] = leader.Ions.R[i][d];
+      pws.uploadCoords(nw, Ne, Ni, mem.mw_epos.data(), mem.mw_ipos.data());
+    }
     mem.resident_ws = &pws;
   }
+
+  if (dev_temps)
+  {
+    // The proposed position is the only per-move upload; temp rows generate on device.
+    mem.mw_prop.resize(static_cast<size_t>(nw) * 3);
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      const auto& ap = p_list[iw].getActivePos();
+      for (int d = 0; d < 3; ++d)
+        mem.mw_prop[static_cast<size_t>(iw) * 3 + d] = ap[d];
+    }
+    ws.launchTempRows(&mem, iat, nw, Ne, Nep, Ni, Nip, mem.mw_prop.data());
+  }
+  mem.last_move_dev_temps = dev_temps;
 
   jeei_cuda::launch_dense_ratio_grad(&mem, mem.cuda_static_version, iat, nw, Ne, Nep, Ni, Nip, eG, iG, nfun,
                                      mem.mw_ee_temp.data(),
@@ -797,7 +860,8 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
                                      mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
                                      mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(), mem.cuda_fun_NeI.data(),
                                      mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full && !resident_mode,
-                                     /*copy_uk_host=*/!resident_mode, mem.mw_vgl.data(),
+                                     /*copy_uk_host=*/!resident_mode, /*temps_on_device=*/dev_temps,
+                                     mem.mw_vgl.data(),
                                      mem.mw_Uk.data(), mem.mw_dUk.data(), mem.mw_d2Uk.data());
   mem.cuda_full_dirty = false;
 
@@ -968,7 +1032,8 @@ void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
         if (any)
         {
           ws.launchAccept(&mem, iat, nw, Ne, Nep, Ni, Nip, wfc_leader.eGroups,
-                          wfc_leader.iGroups * wfc_leader.eGroups * wfc_leader.eGroups, flags.data());
+                          wfc_leader.iGroups * wfc_leader.eGroups * wfc_leader.eGroups, flags.data(),
+                          mem.last_move_dev_temps);
           for (int iw = 0; iw < nw; ++iw)
           {
             if (!isAccepted[iw])

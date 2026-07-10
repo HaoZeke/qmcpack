@@ -68,6 +68,17 @@ public:
   /** D2H the resident Uat/dUat/d2Uat batch into the mw_allUat host buffer. */
   void downloadState(int nw, int Ne_pad, double* uat_state);
 
+  /** Upload electron ([nw][Nelec][3]) and ion ([Nion][3]) coordinates; enables
+   *  device-side temp-row generation (open boundary conditions). */
+  void uploadCoords(int nw, int Nelec, int Nion, const double* epos, const double* ipos);
+
+  bool hasCoords(const void* owner) const { return coords_resident_ && owner_ == owner; }
+
+  /** Generate ee/eI temp rows on device from resident coordinates and the proposed
+   *  positions ([nw][3]); replaces the host temp pack + H2D. */
+  void launchTempRows(const void* owner, int jel, int nw, int Nelec, int Ne_pad, int Nion, int Ni_pad,
+                      const double* prop);
+
   /** Device-side accept: old-side dense pass from resident tables, apply new-old
    *  deltas into resident Uat state, patch moved ee/ei rows from resident temps. */
   void launchAccept(const void* owner,
@@ -79,7 +90,8 @@ public:
                     int Ni_pad,
                     int eGroups,
                     int nfun,
-                    const int* accepted);
+                    const int* accepted,
+                    bool commit_coords);
 
   /** D2H dUat[jel] for all walkers (3*nw doubles, dim-major per walker). */
   void gatherGrad(const void* owner, int jel, int nw, int Ne_pad, double* grad3);
@@ -127,6 +139,7 @@ public:
                        const double* ei_full_dr,
                        bool upload_full,
                        bool copy_uk_host,
+                       bool temps_on_device,
                        double* vgl,
                        double* Uk,
                        double* dUk,
@@ -166,6 +179,7 @@ private:
   double *d_vgl_ = nullptr, *d_Uk_ = nullptr, *d_dUk_ = nullptr, *d_d2Uk_ = nullptr;
   double *d_Uat_ = nullptr, *d_dUat_ = nullptr, *d_d2Uat_ = nullptr;
   double* d_grad_ = nullptr;
+  double *d_epos_ = nullptr, *d_ipos_ = nullptr, *d_prop_ = nullptr;
   int* d_accept_  = nullptr;
   int *d_egrp_ = nullptr, *d_igrp_ = nullptr, *d_goff_ = nullptr, *d_glen_ = nullptr;
   int *d_NeI_ = nullptr, *d_Nee_ = nullptr, *d_C_ = nullptr;
@@ -181,6 +195,7 @@ private:
 
   bool static_uploaded_ = false;
   bool full_resident_   = false;
+  bool coords_resident_ = false;
 };
 
 DenseWorkspace& default_workspace();
@@ -233,6 +248,7 @@ void launch_dense_ratio_grad(const void* owner,
                              const int* fun_C,
                              bool force_full_upload,
                              bool copy_uk_host,
+                             bool temps_on_device,
                              double* vgl,
                              double* Uk,
                              double* dUk,

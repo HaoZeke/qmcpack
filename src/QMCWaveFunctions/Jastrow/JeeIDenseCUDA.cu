@@ -449,6 +449,8 @@ __global__ void dense_accept_kernel(const int jel,
                                     const int eGroups,
                                     const int nfun,
                                     const int* __restrict__ accepted,
+                                    const double* __restrict__ prop,
+                                    double* __restrict__ epos,
                                     const double* __restrict__ ee_temp,
                                     const double* __restrict__ ei_temp,
                                     double* __restrict__ ee_full_r,
@@ -572,6 +574,14 @@ __global__ void dense_accept_kernel(const int jel,
     d2_s[jel]            = v[4];
   }
 
+  if (tid == 0 && epos != nullptr)
+  {
+    double* e = epos + (size_t(iw) * Nelec + jel) * 3;
+    e[0]      = prop[iw * 3 + 0];
+    e[1]      = prop[iw * 3 + 1];
+    e[2]      = prop[iw * 3 + 2];
+  }
+
   const double* ee_t = ee_temp + size_t(iw) * 4 * Ne_pad;
   const double* ei_t = ei_temp + size_t(iw) * 4 * Ni_pad;
   for (int a = tid; a < Nion; a += nthr)
@@ -610,6 +620,61 @@ __global__ void gather_grad_kernel(const int jel, const int nw, const int Ne_pad
   out[iw * 3 + 0]    = dU_s[0 * Ne_pad + jel];
   out[iw * 3 + 1]    = dU_s[1 * Ne_pad + jel];
   out[iw * 3 + 2]    = dU_s[2 * Ne_pad + jel];
+}
+
+// Open-BC temp rows from resident coordinates: dr = r_other - pos (matches
+// DTD_BConds<T,3,SUPERCELL_OPEN>); pad lanes stay zero.
+__global__ void gen_temp_rows_kernel(const int nw,
+                                     const int Nelec,
+                                     const int Ne_pad,
+                                     const int Nion,
+                                     const int Ni_pad,
+                                     const double* __restrict__ epos,
+                                     const double* __restrict__ ipos,
+                                     const double* __restrict__ prop,
+                                     double* __restrict__ ee_temp,
+                                     double* __restrict__ ei_temp)
+{
+  const int iw = blockIdx.x;
+  if (iw >= nw)
+    return;
+  const double px = prop[iw * 3 + 0];
+  const double py = prop[iw * 3 + 1];
+  const double pz = prop[iw * 3 + 2];
+  double* ee      = ee_temp + size_t(iw) * 4 * Ne_pad;
+  double* ei      = ei_temp + size_t(iw) * 4 * Ni_pad;
+  for (int k = threadIdx.x; k < Ne_pad; k += blockDim.x)
+  {
+    double r = 0.0, dx = 0.0, dy = 0.0, dz = 0.0;
+    if (k < Nelec)
+    {
+      const double* e = epos + (size_t(iw) * Nelec + k) * 3;
+      dx              = e[0] - px;
+      dy              = e[1] - py;
+      dz              = e[2] - pz;
+      r               = sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    ee[k]              = r;
+    ee[1 * Ne_pad + k] = dx;
+    ee[2 * Ne_pad + k] = dy;
+    ee[3 * Ne_pad + k] = dz;
+  }
+  for (int a = threadIdx.x; a < Ni_pad; a += blockDim.x)
+  {
+    double r = 0.0, dx = 0.0, dy = 0.0, dz = 0.0;
+    if (a < Nion)
+    {
+      const double* I = ipos + size_t(a) * 3;
+      dx              = I[0] - px;
+      dy              = I[1] - py;
+      dz              = I[2] - pz;
+      r               = sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    ei[a]              = r;
+    ei[1 * Ni_pad + a] = dx;
+    ei[2 * Ni_pad + a] = dy;
+    ei[3 * Ni_pad + a] = dz;
+  }
 }
 
 } // namespace
@@ -659,6 +724,9 @@ void DenseWorkspace::freeAll()
   free_p(d_dUat_);
   free_p(d_d2Uat_);
   free_p(d_grad_);
+  free_p(d_epos_);
+  free_p(d_ipos_);
+  free_p(d_prop_);
   free_p(d_accept_);
   free_p(d_egrp_);
   free_p(d_igrp_);
@@ -671,6 +739,7 @@ void DenseWorkspace::freeAll()
   cap_gamma_                                                    = 0;
   static_uploaded_                                              = false;
   full_resident_                                                = false;
+  coords_resident_                                              = false;
   owner_                                                        = nullptr;
   static_ver_                                                   = 0;
 }
@@ -735,6 +804,9 @@ void DenseWorkspace::ensureCapacity(int nw,
   check(cudaMalloc(&d_d2Uat_, Uat_sz * sizeof(double)), "malloc d2Uat");
   check(cudaMalloc(&d_grad_, size_t(cap_nw_) * 3 * sizeof(double)), "malloc grad");
   check(cudaMalloc(&d_accept_, size_t(cap_nw_) * sizeof(int)), "malloc accept");
+  check(cudaMalloc(&d_epos_, size_t(cap_nw_) * cap_Ne_ * 3 * sizeof(double)), "malloc epos");
+  check(cudaMalloc(&d_ipos_, size_t(cap_Ni_) * 3 * sizeof(double)), "malloc ipos");
+  check(cudaMalloc(&d_prop_, size_t(cap_nw_) * 3 * sizeof(double)), "malloc prop");
 }
 
 void DenseWorkspace::uploadStatic(int Nelec,
@@ -814,6 +886,7 @@ void DenseWorkspace::launchRatioGrad(int jel,
                                      const double* ei_full_dr,
                                      bool upload_full,
                                      bool copy_uk_host,
+                                     bool temps_on_device,
                                      double* vgl,
                                      double* Uk,
                                      double* dUk,
@@ -833,8 +906,11 @@ void DenseWorkspace::launchRatioGrad(int jel,
 
   // Pipeline: H2D temps (+ optional full) -> kernel -> D2H; single stream sync at end.
   // Host pointers should be pinned (OffloadPinned MultiWalkerMem) for async overlap.
-  check(cudaMemcpyAsync(d_ee_, ee_temp, ee_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D ee");
-  check(cudaMemcpyAsync(d_ei_, ei_temp, ei_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D ei");
+  if (!temps_on_device)
+  {
+    check(cudaMemcpyAsync(d_ee_, ee_temp, ee_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D ee");
+    check(cudaMemcpyAsync(d_ei_, ei_temp, ei_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D ei");
+  }
   if (upload_full || !full_resident_)
     uploadFull(nw, Nelec, Ni_pad, ei_full_r, ei_full_dr);
 
@@ -943,8 +1019,32 @@ void DenseWorkspace::downloadState(int nw, int Ne_pad, double* uat_state)
   check(cudaStreamSynchronize(s), "state sync");
 }
 
+void DenseWorkspace::uploadCoords(int nw, int Nelec, int Nion, const double* epos, const double* ipos)
+{
+  ensureStream();
+  auto s = static_cast<cudaStream_t>(stream_);
+  check(cudaMemcpyAsync(d_epos_, epos, size_t(nw) * Nelec * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "H2D epos");
+  check(cudaMemcpyAsync(d_ipos_, ipos, size_t(Nion) * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "H2D ipos");
+  coords_resident_ = true;
+}
+
+void DenseWorkspace::launchTempRows(const void* owner, int jel, int nw, int Nelec, int Ne_pad, int Nion, int Ni_pad,
+                                    const double* prop)
+{
+  if (!hasCoords(owner))
+    throw std::runtime_error("JeeIDenseCUDA: temp rows without resident coordinates");
+  ensureStream();
+  auto s = static_cast<cudaStream_t>(stream_);
+  check(cudaMemcpyAsync(d_prop_, prop, size_t(nw) * 3 * sizeof(double), cudaMemcpyHostToDevice, s), "H2D prop");
+  int block = 32;
+  while (block < Nelec && block < 256)
+    block *= 2;
+  gen_temp_rows_kernel<<<nw, block, 0, s>>>(nw, Nelec, Ne_pad, Nion, Ni_pad, d_epos_, d_ipos_, d_prop_, d_ee_, d_ei_);
+  check(cudaGetLastError(), "temp rows kernel");
+}
+
 void DenseWorkspace::launchAccept(const void* owner, int jel, int nw, int Nelec, int Ne_pad, int Nion, int Ni_pad,
-                                  int eGroups, int nfun, const int* accepted)
+                                  int eGroups, int nfun, const int* accepted, bool commit_coords)
 {
   if (!ownsFull(owner))
     throw std::runtime_error("JeeIDenseCUDA: accept without resident tables");
@@ -954,7 +1054,12 @@ void DenseWorkspace::launchAccept(const void* owner, int jel, int nw, int Nelec,
   int block = 32;
   while (block < Nelec && block < 256)
     block *= 2;
-  dense_accept_kernel<<<nw, block, 0, s>>>(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, d_accept_, d_ee_, d_ei_,
+  // Without a device-side proposal this move, the resident coordinates cannot be
+  // patched and go stale for jel; drop them until the next block upload.
+  if (!commit_coords)
+    coords_resident_ = false;
+  dense_accept_kernel<<<nw, block, 0, s>>>(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, d_accept_, d_prop_,
+                                           (commit_coords && coords_resident_) ? d_epos_ : nullptr, d_ee_, d_ei_,
                                            d_ee_full_r_, d_ee_full_dr_, d_fr_, d_fd_, d_egrp_, d_igrp_, d_ion_cut_,
                                            d_gamma_, d_goff_, d_fun_cut_, d_NeI_, d_Nee_, d_C_, d_vgl_, d_Uk_, d_dUk_,
                                            d_d2Uk_, d_Uat_, d_dUat_, d_d2Uat_);
@@ -1070,6 +1175,7 @@ void launch_dense_ratio_grad(const void* owner,
                              const int* fun_C,
                              bool force_full_upload,
                              bool copy_uk_host,
+                             bool temps_on_device,
                              double* vgl,
                              double* Uk,
                              double* dUk,
@@ -1080,7 +1186,7 @@ void launch_dense_ratio_grad(const void* owner,
                 gamma_offset, gamma_len, fun_cut, fun_NeI, fun_Nee, fun_C);
   const bool need_full = force_full_upload || !ws.hasFull();
   ws.launchRatioGrad(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, ee_temp, ei_temp, ei_full_r, ei_full_dr,
-                     need_full, copy_uk_host, vgl, Uk, dUk, d2Uk);
+                     need_full, copy_uk_host, temps_on_device, vgl, Uk, dUk, d2Uk);
 }
 
 void launch_dense_recompute(const void* owner,
