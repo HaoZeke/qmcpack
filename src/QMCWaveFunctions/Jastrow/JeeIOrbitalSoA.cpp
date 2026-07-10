@@ -531,21 +531,18 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunc
     const auto& ei_full_r  = eI_table.getDistances();
     const auto& ei_full_dr = eI_table.getDisplacements();
 
-    if (!dev_temps)
-    {
-      valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
-      valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
+    valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
+    valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
+    for (int k = 0; k < Ne; ++k)
+      ee_base[k] = ee_r[k];
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
       for (int k = 0; k < Ne; ++k)
-        ee_base[k] = ee_r[k];
-      for (int idim = 0; idim < OHMMS_DIM; ++idim)
-        for (int k = 0; k < Ne; ++k)
-          ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
+        ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
+    for (int a = 0; a < Ni; ++a)
+      ei_base[a] = ei_r[a];
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
       for (int a = 0; a < Ni; ++a)
-        ei_base[a] = ei_r[a];
-      for (int idim = 0; idim < OHMMS_DIM; ++idim)
-        for (int a = 0; a < Ni; ++a)
-          ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
-    }
+        ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
 
     valT* full_r  = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
     valT* full_dr = mem.mw_ei_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nip;
