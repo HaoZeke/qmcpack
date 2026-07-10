@@ -813,6 +813,7 @@ void DenseWorkspace::launchRatioGrad(int jel,
                                      const double* ei_full_r,
                                      const double* ei_full_dr,
                                      bool upload_full,
+                                     bool copy_uk_host,
                                      double* vgl,
                                      double* Uk,
                                      double* dUk,
@@ -846,9 +847,14 @@ void DenseWorkspace::launchRatioGrad(int jel,
   check(cudaGetLastError(), "ratioGrad kernel");
 
   check(cudaMemcpyAsync(vgl, d_vgl_, vgl_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H vgl");
-  check(cudaMemcpyAsync(Uk, d_Uk_, Uk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H Uk");
-  check(cudaMemcpyAsync(dUk, d_dUk_, dUk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H dUk");
-  check(cudaMemcpyAsync(d2Uk, d_d2Uk_, Uk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H d2Uk");
+  if (copy_uk_host)
+  {
+    // Legacy host-accept flow consumes newUk on the host; the resident flow applies
+    // deltas on device and skips this traffic.
+    check(cudaMemcpyAsync(Uk, d_Uk_, Uk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H Uk");
+    check(cudaMemcpyAsync(dUk, d_dUk_, dUk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H dUk");
+    check(cudaMemcpyAsync(d2Uk, d_d2Uk_, Uk_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H d2Uk");
+  }
   check(cudaStreamSynchronize(s), "ratioGrad stream sync");
 }
 
@@ -1063,6 +1069,7 @@ void launch_dense_ratio_grad(const void* owner,
                              const int* fun_Nee,
                              const int* fun_C,
                              bool force_full_upload,
+                             bool copy_uk_host,
                              double* vgl,
                              double* Uk,
                              double* dUk,
@@ -1073,7 +1080,7 @@ void launch_dense_ratio_grad(const void* owner,
                 gamma_offset, gamma_len, fun_cut, fun_NeI, fun_Nee, fun_C);
   const bool need_full = force_full_upload || !ws.hasFull();
   ws.launchRatioGrad(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, ee_temp, ei_temp, ei_full_r, ei_full_dr,
-                     need_full, vgl, Uk, dUk, d2Uk);
+                     need_full, copy_uk_host, vgl, Uk, dUk, d2Uk);
 }
 
 void launch_dense_recompute(const void* owner,

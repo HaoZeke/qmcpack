@@ -796,7 +796,8 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
                                      mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
                                      mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
                                      mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(), mem.cuda_fun_NeI.data(),
-                                     mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full && !resident_mode, mem.mw_vgl.data(),
+                                     mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full && !resident_mode,
+                                     /*copy_uk_host=*/!resident_mode, mem.mw_vgl.data(),
                                      mem.mw_Uk.data(), mem.mw_dUk.data(), mem.mw_d2Uk.data());
   mem.cuda_full_dirty = false;
 
@@ -809,14 +810,18 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
     wfc.cur_dUat[1] = mem.mw_vgl[iw][2];
     wfc.cur_dUat[2] = mem.mw_vgl[iw][3];
     wfc.cur_d2Uat   = mem.mw_vgl[iw][4];
-    for (int k = 0; k < Ne; ++k)
+    if (!resident_mode)
     {
-      wfc.newUk[k]   = mem.mw_Uk[static_cast<size_t>(iw) * Nep + k];
-      wfc.newd2Uk[k] = mem.mw_d2Uk[static_cast<size_t>(iw) * Nep + k];
-    }
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+      // Legacy host accept consumes these; the resident flow keeps them on device.
       for (int k = 0; k < Ne; ++k)
-        wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
+      {
+        wfc.newUk[k]   = mem.mw_Uk[static_cast<size_t>(iw) * Nep + k];
+        wfc.newd2Uk[k] = mem.mw_d2Uk[static_cast<size_t>(iw) * Nep + k];
+      }
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int k = 0; k < Ne; ++k)
+          wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
+    }
 
     // Resident mode: the acceptance ratio must see partner updates from earlier
     // accepts in this sweep, which live only on device -- vgl slot 5 carries the
@@ -989,8 +994,10 @@ void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
         }
         return;
       }
-      // Resident tables belong to another owner (or none): host accept + repack later.
-      mem.cuda_full_dirty = true;
+      // Resident mode never reaches here on a healthy flow: the preceding ratioGrad
+      // on this thread established ownership, and the host newUk mirrors were not
+      // filled -- a silent host accept would be wrong. Fail loudly instead.
+      throw std::runtime_error("JeeI CUDA: accept without resident workspace ownership");
     }
   }
 #endif
