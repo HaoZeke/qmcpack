@@ -56,6 +56,10 @@ struct JeeIOrbitalSoAMultiWalkerMem : public Resource
   unsigned long long cuda_static_version = 0;
   // Full e-I tables dirty after recompute/accept; ratioGrad can skip pack+H2D when clean
   bool cuda_full_dirty = true;
+  // Device Uat/dUat/d2Uat authoritative since the last host sync (accepts applied on device)
+  bool device_state_dirty = false;
+  // Workspace holding the resident state (thread_local on the crowd's thread)
+  void* resident_ws = nullptr;
   std::vector<int> cuda_gamma_offset;
   std::vector<int> cuda_gamma_len;
   std::vector<double> cuda_fun_cut;
@@ -126,6 +130,19 @@ void refresh_cuda_static_pack(const Array<FT*, 3>& F,
   mem.cuda_gamma_pool     = std::move(gpool);
   mem.cuda_static_version = jeei_cuda_pack_counter.fetch_add(1);
   mem.cuda_static_ready   = true;
+}
+/** D2H the device-resident Uat/dUat/d2Uat batch into mw_allUat (host mirrors are
+ *  attached references into it). Throws if the resident workspace was reassigned. */
+template<typename T>
+void jeei_sync_host_state(JeeIOrbitalSoAMultiWalkerMem<T>& mem, int nw, int Nep)
+{
+  if (!mem.device_state_dirty)
+    return;
+  auto* ws = static_cast<jeei_cuda::DenseWorkspace*>(mem.resident_ws);
+  if (!ws || !ws->sameOwner(&mem))
+    throw std::runtime_error("JeeI CUDA: resident state lost (workspace reassigned mid-block)");
+  ws->downloadState(nw, Nep, mem.mw_allUat.data());
+  mem.device_state_dirty = false;
 }
 } // namespace
 #endif
@@ -359,22 +376,23 @@ void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComp
       for (int iw = 0; iw < nw; ++iw)
       {
         auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-        if (recompute[iw])
+        // All walkers copy back: the kernel recomputes every walker from current
+        // host tables, and the result IS the resident device state from here on.
+        for (int e = 0; e < Ne; ++e)
         {
-          for (int e = 0; e < Ne; ++e)
-          {
-            wfc.Uat[e]   = mem.mw_Uat_batch[static_cast<size_t>(iw) * Nep + e];
-            wfc.d2Uat[e] = mem.mw_d2Uat_batch[static_cast<size_t>(iw) * Nep + e];
-            for (int idim = 0; idim < OHMMS_DIM; ++idim)
-              wfc.dUat.data(idim)[e] =
-                  mem.mw_dUat_batch[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + e];
-          }
+          wfc.Uat[e]   = mem.mw_Uat_batch[static_cast<size_t>(iw) * Nep + e];
+          wfc.d2Uat[e] = mem.mw_d2Uat_batch[static_cast<size_t>(iw) * Nep + e];
+          for (int idim = 0; idim < OHMMS_DIM; ++idim)
+            wfc.dUat.data(idim)[e] =
+                mem.mw_dUat_batch[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + e];
         }
-        // Compact lists needed for host acceptMove
+        // Compact lists needed for host accept bookkeeping and NLPP ratios
         wfc.build_compact_list(p_list[iw]);
       }
 
-      mem.cuda_full_dirty = false; // device eI full just uploaded
+      mem.cuda_full_dirty    = false; // device tables just uploaded
+      mem.device_state_dirty = false;
+      mem.resident_ws        = &jeei_cuda::default_workspace();
       if (leader.mw_mem_handle_)
         mem.mw_allUat.updateTo();
       return;
@@ -603,7 +621,12 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunc
       for (int k = 0; k < Ne; ++k)
         wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
 
-    ratios[iw] = std::exp(static_cast<PsiValue>(wfc.Uat[iat] - wfc.cur_Uat));
+    // Resident mode: the acceptance ratio must see partner updates from earlier
+    // accepts in this sweep, which live only on device -- vgl slot 5 carries the
+    // device-resident Uat[iat]. Legacy mode keeps the host mirror.
+    const valT uat_old = resident_mode ? static_cast<valT>(mem.mw_vgl[iw][5]) : wfc.Uat[iat];
+    wfc.DiffVal        = uat_old - wfc.cur_Uat;
+    ratios[iw]         = std::exp(static_cast<PsiValue>(wfc.DiffVal));
     if (need_grad && grad_new)
       for (int idim = 0; idim < OHMMS_DIM; ++idim)
         (*grad_new)[iw][idim] += wfc.cur_dUat[idim];
@@ -649,7 +672,7 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
   const size_t ee_temp_sz = static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nep;
   const size_t ei_temp_sz = static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nip;
   const bool temps_fresh  = mem.mw_ee_temp.size() != ee_temp_sz || mem.mw_ei_temp.size() != ei_temp_sz;
-  mem.mw_vgl.resize(nw, OHMMS_DIM + 2);
+  mem.mw_vgl.resize(nw, OHMMS_DIM + 3);
   mem.mw_ee_temp.resize(ee_temp_sz);
   mem.mw_ei_temp.resize(ei_temp_sz);
   mem.mw_ei_full_r.resize(static_cast<size_t>(nw) * Ne * Nip);
@@ -681,9 +704,28 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
   // refreshes it with force=true when parameters may have changed.
   refresh_cuda_static_pack(leader.F, iG, eG, mem, /*force=*/false);
 
-  // Pack+H2D full e-I only when this resource's tables are marked dirty or the
-  // thread-local workspace holds another owner's (or no) resident tables.
-  const bool need_full = mem.cuda_full_dirty || !jeei_cuda::default_workspace().ownsFull(&mem);
+  // Resident mode (persistent resource): the device owns geometry AND Uat state
+  // between host syncs; accepts run on device. Without a resource, fall back to the
+  // legacy per-call flow with host-side accept math.
+  const bool resident_mode = static_cast<bool>(leader.mw_mem_handle_);
+  auto& ws                 = jeei_cuda::default_workspace();
+  const bool need_full     = mem.cuda_full_dirty || !ws.ownsFull(&mem);
+  if (resident_mode && need_full && mem.device_state_dirty)
+  {
+    // State lives on some workspace; recover it to the host before re-seeding.
+    auto* rws = static_cast<jeei_cuda::DenseWorkspace*>(mem.resident_ws);
+    if (!rws || !rws->sameOwner(&mem))
+      throw std::runtime_error("JeeI CUDA: resident state lost (workspace reassigned mid-block)");
+    rws->downloadState(nw, Nep, mem.mw_allUat.data());
+    mem.device_state_dirty = false;
+  }
+  if (resident_mode && need_full)
+  {
+    mem.mw_ee_full_r.resize(static_cast<size_t>(nw) * Ne * Nep);
+    mem.mw_ee_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nep);
+    std::fill(mem.mw_ee_full_r.begin(), mem.mw_ee_full_r.end(), valT(0));
+    std::fill(mem.mw_ee_full_dr.begin(), mem.mw_ee_full_dr.end(), valT(0));
+  }
 
   for (int iw = 0; iw < nw; ++iw)
   {
@@ -721,7 +763,35 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
           for (int idim = 0; idim < OHMMS_DIM; ++idim)
             full_dr[idim * Ne * Nip + kel * Nip + a] = ei_full_dr[kel].data(idim)[a];
         }
+      if (resident_mode)
+      {
+        // ee lower triangle for the device-side accept old-side pass
+        const auto& ee_full_r  = ee_table.getDistances();
+        const auto& ee_full_dr = ee_table.getDisplacements();
+        valT* er               = mem.mw_ee_full_r.data() + static_cast<size_t>(iw) * Ne * Nep;
+        valT* ed               = mem.mw_ee_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nep;
+        for (int jl = 0; jl < Ne; ++jl)
+          for (int kel = 0; kel < jl; ++kel)
+          {
+            er[jl * Nep + kel] = ee_full_r[jl][kel];
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              ed[idim * Ne * Nep + jl * Nep + kel] = ee_full_dr[jl].data(idim)[kel];
+          }
+      }
     }
+  }
+
+  if (resident_mode && need_full)
+  {
+    auto& pws = jeei_cuda::prepare_dense_workspace(&mem, mem.cuda_static_version, nw, Ne, Nep, Ni, Nip, nfun,
+                                                   mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
+                                                   mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
+                                                   mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(),
+                                                   mem.cuda_fun_NeI.data(), mem.cuda_fun_Nee.data(),
+                                                   mem.cuda_fun_C.data());
+    pws.uploadFullGeometry(nw, Ne, Nep, Nip, mem.mw_ee_full_r.data(), mem.mw_ee_full_dr.data(),
+                           mem.mw_ei_full_r.data(), mem.mw_ei_full_dr.data(), mem.mw_allUat.data());
+    mem.resident_ws = &pws;
   }
 
   jeei_cuda::launch_dense_ratio_grad(&mem, mem.cuda_static_version, iat, nw, Ne, Nep, Ni, Nip, eG, iG, nfun,
@@ -730,7 +800,7 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
                                      mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
                                      mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
                                      mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(), mem.cuda_fun_NeI.data(),
-                                     mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full, mem.mw_vgl.data(),
+                                     mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full && !resident_mode, mem.mw_vgl.data(),
                                      mem.mw_Uk.data(), mem.mw_dUk.data(), mem.mw_d2Uk.data());
   mem.cuda_full_dirty = false;
 
@@ -752,7 +822,12 @@ void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctio
       for (int k = 0; k < Ne; ++k)
         wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
 
-    ratios[iw] = std::exp(static_cast<PsiValue>(wfc.Uat[iat] - wfc.cur_Uat));
+    // Resident mode: the acceptance ratio must see partner updates from earlier
+    // accepts in this sweep, which live only on device -- vgl slot 5 carries the
+    // device-resident Uat[iat]. Legacy mode keeps the host mirror.
+    const valT uat_old = resident_mode ? static_cast<valT>(mem.mw_vgl[iw][5]) : wfc.Uat[iat];
+    wfc.DiffVal        = uat_old - wfc.cur_Uat;
+    ratios[iw]         = std::exp(static_cast<PsiValue>(wfc.DiffVal));
     if (need_grad && grad_new)
       for (int idim = 0; idim < OHMMS_DIM; ++idim)
         (*grad_new)[iw][idim] += wfc.cur_dUat[idim];
@@ -786,6 +861,43 @@ void JeeIOrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
   const int nw = wfc_list.size();
   for (int iw = 0; iw < nw; iw++)
     ratios[iw] = wfc_list[iw].ratio(p_list[iw], iat);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     int iat,
+                                     std::vector<GradType>& grad_now) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+    {
+      auto& mem = leader.mw_mem_handle_.getResource();
+      auto& ws  = jeei_cuda::default_workspace();
+      if (mem.device_state_dirty)
+      {
+        if (ws.ownsFull(&mem))
+        {
+          // dUat lives on device between syncs; gather just the moved electron's row
+          std::vector<double> g3(static_cast<size_t>(3) * nw);
+          ws.gatherGrad(&mem, iat, nw, static_cast<int>(leader.Nelec_padded), g3.data());
+          for (int iw = 0; iw < nw; ++iw)
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              grad_now[iw][idim] = g3[static_cast<size_t>(iw) * 3 + idim];
+          return;
+        }
+        jeei_sync_host_state(mem, nw, static_cast<int>(leader.Nelec_padded));
+      }
+    }
+  }
+#endif
+  for (int iw = 0; iw < nw; iw++)
+    grad_now[iw] = wfc_list[iw].evalGrad(p_list[iw], iat);
 }
 
 template<typename FT>
@@ -826,6 +938,67 @@ void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
 {
   assert(this == &wfc_list.getLeader());
   const int nw = wfc_list.size();
+
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (wfc_leader.mw_mem_handle_)
+    {
+      auto& mem = wfc_leader.mw_mem_handle_.getResource();
+      auto& ws  = jeei_cuda::default_workspace();
+      if (ws.ownsFull(&mem))
+      {
+        // Device-side accept: old-side dense pass + delta apply + row patch all run
+        // on device from resident buffers; the host does only compact-list and
+        // log-value bookkeeping. Host Uat mirrors go stale until the next sync.
+        const int Ne  = wfc_leader.Nelec;
+        const int Nep = static_cast<int>(wfc_leader.Nelec_padded);
+        const int Ni  = wfc_leader.Nion;
+        const int Nip = getAlignedSize<valT>(Ni);
+        std::vector<int> flags(nw, 0);
+        bool any = false;
+        for (int iw = 0; iw < nw; ++iw)
+          if (isAccepted[iw])
+          {
+            flags[iw] = 1;
+            any       = true;
+          }
+        if (any)
+        {
+          ws.launchAccept(&mem, iat, nw, Ne, Nep, Ni, Nip, wfc_leader.eGroups,
+                          wfc_leader.iGroups * wfc_leader.eGroups * wfc_leader.eGroups, flags.data());
+          for (int iw = 0; iw < nw; ++iw)
+          {
+            if (!isAccepted[iw])
+              continue;
+            auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+            auto& P   = p_list[iw];
+            wfc.log_value_ += wfc.DiffVal;
+            const auto& eI_table = P.getDistTableAB(wfc_leader.ei_Table_ID_);
+            wfc.ions_nearby_old.clear();
+            const auto& dist_old = eI_table.getDistRow(iat);
+            for (int jat = 0; jat < Ni; ++jat)
+              if (dist_old[jat] < wfc.Ion_cutoff[jat])
+                wfc.ions_nearby_old.push_back(jat);
+            wfc.ions_nearby_new.clear();
+            const auto& dist_new = eI_table.getTempDists();
+            for (int jat = 0; jat < Ni; ++jat)
+              if (dist_new[jat] < wfc.Ion_cutoff[jat])
+                wfc.ions_nearby_new.push_back(jat);
+            wfc.updateCompactListAfterAccept(P, iat);
+          }
+          mem.device_state_dirty = true;
+          mem.resident_ws        = &ws;
+        }
+        return;
+      }
+      // Resident tables belong to another owner (or none): host accept + repack later.
+      mem.cuda_full_dirty = true;
+    }
+  }
+#endif
+
   for (int iw = 0; iw < nw; iw++)
   {
     if (!isAccepted[iw])
@@ -840,40 +1013,7 @@ void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
     {
       auto& mem = wfc_leader.mw_mem_handle_.getResource();
       mem.mw_allUat.updateTo();
-#if defined(ENABLE_CUDA)
-      auto& ws = jeei_cuda::default_workspace();
-      if (ws.ownsFull(&mem))
-      {
-        // Patch accepted walkers' e-I rows on device so temps-only ratioGrad stays valid.
-        // This component's accept runs before the ParticleSet accept, so getDistRow(iat)
-        // still holds the pre-move row; the accepted position lives in the temp row.
-        const int Ne        = wfc_leader.Nelec;
-        const int Ni        = wfc_leader.Nion;
-        const int Nip       = getAlignedSize<valT>(Ni);
-        std::vector<double> r_row(Nip, 0.0), dr_row(3 * Nip, 0.0);
-        for (int iw = 0; iw < nw; ++iw)
-        {
-          if (!isAccepted[iw])
-            continue;
-          const auto& eI_table = p_list[iw].getDistTableAB(wfc_leader.ei_Table_ID_);
-          const auto& r        = eI_table.getTempDists();
-          const auto& dr       = eI_table.getTempDispls();
-          for (int a = 0; a < Ni; ++a)
-            r_row[a] = static_cast<double>(r[a]);
-          for (int idim = 0; idim < OHMMS_DIM; ++idim)
-            for (int a = 0; a < Ni; ++a)
-              dr_row[idim * Nip + a] = static_cast<double>(dr.data(idim)[a]);
-          ws.updateEiRow(&mem, iw, iat, Ne, Nip, Ni, r_row.data(), dr_row.data());
-        }
-      }
-      else
-      {
-        // Resident tables belong to another owner (or none): repack on next ratioGrad.
-        mem.cuda_full_dirty = true;
-      }
-#else
       mem.cuda_full_dirty = true;
-#endif
     }
   }
 }
@@ -892,6 +1032,14 @@ void JeeIOrbitalSoA<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionCom
     const std::vector<bool> recompute_all(nw, true);
     mw_recompute(wfc_list, p_list, recompute_all);
   }
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+      jeei_sync_host_state(leader.mw_mem_handle_.getResource(), nw, static_cast<int>(leader.Nelec_padded));
+  }
+#endif
   for (int iw = 0; iw < nw; iw++)
   {
     auto& wfc      = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
@@ -906,6 +1054,14 @@ void JeeIOrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctio
 {
   assert(this == &wfc_list.getLeader());
   const int nw = wfc_list.size();
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+      jeei_sync_host_state(leader.mw_mem_handle_.getResource(), nw, static_cast<int>(leader.Nelec_padded));
+  }
+#endif
   for (int iw = 0; iw < nw; iw++)
     wfc_list[iw].evaluateRatios(vp_list[iw], ratios[iw]);
 }

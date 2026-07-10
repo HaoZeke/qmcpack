@@ -154,6 +154,7 @@ __global__ void dense_ratio_grad_kernel(const int jel,
                                         const int* __restrict__ fun_NeI,
                                         const int* __restrict__ fun_Nee,
                                         const int* __restrict__ fun_C,
+                                        const double* __restrict__ Uat_state,
                                         double* __restrict__ vgl,
                                         double* __restrict__ Uk,
                                         double* __restrict__ dUk,
@@ -262,12 +263,15 @@ __global__ void dense_ratio_grad_kernel(const int jel,
   }
   if (tid == 0)
   {
-    double* v = vgl + iw * 5;
+    double* v = vgl + iw * 6;
     v[0] = sh[0];
     v[1] = sh[256];
     v[2] = sh[512];
     v[3] = sh[768];
     v[4] = sh[1024];
+    // pre-accept Uat[jel] from the resident state: the acceptance ratio must see
+    // partner updates from earlier accepts in this sweep, which live device-side
+    v[5] = Uat_state[iw * Ne_pad + jel];
   }
 }
 
@@ -433,6 +437,181 @@ __global__ void dense_recompute_kernel(const int nw,
   }
 }
 
+// Device accept: old-side dense pass from resident full tables, delta-apply into
+// resident Uat state, then patch the moved electron's ee/ei rows from the resident
+// temp buffers (uploaded by the preceding ratioGrad on the same stream).
+__global__ void dense_accept_kernel(const int jel,
+                                    const int nw,
+                                    const int Nelec,
+                                    const int Ne_pad,
+                                    const int Nion,
+                                    const int Ni_pad,
+                                    const int eGroups,
+                                    const int nfun,
+                                    const int* __restrict__ accepted,
+                                    const double* __restrict__ ee_temp,
+                                    const double* __restrict__ ei_temp,
+                                    double* __restrict__ ee_full_r,
+                                    double* __restrict__ ee_full_dr,
+                                    double* __restrict__ ei_full_r,
+                                    double* __restrict__ ei_full_dr,
+                                    const int* __restrict__ e_grp,
+                                    const int* __restrict__ i_grp,
+                                    const double* __restrict__ ion_cut,
+                                    const double* __restrict__ gamma_pool,
+                                    const int* __restrict__ gamma_offset,
+                                    const double* __restrict__ fun_cut,
+                                    const int* __restrict__ fun_NeI,
+                                    const int* __restrict__ fun_Nee,
+                                    const int* __restrict__ fun_C,
+                                    const double* __restrict__ vgl,
+                                    const double* __restrict__ Uk,
+                                    const double* __restrict__ dUk,
+                                    const double* __restrict__ d2Uk,
+                                    double* __restrict__ Uat,
+                                    double* __restrict__ dUat,
+                                    double* __restrict__ d2Uat)
+{
+  const int iw = blockIdx.x;
+  if (iw >= nw || !accepted[iw])
+    return;
+
+  const int tid       = threadIdx.x;
+  const int nthr      = blockDim.x;
+  const double lapfac = 2.0;
+
+  const double* fr  = ei_full_r + size_t(iw) * Nelec * Ni_pad;
+  const double* fdr = ei_full_dr + size_t(iw) * 3 * Nelec * Ni_pad;
+  double* eer       = ee_full_r + size_t(iw) * Nelec * Ne_pad;
+  double* eed       = ee_full_dr + size_t(iw) * 3 * Nelec * Ne_pad;
+
+  const double* Uk_w  = Uk + size_t(iw) * Ne_pad;
+  const double* d2_w  = d2Uk + size_t(iw) * Ne_pad;
+  const double* dUk_w = dUk + size_t(iw) * 3 * Ne_pad;
+  double* U_s         = Uat + size_t(iw) * Ne_pad;
+  double* d2_s        = d2Uat + size_t(iw) * Ne_pad;
+  double* dU_s        = dUat + size_t(iw) * 3 * Ne_pad;
+
+  const int jg          = e_grp[jel];
+  const size_t plane_ee = size_t(Nelec) * Ne_pad;
+  const size_t plane_ei = size_t(Nelec) * Ni_pad;
+
+  // Phase 1: old-side contributions of jel to each partner from resident tables,
+  // applied together with the resident new-side Uk buffers.
+  for (int kel = tid; kel < Nelec; kel += nthr)
+  {
+    double uk = 0.0, d2k = 0.0;
+    double duk0 = 0.0, duk1 = 0.0, duk2 = 0.0;
+
+    if (kel != jel)
+    {
+      double r_jk, jkx, jky, jkz;
+      if (kel < jel)
+      {
+        r_jk = eer[size_t(jel) * Ne_pad + kel];
+        jkx  = eed[0 * plane_ee + size_t(jel) * Ne_pad + kel];
+        jky  = eed[1 * plane_ee + size_t(jel) * Ne_pad + kel];
+        jkz  = eed[2 * plane_ee + size_t(jel) * Ne_pad + kel];
+      }
+      else
+      {
+        // pair stored in row kel, column jel with roles swapped: displacement flips sign
+        r_jk = eer[size_t(kel) * Ne_pad + jel];
+        jkx  = -eed[0 * plane_ee + size_t(kel) * Ne_pad + jel];
+        jky  = -eed[1 * plane_ee + size_t(kel) * Ne_pad + jel];
+        jkz  = -eed[2 * plane_ee + size_t(kel) * Ne_pad + jel];
+      }
+      const int kg = e_grp[kel];
+
+      for (int iat = 0; iat < Nion; ++iat)
+      {
+        const double r_jI = fr[size_t(jel) * Ni_pad + iat];
+        if (r_jI >= ion_cut[iat])
+          continue;
+        const double r_kI = fr[size_t(kel) * Ni_pad + iat];
+        if (r_kI >= ion_cut[iat])
+          continue;
+
+        const int ig  = i_grp[iat];
+        const int fid = (ig * eGroups + jg) * eGroups + kg;
+        if (fid < 0 || fid >= nfun || gamma_offset[fid] < 0)
+          continue;
+
+        const double kIx = fdr[0 * plane_ei + size_t(kel) * Ni_pad + iat];
+        const double kIy = fdr[1 * plane_ei + size_t(kel) * Ni_pad + iat];
+        const double kIz = fdr[2 * plane_ei + size_t(kel) * Ni_pad + iat];
+
+        double val, g0, g1, g2, h00, h11, h22, h01, h02;
+        poly3d_eval_one(r_jk, r_jI, r_kI, fun_cut[fid], fun_NeI[fid], fun_Nee[fid], fun_C[fid],
+                        gamma_pool + gamma_offset[fid], val, g0, g1, g2, h00, h11, h22, h01, h02);
+
+        uk += val;
+        duk0 += kIx * g2 - jkx * g0;
+        duk1 += kIy * g2 - jky * g0;
+        duk2 += kIz * g2 - jkz * g0;
+        d2k -= h00 + h22 + lapfac * (g0 + g2) - 2.0 * h02 * (kIx * jkx + kIy * jky + kIz * jkz);
+      }
+    }
+
+    U_s[kel] += Uk_w[kel] - uk;
+    d2_s[kel] += d2_w[kel] - d2k;
+    dU_s[0 * Ne_pad + kel] += dUk_w[0 * Ne_pad + kel] - duk0;
+    dU_s[1 * Ne_pad + kel] += dUk_w[1 * Ne_pad + kel] - duk1;
+    dU_s[2 * Ne_pad + kel] += dUk_w[2 * Ne_pad + kel] - duk2;
+  }
+  __syncthreads();
+
+  // Phase 2: moved electron takes the batched-VGL values; patch resident rows.
+  if (tid == 0)
+  {
+    const double* v      = vgl + size_t(iw) * 6;
+    U_s[jel]             = v[0];
+    dU_s[0 * Ne_pad + jel] = v[1];
+    dU_s[1 * Ne_pad + jel] = v[2];
+    dU_s[2 * Ne_pad + jel] = v[3];
+    d2_s[jel]            = v[4];
+  }
+
+  const double* ee_t = ee_temp + size_t(iw) * 4 * Ne_pad;
+  const double* ei_t = ei_temp + size_t(iw) * 4 * Ni_pad;
+  for (int a = tid; a < Nion; a += nthr)
+  {
+    ei_full_r[size_t(iw) * plane_ei + size_t(jel) * Ni_pad + a] = ei_t[a];
+    for (int idim = 0; idim < 3; ++idim)
+      ei_full_dr[size_t(iw) * 3 * plane_ei + idim * plane_ei + size_t(jel) * Ni_pad + a] =
+          ei_t[(idim + 1) * Ni_pad + a];
+  }
+  for (int kel = tid; kel < Nelec; kel += nthr)
+  {
+    if (kel == jel)
+      continue;
+    if (kel < jel)
+    {
+      eer[size_t(jel) * Ne_pad + kel] = ee_t[kel];
+      for (int idim = 0; idim < 3; ++idim)
+        eed[idim * plane_ee + size_t(jel) * Ne_pad + kel] = ee_t[(idim + 1) * Ne_pad + kel];
+    }
+    else
+    {
+      eer[size_t(kel) * Ne_pad + jel] = ee_t[kel];
+      for (int idim = 0; idim < 3; ++idim)
+        eed[idim * plane_ee + size_t(kel) * Ne_pad + jel] = -ee_t[(idim + 1) * Ne_pad + kel];
+    }
+  }
+}
+
+__global__ void gather_grad_kernel(const int jel, const int nw, const int Ne_pad,
+                                   const double* __restrict__ dUat, double* __restrict__ out)
+{
+  const int iw = blockIdx.x * blockDim.x + threadIdx.x;
+  if (iw >= nw)
+    return;
+  const double* dU_s = dUat + size_t(iw) * 3 * Ne_pad;
+  out[iw * 3 + 0]    = dU_s[0 * Ne_pad + jel];
+  out[iw * 3 + 1]    = dU_s[1 * Ne_pad + jel];
+  out[iw * 3 + 2]    = dU_s[2 * Ne_pad + jel];
+}
+
 } // namespace
 
 DenseWorkspace::DenseWorkspace() = default;
@@ -479,6 +658,8 @@ void DenseWorkspace::freeAll()
   free_p(d_Uat_);
   free_p(d_dUat_);
   free_p(d_d2Uat_);
+  free_p(d_grad_);
+  free_p(d_accept_);
   free_p(d_egrp_);
   free_p(d_igrp_);
   free_p(d_goff_);
@@ -523,7 +704,7 @@ void DenseWorkspace::ensureCapacity(int nw,
   const size_t fd_sz     = size_t(cap_nw_) * 3 * cap_Ne_ * cap_Nip_;
   const size_t ee_fr_sz  = size_t(cap_nw_) * cap_Ne_ * cap_Nep_;
   const size_t ee_fd_sz  = size_t(cap_nw_) * 3 * cap_Ne_ * cap_Nep_;
-  const size_t vgl_sz    = size_t(cap_nw_) * 5;
+  const size_t vgl_sz    = size_t(cap_nw_) * 6;
   const size_t Uk_sz     = size_t(cap_nw_) * cap_Nep_;
   const size_t dUk_sz    = size_t(cap_nw_) * 3 * cap_Nep_;
   const size_t Uat_sz    = size_t(cap_nw_) * cap_Nep_;
@@ -552,6 +733,8 @@ void DenseWorkspace::ensureCapacity(int nw,
   check(cudaMalloc(&d_Uat_, Uat_sz * sizeof(double)), "malloc Uat");
   check(cudaMalloc(&d_dUat_, dUat_sz * sizeof(double)), "malloc dUat");
   check(cudaMalloc(&d_d2Uat_, Uat_sz * sizeof(double)), "malloc d2Uat");
+  check(cudaMalloc(&d_grad_, size_t(cap_nw_) * 3 * sizeof(double)), "malloc grad");
+  check(cudaMalloc(&d_accept_, size_t(cap_nw_) * sizeof(int)), "malloc accept");
 }
 
 void DenseWorkspace::uploadStatic(int Nelec,
@@ -643,7 +826,7 @@ void DenseWorkspace::launchRatioGrad(int jel,
 
   const size_t ee_sz  = size_t(nw) * 4 * Ne_pad;
   const size_t ei_sz  = size_t(nw) * 4 * Ni_pad;
-  const size_t vgl_sz = size_t(nw) * 5;
+  const size_t vgl_sz = size_t(nw) * 6;
   const size_t Uk_sz  = size_t(nw) * Ne_pad;
   const size_t dUk_sz = size_t(nw) * 3 * Ne_pad;
 
@@ -659,7 +842,7 @@ void DenseWorkspace::launchRatioGrad(int jel,
     block *= 2;
   dense_ratio_grad_kernel<<<nw, block, 0, s>>>(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, d_ee_, d_ei_, d_fr_,
                                                d_fd_, d_egrp_, d_igrp_, d_ion_cut_, d_gamma_, d_goff_, d_fun_cut_, d_NeI_,
-                                               d_Nee_, d_C_, d_vgl_, d_Uk_, d_dUk_, d_d2Uk_);
+                                               d_Nee_, d_C_, d_Uat_, d_vgl_, d_Uk_, d_dUk_, d_d2Uk_);
   check(cudaGetLastError(), "ratioGrad kernel");
 
   check(cudaMemcpyAsync(vgl, d_vgl_, vgl_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H vgl");
@@ -718,6 +901,73 @@ void DenseWorkspace::launchRecompute(int nw,
   check(cudaStreamSynchronize(s), "recompute stream sync");
 }
 
+
+void DenseWorkspace::uploadFullGeometry(int nw, int Nelec, int Ne_pad, int Ni_pad, const double* ee_full_r,
+                                        const double* ee_full_dr, const double* ei_full_r, const double* ei_full_dr,
+                                        const double* uat_state)
+{
+  ensureStream();
+  auto s                = static_cast<cudaStream_t>(stream_);
+  const size_t ee_fr_sz = size_t(nw) * Nelec * Ne_pad;
+  const size_t ee_fd_sz = size_t(nw) * 3 * Nelec * Ne_pad;
+  const size_t fr_sz    = size_t(nw) * Nelec * Ni_pad;
+  const size_t fd_sz    = size_t(nw) * 3 * Nelec * Ni_pad;
+  const size_t U_sz     = size_t(nw) * Ne_pad;
+  check(cudaMemcpyAsync(d_ee_full_r_, ee_full_r, ee_fr_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D geo ee r");
+  check(cudaMemcpyAsync(d_ee_full_dr_, ee_full_dr, ee_fd_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D geo ee d");
+  check(cudaMemcpyAsync(d_fr_, ei_full_r, fr_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D geo ei r");
+  check(cudaMemcpyAsync(d_fd_, ei_full_dr, fd_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D geo ei d");
+  // uat_state uses the pooled mw_allUat layout: [Uat | dUat | d2Uat] batches back-to-back
+  check(cudaMemcpyAsync(d_Uat_, uat_state, U_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D state U");
+  check(cudaMemcpyAsync(d_dUat_, uat_state + U_sz, 3 * U_sz * sizeof(double), cudaMemcpyHostToDevice, s), "H2D state dU");
+  check(cudaMemcpyAsync(d_d2Uat_, uat_state + 4 * U_sz, U_sz * sizeof(double), cudaMemcpyHostToDevice, s),
+        "H2D state d2U");
+  full_resident_ = true;
+}
+
+void DenseWorkspace::downloadState(int nw, int Ne_pad, double* uat_state)
+{
+  ensureStream();
+  auto s            = static_cast<cudaStream_t>(stream_);
+  const size_t U_sz = size_t(nw) * Ne_pad;
+  check(cudaMemcpyAsync(uat_state, d_Uat_, U_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H state U");
+  check(cudaMemcpyAsync(uat_state + U_sz, d_dUat_, 3 * U_sz * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H state dU");
+  check(cudaMemcpyAsync(uat_state + 4 * U_sz, d_d2Uat_, U_sz * sizeof(double), cudaMemcpyDeviceToHost, s),
+        "D2H state d2U");
+  check(cudaStreamSynchronize(s), "state sync");
+}
+
+void DenseWorkspace::launchAccept(const void* owner, int jel, int nw, int Nelec, int Ne_pad, int Nion, int Ni_pad,
+                                  int eGroups, int nfun, const int* accepted)
+{
+  if (!ownsFull(owner))
+    throw std::runtime_error("JeeIDenseCUDA: accept without resident tables");
+  ensureStream();
+  auto s = static_cast<cudaStream_t>(stream_);
+  check(cudaMemcpyAsync(d_accept_, accepted, nw * sizeof(int), cudaMemcpyHostToDevice, s), "H2D accept flags");
+  int block = 32;
+  while (block < Nelec && block < 256)
+    block *= 2;
+  dense_accept_kernel<<<nw, block, 0, s>>>(jel, nw, Nelec, Ne_pad, Nion, Ni_pad, eGroups, nfun, d_accept_, d_ee_, d_ei_,
+                                           d_ee_full_r_, d_ee_full_dr_, d_fr_, d_fd_, d_egrp_, d_igrp_, d_ion_cut_,
+                                           d_gamma_, d_goff_, d_fun_cut_, d_NeI_, d_Nee_, d_C_, d_vgl_, d_Uk_, d_dUk_,
+                                           d_d2Uk_, d_Uat_, d_dUat_, d_d2Uat_);
+  check(cudaGetLastError(), "accept kernel");
+  // no sync: subsequent same-stream work sees ordered state
+}
+
+void DenseWorkspace::gatherGrad(const void* owner, int jel, int nw, int Ne_pad, double* grad3)
+{
+  if (!ownsFull(owner))
+    throw std::runtime_error("JeeIDenseCUDA: gatherGrad without resident state");
+  ensureStream();
+  auto s = static_cast<cudaStream_t>(stream_);
+  gather_grad_kernel<<<(nw + 127) / 128, 128, 0, s>>>(jel, nw, Ne_pad, d_dUat_, d_grad_);
+  check(cudaGetLastError(), "grad kernel");
+  check(cudaMemcpyAsync(grad3, d_grad_, size_t(nw) * 3 * sizeof(double), cudaMemcpyDeviceToHost, s), "D2H grad");
+  check(cudaStreamSynchronize(s), "grad sync");
+}
+
 DenseWorkspace& default_workspace()
 {
   // One workspace per host thread: batched drivers run crowds in parallel OpenMP.
@@ -760,6 +1010,31 @@ static void ensure_static(DenseWorkspace& ws,
                     fun_cut, fun_NeI, fun_Nee, fun_C);
     ws.setOwner(owner, static_ver);
   }
+}
+
+DenseWorkspace& prepare_dense_workspace(const void* owner,
+                                        unsigned long long static_ver,
+                                        int nw,
+                                        int Nelec,
+                                        int Ne_pad,
+                                        int Nion,
+                                        int Ni_pad,
+                                        int nfun,
+                                        const int* e_grp,
+                                        const int* i_grp,
+                                        const double* ion_cut,
+                                        const double* gamma_pool,
+                                        const int* gamma_offset,
+                                        const int* gamma_len,
+                                        const double* fun_cut,
+                                        const int* fun_NeI,
+                                        const int* fun_Nee,
+                                        const int* fun_C)
+{
+  auto& ws = default_workspace();
+  ensure_static(ws, owner, static_ver, nw, Nelec, Ne_pad, Nion, Ni_pad, nfun, e_grp, i_grp, ion_cut, gamma_pool,
+                gamma_offset, gamma_len, fun_cut, fun_NeI, fun_Nee, fun_C);
+  return ws;
 }
 
 void launch_dense_ratio_grad(const void* owner,

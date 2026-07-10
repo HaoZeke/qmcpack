@@ -501,6 +501,11 @@ public:
                     int iat,
                     std::vector<PsiValue>& ratios) const override;
 
+  void mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                   const RefVectorWithLeader<ParticleSet>& p_list,
+                   int iat,
+                   std::vector<GradType>& grad_now) const override;
+
   void mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                     const RefVectorWithLeader<ParticleSet>& p_list,
                     int iat,
@@ -509,60 +514,11 @@ public:
 
   inline void restore(int iat) override {}
 
-  void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override
+  /** Incremental elecs_inside/compact-list update after an accepted move of iat.
+   *  Requires ions_nearby_old/ions_nearby_new to describe the old/new positions. */
+  void updateCompactListAfterAccept(ParticleSet& P, int iat)
   {
     const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
-    const auto& ee_table = P.getDistTableAA(ee_Table_ID_);
-    // Old side always from host (pre-move distances). Dense when offload for pair-set match.
-    if (use_offload_)
-      computeU3_dense(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
-                      ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
-    else
-      computeU3(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
-                ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
-    // New side: after CUDA/offload mw_ratioGrad (ORB_PBYP_PARTIAL), cur_*/newUk already match host
-    // (golden + agreement tests). Recompute new only for ratio-only moves that never filled VGL.
-    // Skipping the second host dense pass halves the accept cost.
-    if (UpdateMode == ORB_PBYP_RATIO)
-    {
-      if (use_offload_)
-        computeU3_dense(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
-                        ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
-      else
-        computeU3(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
-                  ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
-    }
-    else if (use_offload_)
-    {
-      // PARTIAL: CUDA filled VGL buffers; only rebuild ion neighbor ids for compact-list maintenance.
-      ions_nearby_new.clear();
-      const auto& distjI_new = eI_table.getTempDists();
-      for (int jat = 0; jat < Nion; ++jat)
-        if (distjI_new[jat] < Ion_cutoff[jat])
-          ions_nearby_new.push_back(jat);
-    }
-
-#pragma omp simd
-    for (int jel = 0; jel < Nelec; jel++)
-    {
-      Uat[jel] += newUk[jel] - oldUk[jel];
-      d2Uat[jel] += newd2Uk[jel] - oldd2Uk[jel];
-    }
-    for (int idim = 0; idim < OHMMS_DIM; ++idim)
-    {
-      valT* restrict save_g      = dUat.data(idim);
-      const valT* restrict new_g = newdUk.data(idim);
-      const valT* restrict old_g = olddUk.data(idim);
-#pragma omp simd aligned(save_g, new_g, old_g : QMC_SIMD_ALIGNMENT)
-      for (int jel = 0; jel < Nelec; jel++)
-        save_g[jel] += new_g[jel] - old_g[jel];
-    }
-
-    log_value_ += Uat[iat] - cur_Uat;
-    Uat[iat]   = cur_Uat;
-    dUat(iat)  = cur_dUat;
-    d2Uat[iat] = cur_d2Uat;
-
     const int ig = P.GroupID[iat];
     // update compact list elecs_inside
     // if the old position exists in elecs_inside
@@ -621,6 +577,63 @@ public:
         elecs_inside_displ(ig, jat).push_back(eI_table.getTempDispls()[jat]);
       }
     }
+    }
+
+  void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override
+  {
+    const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
+    const auto& ee_table = P.getDistTableAA(ee_Table_ID_);
+    // Old side always from host (pre-move distances). Dense when offload for pair-set match.
+    if (use_offload_)
+      computeU3_dense(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
+                      ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
+    else
+      computeU3(P, iat, eI_table.getDistRow(iat), eI_table.getDisplRow(iat), ee_table.getOldDists(),
+                ee_table.getOldDispls(), Uat[iat], dUat_temp, d2Uat[iat], oldUk, olddUk, oldd2Uk, ions_nearby_old);
+    // New side: after CUDA/offload mw_ratioGrad (ORB_PBYP_PARTIAL), cur_*/newUk already match host
+    // (golden + agreement tests). Recompute new only for ratio-only moves that never filled VGL.
+    // Skipping the second host dense pass halves the accept cost.
+    if (UpdateMode == ORB_PBYP_RATIO)
+    {
+      if (use_offload_)
+        computeU3_dense(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
+                        ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
+      else
+        computeU3(P, iat, eI_table.getTempDists(), eI_table.getTempDispls(), ee_table.getTempDists(),
+                  ee_table.getTempDispls(), cur_Uat, cur_dUat, cur_d2Uat, newUk, newdUk, newd2Uk, ions_nearby_new);
+    }
+    else if (use_offload_)
+    {
+      // PARTIAL: CUDA filled VGL buffers; only rebuild ion neighbor ids for compact-list maintenance.
+      ions_nearby_new.clear();
+      const auto& distjI_new = eI_table.getTempDists();
+      for (int jat = 0; jat < Nion; ++jat)
+        if (distjI_new[jat] < Ion_cutoff[jat])
+          ions_nearby_new.push_back(jat);
+    }
+
+#pragma omp simd
+    for (int jel = 0; jel < Nelec; jel++)
+    {
+      Uat[jel] += newUk[jel] - oldUk[jel];
+      d2Uat[jel] += newd2Uk[jel] - oldd2Uk[jel];
+    }
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+    {
+      valT* restrict save_g      = dUat.data(idim);
+      const valT* restrict new_g = newdUk.data(idim);
+      const valT* restrict old_g = olddUk.data(idim);
+#pragma omp simd aligned(save_g, new_g, old_g : QMC_SIMD_ALIGNMENT)
+      for (int jel = 0; jel < Nelec; jel++)
+        save_g[jel] += new_g[jel] - old_g[jel];
+    }
+
+    log_value_ += Uat[iat] - cur_Uat;
+    Uat[iat]   = cur_Uat;
+    dUat(iat)  = cur_dUat;
+    d2Uat[iat] = cur_d2Uat;
+
+    updateCompactListAfterAccept(P, iat);
   }
 
   void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,

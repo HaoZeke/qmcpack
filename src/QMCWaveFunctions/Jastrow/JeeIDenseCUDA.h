@@ -53,6 +53,37 @@ public:
                   const double* ei_full_r,
                   const double* ei_full_dr);
 
+  /** Upload full ee (lower triangle) + e-I tables and the Uat/dUat/d2Uat state
+   *  (mw_allUat batch layout) so the device becomes authoritative mid-block. */
+  void uploadFullGeometry(int nw,
+                          int Nelec,
+                          int Ne_pad,
+                          int Ni_pad,
+                          const double* ee_full_r,
+                          const double* ee_full_dr,
+                          const double* ei_full_r,
+                          const double* ei_full_dr,
+                          const double* uat_state);
+
+  /** D2H the resident Uat/dUat/d2Uat batch into the mw_allUat host buffer. */
+  void downloadState(int nw, int Ne_pad, double* uat_state);
+
+  /** Device-side accept: old-side dense pass from resident tables, apply new-old
+   *  deltas into resident Uat state, patch moved ee/ei rows from resident temps. */
+  void launchAccept(const void* owner,
+                    int jel,
+                    int nw,
+                    int Nelec,
+                    int Ne_pad,
+                    int Nion,
+                    int Ni_pad,
+                    int eGroups,
+                    int nfun,
+                    const int* accepted);
+
+  /** D2H dUat[jel] for all walkers (3*nw doubles, dim-major per walker). */
+  void gatherGrad(const void* owner, int jel, int nw, int Ne_pad, double* grad3);
+
   /** Patch one electron's e-I row after accept (avoids full re-upload).
    *  No-op unless this workspace's resident tables belong to @p owner. */
   void updateEiRow(const void* owner,
@@ -133,6 +164,8 @@ private:
   double *d_ion_cut_ = nullptr, *d_gamma_ = nullptr, *d_fun_cut_ = nullptr;
   double *d_vgl_ = nullptr, *d_Uk_ = nullptr, *d_dUk_ = nullptr, *d_d2Uk_ = nullptr;
   double *d_Uat_ = nullptr, *d_dUat_ = nullptr, *d_d2Uat_ = nullptr;
+  double* d_grad_ = nullptr;
+  int* d_accept_  = nullptr;
   int *d_egrp_ = nullptr, *d_igrp_ = nullptr, *d_goff_ = nullptr, *d_glen_ = nullptr;
   int *d_NeI_ = nullptr, *d_Nee_ = nullptr, *d_C_ = nullptr;
 
@@ -150,6 +183,27 @@ private:
 };
 
 DenseWorkspace& default_workspace();
+
+/** ensureCapacity + static upload on the calling thread's workspace (for callers
+ *  that upload geometry/state explicitly before launching kernels). */
+DenseWorkspace& prepare_dense_workspace(const void* owner,
+                                        unsigned long long static_ver,
+                                        int nw,
+                                        int Nelec,
+                                        int Ne_pad,
+                                        int Nion,
+                                        int Ni_pad,
+                                        int nfun,
+                                        const int* e_grp,
+                                        const int* i_grp,
+                                        const double* ion_cut,
+                                        const double* gamma_pool,
+                                        const int* gamma_offset,
+                                        const int* gamma_len,
+                                        const double* fun_cut,
+                                        const int* fun_NeI,
+                                        const int* fun_Nee,
+                                        const int* fun_C);
 
 void launch_dense_ratio_grad(const void* owner,
                              unsigned long long static_ver,

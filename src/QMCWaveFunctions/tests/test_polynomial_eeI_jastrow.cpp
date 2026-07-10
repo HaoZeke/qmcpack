@@ -851,16 +851,16 @@ TEST_CASE("JeeIOrbitalSoA golden master multi-walker offload recompute+accept", 
   j3_off.mw_accept_rejectMove(wfc_list, p_list, 0, accepted);
   elec_o.acceptMove(0);
   elec2.acceptMove(0);
-  for (auto* j3p : {&j3_off, j3_c})
-  {
-    auto& P  = (j3p == &j3_off) ? elec_o : elec2;
-    GradType g1 = j3p->evalGrad(P, 1);
+  // Production parity: drivers read the post-accept gradient through mw_evalGrad
+  // (device-resident state); single-walker evalGrad host mirrors sync at evaluateGL.
+  std::vector<GradType> g1_mw(2, GradType(0));
+  j3_off.mw_evalGrad(wfc_list, p_list, 1, g1_mw);
+  for (int iw = 0; iw < 2; ++iw)
     for (int d = 0; d < 3; ++d)
     {
-      REQUIRE(std::isfinite(std::real(g1[d])));
-      CHECK(std::real(g1[d]) == Approx(std::real(g1_host[d])));
+      REQUIRE(std::isfinite(std::real(g1_mw[iw][d])));
+      CHECK(std::real(g1_mw[iw][d]) == Approx(std::real(g1_host[d])));
     }
-  }
 
   // Second sweep on another electron: the device-resident e-I tables must hold the
   // accepted (post-move) row for electron 0, so ratioGrad here must match the host twin.
