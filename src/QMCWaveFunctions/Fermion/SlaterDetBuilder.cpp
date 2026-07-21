@@ -17,7 +17,6 @@
 
 
 #include "SlaterDetBuilder.h"
-#include <algorithm>
 #include <type_traits>
 #include <bitset>
 #include <unordered_map>
@@ -402,15 +401,8 @@ std::unique_ptr<DiracDeterminantBase> SlaterDetBuilder::putDeterminant(
   }
   else if (delay_rank == 0)
   {
-    // Prefer delayed rank-k (BLAS-3 flush) over SM1 for all but tiny dets.
-    // SM1 default below 192 left medium CPU DMC on rank-1 GEMV/GER every accept.
-    const int norb = lastIndex - firstIndex;
-    if (norb >= 192)
+    if (lastIndex - firstIndex >= 192)
       delay_rank = 32;
-    else if (norb >= 32)
-      delay_rank = 16;
-    else if (norb >= 8)
-      delay_rank = std::min(8, norb);
     else
       delay_rank = 1;
     app_summary() << "      Setting delay_rank to default value " << delay_rank << std::endl;
