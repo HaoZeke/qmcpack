@@ -31,16 +31,17 @@ inline omp_int_t omp_get_max_active_levels() { return 1; }
 inline void omp_set_num_threads(int num_threads) {}
 #endif
 
-/// get the number of threads at the next parallel level
+/** Threads available for a nested parallel region.
+ *  Must not open a parallel region only to count threads: that is a full barrier
+ *  and is on the delayed-update flush path every time delay fills (norb >= 256).
+ *  When already inside a parallel region (batched DMC crowd threads), return 1 so
+ *  det GEMM / DT / Coulomb do not oversubscribe via nested OpenMP.
+ */
 inline int getNextLevelNumThreads()
 {
-  int num_threads = 1;
-#pragma omp parallel
-  {
-#pragma omp master
-    num_threads = omp_get_num_threads();
-  }
-  return num_threads;
+  if (omp_get_level() > 0)
+    return 1;
+  return omp_get_max_threads();
 }
 
 #endif // OHMMS_COMMUNICATE_H

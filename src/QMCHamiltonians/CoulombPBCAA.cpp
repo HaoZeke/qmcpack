@@ -25,6 +25,7 @@
 #include <Message/UniformCommunicateError.h>
 #include "Numerics/OneDimCubicSplineLinearGrid.h"
 #include "type_traits/RefVectorWithLeader.h"
+#include "Concurrency/OpenMP.h"
 #include <numeric>
 
 namespace qmcplusplus
@@ -645,7 +646,8 @@ CoulombPBCAA::Return_t CoulombPBCAA::evalSR(const ParticleSet& P) const
   ScopedTimer local_timer(evalSR_timer_);
   const auto& d_aa(P.getDistTableAA(d_aa_ID));
   mRealType SR = 0.0;
-#pragma omp parallel for reduction(+ : SR)
+  // No nested parallel under batched DMC crowd threads (oversubscription).
+#pragma omp parallel for reduction(+ : SR) if (omp_get_level() == 0)
   for (size_t ipart = 1; ipart < (NumCenters / 2 + 1); ipart++)
   {
     mRealType esum   = 0.0;

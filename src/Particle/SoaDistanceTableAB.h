@@ -42,7 +42,9 @@ struct SoaDistanceTableAB : public DTD_BConds<T, D, SC>, public DistanceTableAB
     ScopedTimer local_timer(evaluate_timer_);
     if (num_targets_ != coords.size())
       resize(coords.size());
-#pragma omp parallel
+    // Skip nested teams under crowd threads (omp_get_level() > 0): oversubscription
+    // on batched DMC CPU path. if(0) still runs the region with one thread.
+#pragma omp parallel if (omp_get_level() == 0)
     {
       int first, last;
       FairDivideAligned(num_sources_, getAlignment<T>(), omp_get_num_threads(), omp_get_thread_num(), first, last);
