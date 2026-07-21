@@ -161,8 +161,8 @@ public:
     else
     {
       const int lda_Binv = Binv.cols();
-      // number of threads at the next level, forced to 1 if the problem is small.
-      const int num_threads = (norb < 256 ? 1 : getNextLevelNumThreads());
+      // Force 1 thread for tiny GEMMs; otherwise use next-level count (1 under crowds).
+      const int num_threads = (norb < 64 ? 1 : getNextLevelNumThreads());
       if (num_threads == 1 || BlasThreadingEnv::NestedThreadingSupported())
       {
         // threading depends on BLAS
@@ -179,7 +179,7 @@ public:
       else
       {
         // manually threaded version of the above GEMM calls
-#pragma omp parallel
+#pragma omp parallel if (omp_get_level() == 0)
         {
           const int block_size = getAlignedSize<T>((norb + num_threads - 1) / num_threads);
           int num_block        = (norb + block_size - 1) / block_size;

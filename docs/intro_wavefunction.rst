@@ -752,7 +752,7 @@ Attribute:
 +-----------------------+----------+----------+---------+-------------------------------------------+
 | Name                  | Datatype | Values   | Default | Description                               |
 +=======================+==========+==========+=========+===========================================+
-| ``delay_rank``        | Integer  | >=0      | 1       | Number of delayed updates.                |
+| ``delay_rank``        | Integer  | >=0      | auto    | Number of delayed updates (0 = auto).     |
 +-----------------------+----------+----------+---------+-------------------------------------------+
 | ``optimize``          | Text     | yes/no   | yes     | Enable orbital optimization.              |
 +-----------------------+----------+----------+---------+-------------------------------------------+
@@ -786,16 +786,17 @@ Attribute:
 Additional information:
 
 - ``delay_rank`` This option enables delayed updates of the Slater matrix inverse when particle-by-particle move is used.
-  By default or if ``delay_rank=0`` given in the input file, QMCPACK sets 1 for Slater matrices with a leading dimension :math:`<192` and 32 otherwise.
-  ``delay_rank=1`` uses the Fahy's variant :cite:`Fahy1990` of the Sherman-Morrison rank-1 update, which is mostly using memory bandwidth-bound BLAS-2 calls.
-  With ``delay_rank>1``, the delayed update algorithm :cite:`Luo2018delayedupdate,McDaniel2017` turns most of the computation to compute bound BLAS-3 calls.
-  Tuning this parameter is highly recommended to gain the best performance on medium-to-large problem sizes (:math:`>200` electrons).
-  We have seen up to an order of magnitude speedup on large problem sizes.
+  By default or if ``delay_rank=0`` given in the input file, QMCPACK chooses a rank from the leading dimension :math:`N`
+  of each Slater matrix: 32 if :math:`N \ge 192`, 16 if :math:`N \ge 32`, 8 if :math:`N \ge 8`, and 1 only for smaller
+  matrices. ``delay_rank=1`` uses the Fahy's variant :cite:`Fahy1990` of the Sherman-Morrison rank-1 update, which is
+  mostly using memory bandwidth-bound BLAS-2 calls. With ``delay_rank>1``, the delayed update algorithm
+  :cite:`Luo2018delayedupdate,McDaniel2017` turns most of the computation to compute bound BLAS-3 calls.
+  Medium CPU systems (:math:`32 \le N < 192`) therefore default to delayed updates rather than SM1.
+  Tuning this parameter is still recommended for best performance on a given microarchitecture.
   When studying the performance of QMCPACK, a scan of this parameter is required and we recommend starting from 32.
   The best ``delay_rank`` giving the maximal speedup depends on the problem size.
   Usually the larger ``delay_rank`` corresponds to a larger problem size.
-  On CPUs, ``delay_rank`` must be chosen as a multiple of SIMD vector length for good performance of BLAS libraries.
-  The best ``delay_rank`` depends on the processor microarchitecture.
+  On CPUs, ``delay_rank`` should be chosen as a multiple of SIMD vector length for good performance of BLAS libraries.
   All options are supported on both CPUs and GPUs.
 
 - ``gpu`` This option is only effective when GPU features are built. Default to using GPU. "omptarget", "cuda", "sycl", "cpu" can be set to target a specific implementation, "yes", "no" can be used to toggle on or off GPU acceleration.
