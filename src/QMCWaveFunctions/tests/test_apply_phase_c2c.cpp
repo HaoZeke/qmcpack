@@ -50,6 +50,8 @@ TEST_CASE("C2C scalar phase VGL spans a spline team boundary", "[wavefunction]")
 
   std::vector<TT> expected(num_orbitals * 5);
   std::vector<TT> actual(num_orbitals * 5);
+  std::vector<TT> expected_value(num_orbitals);
+  std::vector<TT> actual_value(num_orbitals);
 
   for (size_t team_id = 0; team_id < num_teams; ++team_id)
   {
@@ -72,11 +74,17 @@ TEST_CASE("C2C scalar phase VGL spans a spline team boundary", "[wavefunction]")
 
     for (size_t index = first_complex; index < last_complex; ++index)
     {
-      C2C::assign_vgl(x, y, z, expected.data(), num_orbitals, mkk.data(), spline_vgl.data(), spline_padded_size,
-                      G, kcart.data(), num_orbitals, index);
+      C2C::assign_v(x, y, z, expected_value.data(), spline_vgl.data(), kcart.data(), num_orbitals, index);
 
       const size_t jr = index * 2;
       const size_t ji = jr + 1;
+      actual_value[index] =
+          C2C::apply_phase_value<ST, TT>(x, y, z, spline_vgl[jr], spline_vgl[ji], kcart[index],
+                                         kcart[num_orbitals + index], kcart[num_orbitals * 2 + index]);
+
+      C2C::assign_vgl(x, y, z, expected.data(), num_orbitals, mkk.data(), spline_vgl.data(), spline_padded_size,
+                      G, kcart.data(), num_orbitals, index);
+
       C2C::apply_phase_vgl(
           x, y, z, spline_vgl[SoAFields3D::VAL * spline_padded_size + jr],
           spline_vgl[SoAFields3D::VAL * spline_padded_size + ji],
@@ -92,6 +100,9 @@ TEST_CASE("C2C scalar phase VGL spans a spline team boundary", "[wavefunction]")
           actual[num_orbitals * 2 + index], actual[num_orbitals * 3 + index], actual[num_orbitals * 4 + index]);
     }
   }
+
+  for (size_t index = 0; index < num_orbitals; ++index)
+    CHECK(actual_value[index] == expected_value[index]);
 
   for (size_t field = 0; field < 5; ++field)
     for (size_t index = 0; index < num_orbitals; ++index)
