@@ -194,6 +194,14 @@ void test_einset_LiH_x(bool use_offload)
     std::vector<SPOSet::ValueType> ratio_v(nw);
     std::vector<SPOSet::GradType> grads_v(nw);
 
+    SPOSet::ValueVector psi_ref_0(norb), psi_ref_1(norb);
+    SPOSet::GradVector dpsi_ref_0(norb), dpsi_ref_1(norb);
+    SPOSet::ValueVector d2psi_ref_0(norb), d2psi_ref_1(norb);
+    RefVector<SPOSet::ValueVector> psi_ref_list{psi_ref_0, psi_ref_1};
+    RefVector<SPOSet::GradVector> dpsi_ref_list{dpsi_ref_0, dpsi_ref_1};
+    RefVector<SPOSet::ValueVector> d2psi_ref_list{d2psi_ref_0, d2psi_ref_1};
+    spo->mw_evaluateVGL(spo_list, p_list, 0, psi_ref_list, dpsi_ref_list, d2psi_ref_list);
+
     OffloadVector<SPOSet::ValueType> inv_row(norb);
     inv_row = {0.1, 0.2, 0.3, 0.4, 0.5};
     inv_row.updateTo();
@@ -203,6 +211,24 @@ void test_einset_LiH_x(bool use_offload)
     SPOSet::OffloadMWVGLArray phi_vgl_v;
     phi_vgl_v.resize(QMCTraits::DIM_VGL, nw, norb);
     spo->mw_evaluateVGLandDetRatioGrads(spo_list, p_list, 0, inv_row_ptr, phi_vgl_v, ratio_v, grads_v);
+    phi_vgl_v.updateFrom();
+
+    for (size_t iw = 0; iw < nw; ++iw)
+      for (size_t iorb = 0; iorb < norb; ++iorb)
+      {
+        CHECK(std::real(phi_vgl_v(0, iw, iorb)) == Approx(std::real(psi_ref_list[iw].get()[iorb])));
+        CHECK(std::real(phi_vgl_v(1, iw, iorb)) == Approx(std::real(dpsi_ref_list[iw].get()[iorb][0])));
+        CHECK(std::real(phi_vgl_v(2, iw, iorb)) == Approx(std::real(dpsi_ref_list[iw].get()[iorb][1])));
+        CHECK(std::real(phi_vgl_v(3, iw, iorb)) == Approx(std::real(dpsi_ref_list[iw].get()[iorb][2])));
+        CHECK(std::real(phi_vgl_v(4, iw, iorb)) == Approx(std::real(d2psi_ref_list[iw].get()[iorb])));
+#if defined(QMC_COMPLEX)
+        CHECK(std::imag(phi_vgl_v(0, iw, iorb)) == Approx(std::imag(psi_ref_list[iw].get()[iorb])));
+        CHECK(std::imag(phi_vgl_v(1, iw, iorb)) == Approx(std::imag(dpsi_ref_list[iw].get()[iorb][0])));
+        CHECK(std::imag(phi_vgl_v(2, iw, iorb)) == Approx(std::imag(dpsi_ref_list[iw].get()[iorb][1])));
+        CHECK(std::imag(phi_vgl_v(3, iw, iorb)) == Approx(std::imag(dpsi_ref_list[iw].get()[iorb][2])));
+        CHECK(std::imag(phi_vgl_v(4, iw, iorb)) == Approx(std::imag(d2psi_ref_list[iw].get()[iorb])));
+#endif
+      }
 #if defined(QMC_COMPLEX)
     CHECK(ratio_v[0] == ComplexApprox(std::complex{0.111643, 0.111644}));
     CHECK(grads_v[0][0] == ComplexApprox(std::complex{-3.73874, -22.8802}));
