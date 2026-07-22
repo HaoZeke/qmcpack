@@ -51,6 +51,15 @@ inline TT apply_phase(ST s, ST c, ST value_r, ST value_i)
 }
 
 template<typename ST, typename TT>
+inline TT apply_phase_value(ST x, ST y, ST z, ST value_r, ST value_i, ST kX, ST kY, ST kZ)
+{
+  ST s;
+  ST c;
+  phase_sincos(x, y, z, kX, kY, kZ, s, c);
+  return apply_phase<ST, TT>(s, c, value_r, value_i);
+}
+
+template<typename ST, typename TT>
 inline void apply_phase_vgl(ST x,
                             ST y,
                             ST z,
@@ -127,10 +136,7 @@ inline void assign_v(ST x,
 
   const ST val_r = val[index * 2];
   const ST val_i = val[index * 2 + 1];
-  ST s;
-  ST c;
-  phase_sincos(x, y, z, kx[index], ky[index], kz[index], s, c);
-  psi[index] = apply_phase<ST, TT>(s, c, val_r, val_i);
+  psi[index] = apply_phase_value<ST, TT>(x, y, z, val_r, val_i, kx[index], ky[index], kz[index]);
 }
 
 /** assign_vgl
