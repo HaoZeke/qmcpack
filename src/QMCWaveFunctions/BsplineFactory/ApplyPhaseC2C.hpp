@@ -46,8 +46,15 @@ inline void phase_sincos(ST x, ST y, ST z, ST kX, ST kY, ST kZ, ST& s, ST& c)
 
 template<typename ST, typename TT>
 inline TT apply_phase(ST s, ST c, ST value_r, ST value_i)
+{ return TT(std::fma(-s, value_i, c * value_r), std::fma(s, value_r, c * value_i)); }
+
+template<typename ST, typename TT>
+inline TT apply_phase_value(ST x, ST y, ST z, ST value_r, ST value_i, ST kX, ST kY, ST kZ)
 {
-  return TT(std::fma(-s, value_i, c * value_r), std::fma(s, value_r, c * value_i));
+  ST s;
+  ST c;
+  phase_sincos(x, y, z, kX, kY, kZ, s, c);
+  return apply_phase<ST, TT>(s, c, value_r, value_i);
 }
 
 template<typename ST, typename TT>
@@ -101,11 +108,11 @@ inline void apply_phase_vgl(ST x,
   const ST lap_r = lcart_r + mKK * val_r + two * (kX * dX_i + kY * dY_i + kZ * dZ_i);
   const ST lap_i = lcart_i + mKK * val_i - two * (kX * dX_r + kY * dY_r + kZ * dZ_r);
 
-  psi     = apply_phase<ST, TT>(s, c, val_r, val_i);
-  d2psi   = apply_phase<ST, TT>(s, c, lap_r, lap_i);
-  dpsi_x  = apply_phase<ST, TT>(s, c, gX_r, gX_i);
-  dpsi_y  = apply_phase<ST, TT>(s, c, gY_r, gY_i);
-  dpsi_z  = apply_phase<ST, TT>(s, c, gZ_r, gZ_i);
+  psi    = apply_phase<ST, TT>(s, c, val_r, val_i);
+  d2psi  = apply_phase<ST, TT>(s, c, lap_r, lap_i);
+  dpsi_x = apply_phase<ST, TT>(s, c, gX_r, gX_i);
+  dpsi_y = apply_phase<ST, TT>(s, c, gY_r, gY_i);
+  dpsi_z = apply_phase<ST, TT>(s, c, gZ_r, gZ_i);
 }
 
 template<typename ST, typename TT>
@@ -127,10 +134,7 @@ inline void assign_v(ST x,
 
   const ST val_r = val[index * 2];
   const ST val_i = val[index * 2 + 1];
-  ST s;
-  ST c;
-  phase_sincos(x, y, z, kx[index], ky[index], kz[index], s, c);
-  psi[index] = apply_phase<ST, TT>(s, c, val_r, val_i);
+  psi[index]     = apply_phase_value<ST, TT>(x, y, z, val_r, val_i, kx[index], ky[index], kz[index]);
 }
 
 /** assign_vgl
@@ -174,9 +178,8 @@ inline void assign_vgl(ST x,
   TT* restrict dpsi_z = results_scratch_ptr + orb_padded_size * 3;
   TT* restrict d2psi  = results_scratch_ptr + orb_padded_size * 4;
 
-  apply_phase_vgl(x, y, z, val_r, val_i, g0[jr], g0[ji], g1[jr], g1[ji], g2[jr], g2[ji], lcart[jr],
-                  lcart[ji], G, kX, kY, kZ, mKK_ptr[index], psi[index], dpsi_x[index], dpsi_y[index],
-                  dpsi_z[index], d2psi[index]);
+  apply_phase_vgl(x, y, z, val_r, val_i, g0[jr], g0[ji], g1[jr], g1[ji], g2[jr], g2[ji], lcart[jr], lcart[ji], G, kX,
+                  kY, kZ, mKK_ptr[index], psi[index], dpsi_x[index], dpsi_y[index], dpsi_z[index], d2psi[index]);
 }
 } // namespace C2C
 } // namespace qmcplusplus
