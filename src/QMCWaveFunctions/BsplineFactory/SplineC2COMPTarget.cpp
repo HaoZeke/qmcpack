@@ -239,7 +239,6 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
   auto& det_ratios_buffer_H2D = mw_mem.det_ratios_buffer_H2D;
   auto& mw_ratios_private     = mw_mem.mw_ratios_private;
   auto& mw_offload_scratch    = mw_mem.mw_offload_scratch;
-  auto& mw_results_scratch    = mw_mem.mw_results_scratch;
   const size_t nw             = spo_list.size();
   const size_t orb_size       = psi_list.size() ? psi_list[0].get().size() : phi_leader.size();
 
@@ -283,14 +282,11 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
   mw_ratios_private.resize(mw_nVP, NumTeams);
   const auto spline_padded_size = myV.size();
-  const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
   mw_offload_scratch.resize(spline_padded_size * mw_nVP);
-  mw_results_scratch.resize(sposet_padded_size * mw_nVP);
 
   // Ye: need to extract sizes and pointers before entering target region
   const auto* spline_ptr         = SplineInst->getSplinePtr();
   auto* offload_scratch_ptr      = mw_offload_scratch.data();
-  auto* results_scratch_ptr      = mw_results_scratch.data();
   const auto myKcart_padded_size = myKcart->capacity();
   auto* myKcart_ptr              = myKcart->data();
   auto* buffer_H2D_ptr           = det_ratios_buffer_H2D.data();
@@ -308,7 +304,6 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
         const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
         auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-        auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
         auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
         auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
         auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
@@ -322,17 +317,23 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
         for (int index = 0; index < last - first; index++)
           spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
                                              offload_scratch_iat_ptr + first + index);
-        const size_t first_cplx = first / 2;
-        const size_t last_cplx  = omptarget::min(last / 2, orb_size);
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = first_cplx; index < last_cplx; index++)
-          C2C::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
-                        offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, index);
+        size_t first_cplx;
+        size_t last_cplx;
+        C2C::complex_index_bounds(first, last, orb_size, first_cplx, last_cplx);
+        const ST* restrict k0 = myKcart_ptr;
+        const ST* restrict k1 = myKcart_ptr + myKcart_padded_size;
+        const ST* restrict k2 = myKcart_ptr + myKcart_padded_size * 2;
 
         ComplexT sum(0);
         PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
         for (int i = first_cplx; i < last_cplx; i++)
-          sum += psi_iat_ptr[i] * psiinv_ptr[i];
+        {
+          const size_t ir = i * 2;
+          const ComplexT psi = C2C::apply_phase_value<ST, ComplexT>(
+              pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2],
+              offload_scratch_iat_ptr[ir], offload_scratch_iat_ptr[ir + 1], k0[i], k1[i], k2[i]);
+          sum += psi * psiinv_ptr[i];
+        }
         ratios_private_ptr[iat * NumTeams + team_id] = sum;
       }
   }
