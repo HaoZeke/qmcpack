@@ -29,7 +29,8 @@ inline void complex_index_bounds(size_t first_real,
 template<typename ST>
 inline void phase_sincos(ST x, ST y, ST z, ST kX, ST kY, ST kZ, ST& s, ST& c)
 {
-  const ST phase = -(x * kX + y * kY + z * kZ);
+  const ST phase_xy = std::fma(y, kY, x * kX);
+  const ST phase    = -std::fma(z, kZ, phase_xy);
   omptarget::sincos(phase, &s, &c);
 }
 
