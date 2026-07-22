@@ -36,7 +36,7 @@ inline void phase_sincos(ST x, ST y, ST z, ST kX, ST kY, ST kZ, ST& s, ST& c)
 template<typename ST, typename TT>
 inline TT apply_phase(ST s, ST c, ST value_r, ST value_i)
 {
-  return TT(c * value_r - s * value_i, c * value_i + s * value_r);
+  return TT(std::fma(-s, value_i, c * value_r), std::fma(s, value_r, c * value_i));
 }
 
 template<typename ST, typename TT>
