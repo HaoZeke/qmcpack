@@ -179,8 +179,7 @@ public:
       else
       {
         // manually threaded version of the above GEMM calls
-        // Do not nest under batched DMC crowd threads.
-#pragma omp parallel if (omp_get_level() == 0)
+#pragma omp parallel
         {
           const int block_size = getAlignedSize<T>((norb + num_threads - 1) / num_threads);
           int num_block        = (norb + block_size - 1) / block_size;
