@@ -755,33 +755,34 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         ValueType* restrict out_dphi_z = out_dphi_y + phi_vgl_stride;
         ValueType* restrict out_d2phi  = out_dphi_z + phi_vgl_stride;
 
-        ValueType ratio(0), grad_x(0), grad_y(0), grad_z(0);
-        PRAGMA_OFFLOAD("omp parallel for reduction(+: ratio, grad_x, grad_y, grad_z)")
+        ST ratio_r(0), ratio_i(0), grad_x_r(0), grad_x_i(0), grad_y_r(0), grad_y_i(0), grad_z_r(0), grad_z_i(0);
+        PRAGMA_OFFLOAD("omp parallel for reduction(+: ratio_r, ratio_i, grad_x_r, grad_x_i, grad_y_r, grad_y_i, \
+                                                grad_z_r, grad_z_i)")
         for (int j = first_cplx; j < last_cplx; j++)
         {
           const size_t jr = j * 2;
           const size_t ji = jr + 1;
-          ValueType psi, dpsi_x, dpsi_y, dpsi_z, d2psi;
           C2C::apply_phase_vgl(pos_iw_ptr[0], pos_iw_ptr[1], pos_iw_ptr[2], val[jr], val[ji], g0[jr], g0[ji], g1[jr],
-                               g1[ji], g2[jr], g2[ji], lcart[jr], lcart[ji], G, k0[j], k1[j], k2[j], mKK_ptr[j], psi,
-                               dpsi_x, dpsi_y, dpsi_z, d2psi);
+                               g1[ji], g2[jr], g2[ji], lcart[jr], lcart[ji], G, k0[j], k1[j], k2[j], mKK_ptr[j],
+                               out_phi[j], out_dphi_x[j], out_dphi_y[j], out_dphi_z[j], out_d2phi[j]);
 
-          out_phi[j]    = psi;
-          out_dphi_x[j] = dpsi_x;
-          out_dphi_y[j] = dpsi_y;
-          out_dphi_z[j] = dpsi_z;
-          out_d2phi[j]  = d2psi;
+          const ST inv_r = invRow_iw_ptr[j].real();
+          const ST inv_i = invRow_iw_ptr[j].imag();
 
-          ratio += psi * invRow_iw_ptr[j];
-          grad_x += dpsi_x * invRow_iw_ptr[j];
-          grad_y += dpsi_y * invRow_iw_ptr[j];
-          grad_z += dpsi_z * invRow_iw_ptr[j];
+          ratio_r += out_phi[j].real() * inv_r - out_phi[j].imag() * inv_i;
+          ratio_i += out_phi[j].real() * inv_i + out_phi[j].imag() * inv_r;
+          grad_x_r += out_dphi_x[j].real() * inv_r - out_dphi_x[j].imag() * inv_i;
+          grad_x_i += out_dphi_x[j].real() * inv_i + out_dphi_x[j].imag() * inv_r;
+          grad_y_r += out_dphi_y[j].real() * inv_r - out_dphi_y[j].imag() * inv_i;
+          grad_y_i += out_dphi_y[j].real() * inv_i + out_dphi_y[j].imag() * inv_r;
+          grad_z_r += out_dphi_z[j].real() * inv_r - out_dphi_z[j].imag() * inv_i;
+          grad_z_i += out_dphi_z[j].real() * inv_i + out_dphi_z[j].imag() * inv_r;
         }
 
-        rg_private_ptr[(iw * NumTeams + team_id) * 4]     = ratio;
-        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 1] = grad_x;
-        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 2] = grad_y;
-        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 3] = grad_z;
+        rg_private_ptr[(iw * NumTeams + team_id) * 4]     = ValueType(ratio_r, ratio_i);
+        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 1] = ValueType(grad_x_r, grad_x_i);
+        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 2] = ValueType(grad_y_r, grad_y_i);
+        rg_private_ptr[(iw * NumTeams + team_id) * 4 + 3] = ValueType(grad_z_r, grad_z_i);
       }
   }
 
