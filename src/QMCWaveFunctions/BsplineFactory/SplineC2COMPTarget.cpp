@@ -329,9 +329,10 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
         for (int i = first_cplx; i < last_cplx; i++)
         {
           const size_t ir = i * 2;
-          const ComplexT psi = C2C::apply_phase_value<ST, ComplexT>(
-              pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2],
-              offload_scratch_iat_ptr[ir], offload_scratch_iat_ptr[ir + 1], k0[i], k1[i], k2[i]);
+          const ComplexT psi =
+              C2C::apply_phase_value<ST, ComplexT>(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1],
+                                                   pos_scratch[iat * 6 + 2], offload_scratch_iat_ptr[ir],
+                                                   offload_scratch_iat_ptr[ir + 1], k0[i], k1[i], k2[i]);
           sum += psi * psiinv_ptr[i];
         }
         ratios_private_ptr[iat * NumTeams + team_id] = sum;
@@ -703,8 +704,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         const size_t first = ChunkSizePerTeam * team_id;
         const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
-        auto* restrict offload_scratch_iw_ptr =
-            offload_scratch_ptr + spline_padded_size * iw * C2C::VGL_NUM_FIELDS;
+        auto* restrict offload_scratch_iw_ptr = offload_scratch_ptr + spline_padded_size * iw * C2C::VGL_NUM_FIELDS;
         const auto* restrict pos_iw_ptr       = reinterpret_cast<ST*>(buffer_H2D_ptr + buffer_H2D_stride * iw);
         const auto* restrict invRow_iw_ptr =
             *reinterpret_cast<ValueType**>(buffer_H2D_ptr + buffer_H2D_stride * iw + sizeof(ST) * 6);
@@ -725,9 +725,9 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         {
           ST val, g0, g1, g2, h00, h01, h02, h11, h12, h22;
           spline2offload::evaluate_vgh_impl_v2_core(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                                    da, db, dc, d2a, d2b, d2c, val, g0, g1, g2, h00, h01, h02, h11,
-                                                    h12, h22);
-          const int output_index = first + index;
+                                                    da, db, dc, d2a, d2b, d2c, val, g0, g1, g2, h00, h01, h02, h11, h12,
+                                                    h22);
+          const int output_index                                                     = first + index;
           offload_scratch_iw_ptr[spline_padded_size * C2C::VGL_VALUE + output_index] = val;
           offload_scratch_iw_ptr[spline_padded_size * C2C::VGL_GRAD0 + output_index] = g0;
           offload_scratch_iw_ptr[spline_padded_size * C2C::VGL_GRAD1 + output_index] = g1;
@@ -762,9 +762,9 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
           const size_t jr = j * 2;
           const size_t ji = jr + 1;
           ValueType psi, dpsi_x, dpsi_y, dpsi_z, d2psi;
-          C2C::apply_phase_vgl(pos_iw_ptr[0], pos_iw_ptr[1], pos_iw_ptr[2], val[jr], val[ji], g0[jr], g0[ji],
-                               g1[jr], g1[ji], g2[jr], g2[ji], lcart[jr], lcart[ji], G, k0[j], k1[j], k2[j],
-                               mKK_ptr[j], psi, dpsi_x, dpsi_y, dpsi_z, d2psi);
+          C2C::apply_phase_vgl(pos_iw_ptr[0], pos_iw_ptr[1], pos_iw_ptr[2], val[jr], val[ji], g0[jr], g0[ji], g1[jr],
+                               g1[ji], g2[jr], g2[ji], lcart[jr], lcart[ji], G, k0[j], k1[j], k2[j], mKK_ptr[j], psi,
+                               dpsi_x, dpsi_y, dpsi_z, d2psi);
 
           out_phi[j]    = psi;
           out_dphi_x[j] = dpsi_x;

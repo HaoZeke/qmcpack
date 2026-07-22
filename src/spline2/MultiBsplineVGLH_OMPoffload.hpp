@@ -254,32 +254,31 @@ inline void evaluate_vgh_impl(const typename qmcplusplus::bspline_traits<T, 3>::
  * transformations remain the caller's responsibility.
  */
 template<typename T>
-inline void evaluate_vgh_impl_v2_core(
-    const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
-    const T* restrict spline_coefs,
-    int ix,
-    int iy,
-    int iz,
-    const int index,
-    const T a[4],
-    const T b[4],
-    const T c[4],
-    const T da[4],
-    const T db[4],
-    const T dc[4],
-    const T d2a[4],
-    const T d2b[4],
-    const T d2c[4],
-    T& val,
-    T& gx,
-    T& gy,
-    T& gz,
-    T& hxx,
-    T& hxy,
-    T& hxz,
-    T& hyy,
-    T& hyz,
-    T& hzz)
+inline void evaluate_vgh_impl_v2_core(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
+                                      const T* restrict spline_coefs,
+                                      int ix,
+                                      int iy,
+                                      int iz,
+                                      const int index,
+                                      const T a[4],
+                                      const T b[4],
+                                      const T c[4],
+                                      const T da[4],
+                                      const T db[4],
+                                      const T dc[4],
+                                      const T d2a[4],
+                                      const T d2b[4],
+                                      const T d2c[4],
+                                      T& val,
+                                      T& gx,
+                                      T& gy,
+                                      T& gz,
+                                      T& hxx,
+                                      T& hxy,
+                                      T& hxz,
+                                      T& hyy,
+                                      T& hyz,
+                                      T& hzz)
 {
   const intptr_t xs = spline_m->x_stride;
   const intptr_t ys = spline_m->y_stride;
@@ -389,8 +388,8 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
   T hyz = T();
   T hzz = T();
 
-  evaluate_vgh_impl_v2_core(spline_m, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b, d2c, val, gx,
-                            gy, gz, hxx, hxy, hxz, hyy, hyz, hzz);
+  evaluate_vgh_impl_v2_core(spline_m, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b, d2c, val, gx, gy,
+                            gz, hxx, hxy, hxz, hyy, hyz, hzz);
 
   // put data back to the result vector
   val_grads_hess[0]              = val;

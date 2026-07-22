@@ -354,12 +354,12 @@ struct test_splines<T, 5, 1> : public test_splines_base<T, 5, 1>
       const auto* spline_ptr = bs.getSplinePtr();
       int ix, iy, iz;
       T a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
-      spline2::computeLocationAndFractional(spline_ptr, pos[0], pos[1], pos[2], ix, iy, iz, a, b, c, da, db, dc,
-                                            d2a, d2b, d2c);
+      spline2::computeLocationAndFractional(spline_ptr, pos[0], pos[1], pos[2], ix, iy, iz, a, b, c, da, db, dc, d2a,
+                                            d2b, d2c);
 
       T val, gx, gy, gz, hxx, hxy, hxz, hyy, hyz, hzz;
-      spline2offload::evaluate_vgh_impl_v2_core(spline_ptr, spline_ptr->coefs, ix, iy, iz, 0, a, b, c, da, db, dc,
-                                                d2a, d2b, d2c, val, gx, gy, gz, hxx, hxy, hxz, hyy, hyz, hzz);
+      spline2offload::evaluate_vgh_impl_v2_core(spline_ptr, spline_ptr->coefs, ix, iy, iz, 0, a, b, c, da, db, dc, d2a,
+                                                d2b, d2c, val, gx, gy, gz, hxx, hxy, hxz, hyy, hyz, hzz);
 
       CHECK(val == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::VAL]));
       CHECK(gx == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::GRAD0]));
