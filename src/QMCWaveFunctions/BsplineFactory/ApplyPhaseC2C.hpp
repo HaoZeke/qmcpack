@@ -16,6 +16,16 @@ namespace qmcplusplus
 {
 namespace C2C
 {
+enum CompactVGLFields
+{
+  VGL_VALUE = 0,
+  VGL_GRAD0,
+  VGL_GRAD1,
+  VGL_GRAD2,
+  VGL_LAPL,
+  VGL_NUM_FIELDS
+};
+
 inline void complex_index_bounds(size_t first_real,
                                  size_t last_real,
                                  size_t num_orbitals,
