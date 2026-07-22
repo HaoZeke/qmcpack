@@ -246,6 +246,23 @@ TEST_CASE("Einspline SPO from HDF NiO a16 97 electrons", "[wavefunction]")
   phi_vgl_v.resize(QMCTraits::DIM_VGL, nw, 5);
   spo->mw_evaluateVGLandDetRatioGrads(spo_list, p_list, 0, inv_row_ptr, phi_vgl_v, ratio_v, grads_v);
   phi_vgl_v.updateFrom();
+
+  for (size_t iw = 0; iw < nw; ++iw)
+    for (size_t iorb = 0; iorb < phi_vgl_v.size(2); ++iorb)
+    {
+      CHECK(std::real(phi_vgl_v(0, iw, iorb)) == Approx(std::real(psi_v_list[iw].get()[iorb])));
+      CHECK(std::real(phi_vgl_v(1, iw, iorb)) == Approx(std::real(dpsi_v_list[iw].get()[iorb][0])));
+      CHECK(std::real(phi_vgl_v(2, iw, iorb)) == Approx(std::real(dpsi_v_list[iw].get()[iorb][1])));
+      CHECK(std::real(phi_vgl_v(3, iw, iorb)) == Approx(std::real(dpsi_v_list[iw].get()[iorb][2])));
+      CHECK(std::real(phi_vgl_v(4, iw, iorb)) == Approx(std::real(d2psi_v_list[iw].get()[iorb])));
+#if defined(QMC_COMPLEX)
+      CHECK(std::imag(phi_vgl_v(0, iw, iorb)) == Approx(std::imag(psi_v_list[iw].get()[iorb])));
+      CHECK(std::imag(phi_vgl_v(1, iw, iorb)) == Approx(std::imag(dpsi_v_list[iw].get()[iorb][0])));
+      CHECK(std::imag(phi_vgl_v(2, iw, iorb)) == Approx(std::imag(dpsi_v_list[iw].get()[iorb][1])));
+      CHECK(std::imag(phi_vgl_v(3, iw, iorb)) == Approx(std::imag(dpsi_v_list[iw].get()[iorb][2])));
+      CHECK(std::imag(phi_vgl_v(4, iw, iorb)) == Approx(std::imag(d2psi_v_list[iw].get()[iorb])));
+#endif
+    }
 #if !defined(QMC_COMPLEX)
   CHECK(std::real(ratio_v[0]) == Approx(-0.4838374162));
   CHECK(std::real(grads_v[0][0]) == Approx(-24.6573209338));
