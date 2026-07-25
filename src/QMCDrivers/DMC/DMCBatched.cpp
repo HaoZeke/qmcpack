@@ -507,13 +507,15 @@ void DMCBatched::run()
 
         {
           const int iter = block * steps_per_block_ + step;
-          walker_controller_->branch(iter, population_, iter == 0);
-          branch_engine_->updateParamAfterPopControl(walker_controller_->get_ensemble_property(),
-                                                     population_.get_golden_electrons().getTotalNum());
-          walker_controller_->setTrialEnergy(branch_engine_->getEtrial());
+          if (isPopulationControlStep(iter, dmcdriver_input_.get_branch_interval()))
+          {
+            walker_controller_->branch(iter, population_, iter == 0);
+            branch_engine_->updateParamAfterPopControl(walker_controller_->get_ensemble_property(),
+                                                       population_.get_golden_electrons().getTotalNum());
+            walker_controller_->setTrialEnergy(branch_engine_->getEtrial());
+            population_.redistributeWalkers(crowds_);
+          }
         }
-
-        population_.redistributeWalkers(crowds_);
       }
       print_mem("DMCBatched after a block", app_debug_stream());
       if (qmcdriver_input_.get_measure_imbalance())

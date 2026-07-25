@@ -31,7 +31,6 @@ void DMCDriverInput::readXML(xmlNodePtr node)
   parameter_set_.add(branch_interval_, "branchinterval");
   parameter_set_.add(branch_interval_, "substeps");
   parameter_set_.add(branch_interval_, "subStep");
-  parameter_set_.add(branch_interval_, "sub_stepd");
 
   //for NonLocalTOperator
   parameter_set_.add(alpha_, "alpha");
@@ -74,7 +73,7 @@ void DMCDriverInput::readXML(xmlNodePtr node)
   // TODO: similar check for alpha and gamma
   if (max_age_ < 0)
     throw std::runtime_error("Illegal input for MaxAge in DMC input section");
-  if (branch_interval_ < 0)
+  if (branch_interval_ < 1)
     throw std::runtime_error("Illegal input for branchInterval or substeps in DMC input section");
 
   if (reserve_ < 1.0)
