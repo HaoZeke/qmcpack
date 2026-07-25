@@ -36,6 +36,42 @@ private:
 };
 } // namespace testing
 
+TEST_CASE("DMCBatched::isPopulationControlStep", "[drivers]")
+{
+  // branch_interval = 1 controls every step, the current default behavior.
+  for (int iter = 0; iter < 5; ++iter)
+    CHECK(DMCBatched::isPopulationControlStep(iter, 1));
+
+  // branch_interval = 3 controls on the first step and then at the end of
+  // every three steps.
+  CHECK(DMCBatched::isPopulationControlStep(0, 3));
+  CHECK(!DMCBatched::isPopulationControlStep(1, 3));
+  CHECK(DMCBatched::isPopulationControlStep(2, 3));
+  CHECK(!DMCBatched::isPopulationControlStep(3, 3));
+  CHECK(!DMCBatched::isPopulationControlStep(4, 3));
+  CHECK(DMCBatched::isPopulationControlStep(5, 3));
+}
+
+TEST_CASE("DMCDriverInput branchInterval parsing", "[drivers]")
+{
+  auto parse_interval = [](const std::string& body) {
+    Libxml2Document doc;
+    REQUIRE(doc.parseFromString("<qmc method=\"dmc\">" + body + "</qmc>"));
+    DMCDriverInput input;
+    input.readXML(doc.getRoot());
+    return input.get_branch_interval();
+  };
+
+  CHECK(parse_interval("") == 1);
+  CHECK(parse_interval("<parameter name=\"branchInterval\">3</parameter>") == 3);
+  CHECK(parse_interval("<parameter name=\"branchinterval\">4</parameter>") == 4);
+  CHECK(parse_interval("<parameter name=\"substeps\">5</parameter>") == 5);
+  CHECK(parse_interval("<parameter name=\"subStep\">6</parameter>") == 6);
+  // the historical "sub_stepd" typo alias is not accepted
+  CHECK(parse_interval("<parameter name=\"sub_stepd\">7</parameter>") == 1);
+  CHECK_THROWS(parse_interval("<parameter name=\"branchInterval\">0</parameter>"));
+}
+
 /** Since we check the DMC only feature of reserve walkers perhaps this should be
  *  a DMC integration test.
  */
