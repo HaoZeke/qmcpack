@@ -14,6 +14,7 @@
 #include "Message/Communicate.h"
 #include "QMCDrivers/DMC/DMCDriverInput.h"
 #include "QMCDrivers/DMC/DMCBatched.h"
+#include "QMCDrivers/DMC/WalkerControl.h"
 #include "QMCDrivers/tests/ValidQMCInputSections.h"
 #include "QMCDrivers/tests/SetupDMCTest.h"
 #include "EstimatorInputDelegates.h"
@@ -50,6 +51,31 @@ TEST_CASE("DMCBatched::isPopulationControlStep", "[drivers]")
   CHECK(!DMCBatched::isPopulationControlStep(3, 3));
   CHECK(!DMCBatched::isPopulationControlStep(4, 3));
   CHECK(DMCBatched::isPopulationControlStep(5, 3));
+}
+
+TEST_CASE("WalkerControl::computeMultiplicity age damping", "[drivers]")
+{
+  using FPRT = WalkerControl::FullPrecRealType;
+  constexpr FPRT rng_low{0.25};
+  constexpr FPRT rng_high{0.75};
+
+  // disabled policy (negative max_age): multiplicity is int(weight + rng) regardless of age
+  CHECK(WalkerControl::computeMultiplicity(3.0, 100, -1, rng_low) == FPRT(3));
+  CHECK(WalkerControl::computeMultiplicity(3.0, 0, -1, rng_high) == FPRT(3));
+
+  // young walker (age 0): full weight branches
+  CHECK(WalkerControl::computeMultiplicity(3.0, 0, 10, rng_low) == FPRT(3));
+
+  // walker that failed to move this sweep: weight clamped to 1, cannot proliferate
+  CHECK(WalkerControl::computeMultiplicity(3.0, 1, 10, rng_low) == FPRT(1));
+  CHECK(WalkerControl::computeMultiplicity(3.0, 1, 10, rng_high) == FPRT(1));
+
+  // persistent walker beyond max_age: weight clamped to 0.5, dies stochastically
+  CHECK(WalkerControl::computeMultiplicity(3.0, 11, 10, rng_low) == FPRT(0));
+  CHECK(WalkerControl::computeMultiplicity(3.0, 11, 10, rng_high) == FPRT(1));
+
+  // clamps never raise a small weight
+  CHECK(WalkerControl::computeMultiplicity(0.25, 11, 10, rng_low) == FPRT(0));
 }
 
 TEST_CASE("DMCDriverInput branchInterval parsing", "[drivers]")
