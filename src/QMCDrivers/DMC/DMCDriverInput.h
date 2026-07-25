@@ -62,8 +62,8 @@ private:
   bool reconfiguration_ = true;
   ///input to control Tmove
   TmoveKind tmove_kind_ = TmoveKind::OFF;
-  ///input to control maximum age allowed for walkers.
-  IndexType max_age_ = 10;
+  ///input to control maximum age allowed for walkers; negative leaves age damping off
+  IndexType max_age_ = -1;
   /// reserved walkers for population growth
   RealType reserve_ = 1.0;
   double alpha_     = 0.0;

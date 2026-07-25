@@ -25,6 +25,7 @@
 #include "Message/CommOperators.h"
 #include "Utilities/RandomGenerator.h"
 
+#include <algorithm>
 #include <filesystem>
 
 namespace qmcplusplus
@@ -80,6 +81,31 @@ public:
   bool put(xmlNodePtr cur);
 
   void setMinMax(int nw_in, int nmax_in);
+
+  /** enable age-based damping of branching multiplicity; a negative value disables it */
+  void set_max_age(IndexType max_age) { max_age_ = max_age; }
+
+  /** branching multiplicity for one walker
+   *
+   *  A walker that has not moved for more than max_age sweeps has its
+   *  branching weight clamped to 0.5 so it dies stochastically instead of
+   *  copying itself; one that has not moved at all this sweep is clamped to
+   *  1 so it cannot proliferate. A negative max_age disables the clamp.
+   */
+  static FullPrecRealType computeMultiplicity(FullPrecRealType weight,
+                                              int age,
+                                              IndexType max_age,
+                                              FullPrecRealType rng_sample)
+  {
+    if (max_age >= 0)
+    {
+      if (age > max_age)
+        weight = std::min(FullPrecRealType(0.5), weight);
+      else if (age > 0)
+        weight = std::min(FullPrecRealType(1.0), weight);
+    }
+    return static_cast<int>(weight + rng_sample);
+  }
 
   int get_n_max() const { return n_max_; }
   int get_n_min() const { return n_min_; }
@@ -163,6 +189,8 @@ private:
   IndexType n_max_;
   ///maximum copy per walker
   IndexType max_copy_;
+  ///age beyond which branching multiplicity is damped; negative disables the policy
+  IndexType max_age_ = -1;
   ///trial energy energy
   FullPrecRealType trial_energy_;
   /** Copied from curData[LE_MAX+rank_num] during branching

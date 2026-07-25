@@ -71,8 +71,7 @@ void DMCDriverInput::readXML(xmlNodePtr node)
   app_summary() << std::endl;
 
   // TODO: similar check for alpha and gamma
-  if (max_age_ < 0)
-    throw std::runtime_error("Illegal input for MaxAge in DMC input section");
+  // a negative MaxAge leaves age damping off, so no lower bound is enforced
   if (branch_interval_ < 1)
     throw std::runtime_error("Illegal input for branchInterval or substeps in DMC input section");
 
