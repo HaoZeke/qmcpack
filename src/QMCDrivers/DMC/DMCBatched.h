@@ -121,6 +121,17 @@ public:
 
   QMCRunType getRunType() override { return QMCRunType::DMC_BATCH; }
 
+  /** true on the steps where the driver performs population control
+   *
+   *  The first step always runs control so the branch engine and the trial
+   *  energy initialize. Afterwards control runs at the end of every
+   *  branch_interval steps; branch_interval = 1 runs control every step.
+   */
+  static bool isPopulationControlStep(IndexType iter, IndexType branch_interval)
+  {
+    return iter == 0 || (iter + 1) % branch_interval == 0;
+  }
+
 private:
   /// forward declaration. DMC specialized ContextForSteps
   class DMCContextForSteps;
@@ -133,8 +144,6 @@ private:
   /** I think its better if these have there own type and variable name
    */
   DMCTimers dmc_timers_;
-  /// Interval between branching
-  IndexType branch_interval_;
   ///branch engine
   std::unique_ptr<SFNBranch> branch_engine_;
   ///walker controller for load-balance
