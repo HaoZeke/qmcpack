@@ -1491,7 +1491,7 @@ Parameters:
   +--------------------------------+--------------+-------------------------+-------------------+-------------------------------------------------+
   | ``sigmaBound``                 | 10           | :math:`\geq 0`          | 10                | Parameter to cutoff large weights               |
   +--------------------------------+--------------+-------------------------+-------------------+-------------------------------------------------+
-  | ``reconfiguration``            | string       | yes/pure/other          | no                | Fixed population technique                      |
+  | ``reconfiguration``            | string       | no, runwhileincorrect   | no                | Fixed population technique (non-functional)     |
   +--------------------------------+--------------+-------------------------+-------------------+-------------------------------------------------+
   | ``use_nonblocking``            | string       | yes/no                  | yes               | Using nonblocking send/recv                     |
   +--------------------------------+--------------+-------------------------+-------------------+-------------------------------------------------+
@@ -1569,6 +1569,19 @@ where :math:`E_\text{ref}` is the :math:`E_\text{pop\_avg}` average over all the
   'unlimited_history' uses unweighted average of :math:`E_\text{pop\_avg}` of all the steps collected post warm-up.
   'limited_history' uses weighted average of :math:`E_\text{pop\_avg}` of the latest at maximum
   min(1, int(1.0 / (feedback * tau))) steps collected post warm-up. Default 'unlimited_history'.
+
+- ``reconfiguration``: The fixed-population reconfiguration method is not functional in the batched driver
+  and gives incorrect results. Setting ``reconfiguration`` to "yes" aborts with an error; the broken code
+  path remains reachable only via the value "runwhileincorrect". Use the default dynamic population control.
+
+- Parameters accepted for input compatibility with the legacy driver but **not honored** by the batched driver:
+
+  - ``branchInterval`` (and its aliases ``branchinterval``, ``substeps``, ``subStep``): the value is read and
+    reported at startup, but the batched driver applies branching and population control after every step
+    regardless of this setting.
+  - ``MaxAge``: the value is read and reported at startup, but age-based damping of walker multiplicity is
+    not implemented in the batched population control. Persistent (stuck) walkers are neither killed nor
+    prevented from branching by this parameter.
 
 .. code-block:: xml
   :caption: The following is an example of a minimal DMC section using the batched ``dmc`` driver
