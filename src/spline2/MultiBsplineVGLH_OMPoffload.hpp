@@ -248,6 +248,99 @@ inline void evaluate_vgh_impl(const typename qmcplusplus::bspline_traits<T, 3>::
   }
 }
 
+/** Contract one spline into metric-independent scalar value, gradient, and Hessian components.
+ *
+ * The derivative components are scaled from grid-index coordinates to the spline coordinate basis. Lattice-metric
+ * transformations remain the caller's responsibility.
+ */
+template<typename T>
+inline void evaluate_vgh_impl_v2_core(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
+                                      const T* restrict spline_coefs,
+                                      int ix,
+                                      int iy,
+                                      int iz,
+                                      const int index,
+                                      const T a[4],
+                                      const T b[4],
+                                      const T c[4],
+                                      const T da[4],
+                                      const T db[4],
+                                      const T dc[4],
+                                      const T d2a[4],
+                                      const T d2b[4],
+                                      const T d2c[4],
+                                      T& val,
+                                      T& gx,
+                                      T& gy,
+                                      T& gz,
+                                      T& hxx,
+                                      T& hxy,
+                                      T& hxz,
+                                      T& hyy,
+                                      T& hyz,
+                                      T& hzz)
+{
+  const intptr_t xs = spline_m->x_stride;
+  const intptr_t ys = spline_m->y_stride;
+  const intptr_t zs = spline_m->z_stride;
+
+  val = T();
+  gx  = T();
+  gy  = T();
+  gz  = T();
+  hxx = T();
+  hxy = T();
+  hxz = T();
+  hyy = T();
+  hyz = T();
+  hzz = T();
+
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+    {
+      const T* restrict coefs = spline_coefs + ((ix + i) * xs + (iy + j) * ys + iz * zs);
+      const T coefsv          = coefs[index];
+      const T coefsvzs        = coefs[index + zs];
+      const T coefsv2zs       = coefs[index + 2 * zs];
+      const T coefsv3zs       = coefs[index + 3 * zs];
+
+      const T pre20 = d2a[i] * b[j];
+      const T pre10 = da[i] * b[j];
+      const T pre00 = a[i] * b[j];
+      const T pre11 = da[i] * db[j];
+      const T pre01 = a[i] * db[j];
+      const T pre02 = a[i] * d2b[j];
+
+      T sum0 = c[0] * coefsv + c[1] * coefsvzs + c[2] * coefsv2zs + c[3] * coefsv3zs;
+      T sum1 = dc[0] * coefsv + dc[1] * coefsvzs + dc[2] * coefsv2zs + dc[3] * coefsv3zs;
+      T sum2 = d2c[0] * coefsv + d2c[1] * coefsvzs + d2c[2] * coefsv2zs + d2c[3] * coefsv3zs;
+
+      hxx += pre20 * sum0;
+      hxy += pre11 * sum0;
+      hxz += pre10 * sum1;
+      hyy += pre02 * sum0;
+      hyz += pre01 * sum1;
+      hzz += pre00 * sum2;
+      gx += pre10 * sum0;
+      gy += pre01 * sum0;
+      gz += pre00 * sum1;
+      val += pre00 * sum0;
+    }
+
+  const T dxInv = spline_m->x_grid.delta_inv;
+  const T dyInv = spline_m->y_grid.delta_inv;
+  const T dzInv = spline_m->z_grid.delta_inv;
+  gx            = gx * dxInv;
+  gy            = gy * dyInv;
+  gz            = gz * dzInv;
+  hxx           = hxx * dxInv * dxInv;
+  hxy           = hxy * dxInv * dyInv;
+  hxz           = hxz * dxInv * dzInv;
+  hyy           = hyy * dyInv * dyInv;
+  hyz           = hyz * dyInv * dzInv;
+  hzz           = hzz * dzInv * dzInv;
+}
+
 /** evaluate value, gradients and hessian
  * @param ix location in x
  * @param iy location in y
@@ -284,10 +377,6 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
                                  T* restrict val_grads_hess,
                                  const size_t out_offset)
 {
-  const intptr_t xs = spline_m->x_stride;
-  const intptr_t ys = spline_m->y_stride;
-  const intptr_t zs = spline_m->z_stride;
-
   T val = T();
   T gx  = T();
   T gy  = T();
@@ -299,53 +388,20 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
   T hyz = T();
   T hzz = T();
 
-  for (int i = 0; i < 4; i++)
-    for (int j = 0; j < 4; j++)
-    {
-      const T* restrict coefs = spline_coefs + ((ix + i) * xs + (iy + j) * ys + iz * zs);
-      const T coefsv          = coefs[index];
-      const T coefsvzs        = coefs[index + zs];
-      const T coefsv2zs       = coefs[index + 2 * zs];
-      const T coefsv3zs       = coefs[index + 3 * zs];
+  evaluate_vgh_impl_v2_core(spline_m, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b, d2c, val, gx, gy,
+                            gz, hxx, hxy, hxz, hyy, hyz, hzz);
 
-
-      const T pre20 = d2a[i] * b[j];
-      const T pre10 = da[i] * b[j];
-      const T pre00 = a[i] * b[j];
-      const T pre11 = da[i] * db[j];
-      const T pre01 = a[i] * db[j];
-      const T pre02 = a[i] * d2b[j];
-
-      T sum0 = c[0] * coefsv + c[1] * coefsvzs + c[2] * coefsv2zs + c[3] * coefsv3zs;
-      T sum1 = dc[0] * coefsv + dc[1] * coefsvzs + dc[2] * coefsv2zs + dc[3] * coefsv3zs;
-      T sum2 = d2c[0] * coefsv + d2c[1] * coefsvzs + d2c[2] * coefsv2zs + d2c[3] * coefsv3zs;
-
-      hxx += pre20 * sum0;
-      hxy += pre11 * sum0;
-      hxz += pre10 * sum1;
-      hyy += pre02 * sum0;
-      hyz += pre01 * sum1;
-      hzz += pre00 * sum2;
-      gx += pre10 * sum0;
-      gy += pre01 * sum0;
-      gz += pre00 * sum1;
-      val += pre00 * sum0;
-    }
-
-  const T dxInv = spline_m->x_grid.delta_inv;
-  const T dyInv = spline_m->y_grid.delta_inv;
-  const T dzInv = spline_m->z_grid.delta_inv;
   // put data back to the result vector
   val_grads_hess[0]              = val;
-  val_grads_hess[out_offset]     = gx * dxInv;
-  val_grads_hess[out_offset * 2] = gy * dyInv;
-  val_grads_hess[out_offset * 3] = gz * dzInv;
-  val_grads_hess[out_offset * 4] = hxx * dxInv * dxInv;
-  val_grads_hess[out_offset * 5] = hxy * dxInv * dyInv;
-  val_grads_hess[out_offset * 6] = hxz * dxInv * dzInv;
-  val_grads_hess[out_offset * 7] = hyy * dyInv * dyInv;
-  val_grads_hess[out_offset * 8] = hyz * dyInv * dzInv;
-  val_grads_hess[out_offset * 9] = hzz * dzInv * dzInv;
+  val_grads_hess[out_offset]     = gx;
+  val_grads_hess[out_offset * 2] = gy;
+  val_grads_hess[out_offset * 3] = gz;
+  val_grads_hess[out_offset * 4] = hxx;
+  val_grads_hess[out_offset * 5] = hxy;
+  val_grads_hess[out_offset * 6] = hxz;
+  val_grads_hess[out_offset * 7] = hyy;
+  val_grads_hess[out_offset * 8] = hyz;
+  val_grads_hess[out_offset * 9] = hzz;
 }
 
 } // namespace spline2offload
