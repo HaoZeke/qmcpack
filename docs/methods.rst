@@ -1574,11 +1574,13 @@ where :math:`E_\text{ref}` is the :math:`E_\text{pop\_avg}` average over all the
   and gives incorrect results. Setting ``reconfiguration`` to "yes" aborts with an error; the broken code
   path remains reachable only via the value "runwhileincorrect". Use the default dynamic population control.
 
+- ``branchInterval`` (aliases ``branchinterval``, ``substeps``, ``subStep``): number of steps between
+  population-control events. Control always runs on the first step so the trial energy initializes; afterwards
+  branching, load balancing, and trial-energy updates run at the end of every ``branchInterval`` steps. The
+  default of 1 applies population control every step. Must be a positive integer.
+
 - Parameters accepted for input compatibility with the legacy driver but **not honored** by the batched driver:
 
-  - ``branchInterval`` (and its aliases ``branchinterval``, ``substeps``, ``subStep``): the value is read and
-    reported at startup, but the batched driver applies branching and population control after every step
-    regardless of this setting.
   - ``MaxAge``: the value is read and reported at startup, but age-based damping of walker multiplicity is
     not implemented in the batched population control. Persistent (stuck) walkers are neither killed nor
     prevented from branching by this parameter.
