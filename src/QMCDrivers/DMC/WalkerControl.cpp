@@ -179,7 +179,7 @@ void WalkerControl::branch(int iter, MCPopulation& pop, bool do_not_branch)
           walker->Multiplicity = 1.0;
       else
         for (auto& walker : walkers)
-          walker->Multiplicity = static_cast<int>(walker->Weight + rng_());
+          walker->Multiplicity = computeMultiplicity(walker->Weight, walker->Age, max_age_, rng_());
       computeCurData(walkers, curData);
       for (int i = 0, j = LE_MAX; i < num_ranks_; i++, j++)
         num_per_rank_[i] = static_cast<int>(curData[j]);
