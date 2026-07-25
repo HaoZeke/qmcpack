@@ -15,6 +15,7 @@
 #include "spline2/MultiBspline.hpp"
 #include "spline2/MultiBsplineOffloadMapper.hpp"
 #include "spline2/MultiBsplineEval.hpp"
+#include "spline2/MultiBsplineVGLH_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "config/stdlib/Constants.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
@@ -344,6 +345,31 @@ struct test_splines<T, 5, 1> : public test_splines_base<T, 5, 1>
       CHECK(spline_vgh_vals_w2[0] == Approx(-0.9476393279));
       CHECK(spline_vgh_vals_w2[num_splines_padded * SoAFields3D::GRAD1] == Approx(5.989106342));
       CHECK(spline_vgh_vals_w2[num_splines_padded * SoAFields3D::HESS22] == Approx(34.53786329));
+    }
+
+    // the scalar core the batched writer calls, checked against case 1's output
+    SECTION("scalar VGH core matches the full VGH writer")
+    {
+      const auto* spline_ptr = bs.getSplinePtr();
+      int ix, iy, iz;
+      T a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
+      spline2::computeLocationAndFractional(spline_ptr, pos[0], pos[1], pos[2], ix, iy, iz, a, b, c, da, db, dc, d2a,
+                                            d2b, d2c);
+
+      T val, gx, gy, gz, hxx, hxy, hxz, hyy, hyz, hzz;
+      spline2offload::evaluate_vgh_impl_v2_core(spline_ptr, spline_ptr->coefs, ix, iy, iz, 0, a, b, c, da, db, dc, d2a,
+                                                d2b, d2c, val, gx, gy, gz, hxx, hxy, hxz, hyy, hyz, hzz);
+
+      CHECK(val == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::VAL]));
+      CHECK(gx == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::GRAD0]));
+      CHECK(gy == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::GRAD1]));
+      CHECK(gz == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::GRAD2]));
+      CHECK(hxx == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS00]));
+      CHECK(hxy == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS01]));
+      CHECK(hxz == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS02]));
+      CHECK(hyy == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS11]));
+      CHECK(hyz == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS12]));
+      CHECK(hzz == Approx(spline_vgh_vals[num_splines_padded * SoAFields3D::HESS22]));
     }
 
     // case 2, choose SoAFields3D::NUM_FIELDS, num_pos, num_splines_padded layout
