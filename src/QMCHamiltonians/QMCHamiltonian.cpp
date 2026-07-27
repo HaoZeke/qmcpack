@@ -23,6 +23,7 @@
 #include "QMCWaveFunctions/Fermion/MultiSlaterDetTableMethod.h"
 #include "Utilities/TimerManager.h"
 #include "BareKineticEnergy.h"
+#include "NonLocalECPotential.h"
 #include "Containers/MinimalContainers/RecordArray.hpp"
 #include "type_traits/ConvertToReal.h"
 #include "CPU/math.hpp"
@@ -955,8 +956,21 @@ std::vector<int> QMCHamiltonian::mw_makeNonLocalMoves(const RefVectorWithLeader<
                                                       NonLocalTOperator& move_op)
 {
   std::vector<int> num_accepts(ham_list.size(), 0);
-  for (int iw = 0; iw < ham_list.size(); ++iw)
-    num_accepts[iw] = ham_list[iw].makeNonLocalMoves(wf_list[iw], p_list[iw], move_op);
+  auto& ham_leader = ham_list.getLeader();
+  for (int i = 0; i < ham_leader.H.size(); ++i)
+    if (dynamic_cast<NonLocalECPotential*>(ham_leader.H[i].get()))
+    {
+      RefVectorWithLeader<OperatorBase> o_list(*ham_leader.H[i]);
+      o_list.reserve(ham_list.size());
+      for (int iw = 0; iw < ham_list.size(); ++iw)
+        o_list.push_back(*ham_list[iw].H[i]);
+      const auto counts = NonLocalECPotential::mw_makeNonLocalMovesPbyP(o_list, wf_list, p_list, move_op);
+      for (int iw = 0; iw < ham_list.size(); ++iw)
+        num_accepts[iw] += counts[iw];
+    }
+    else
+      for (int iw = 0; iw < ham_list.size(); ++iw)
+        num_accepts[iw] += ham_list[iw].H[i]->makeNonLocalMovesPbyP(wf_list[iw], p_list[iw], move_op);
   return num_accepts;
 }
 
