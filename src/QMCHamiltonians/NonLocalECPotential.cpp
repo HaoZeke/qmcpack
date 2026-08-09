@@ -40,6 +40,8 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
   /// a crowds worth of per particle nonlocal ecp potential values
   Matrix<Real> ve_samples;
   Matrix<Real> vi_samples;
+  /// T-move random values for a sweep, drawn in serial walker order
+  Matrix<Real> tmove_rng_vals;
 };
 
 /** constructor
@@ -675,8 +677,9 @@ std::vector<int> NonLocalECPotential::mw_makeV1TmovesBatched(const RefVectorWith
 
   // generate random numbers in the order exactly the same as serialization code path.
   // Note that: O.myRNG of the same batch are exactly identical and thus the order matters.
-  // ad-hoc allocating rng_vals memory is sub-optimal and needs to be taken care.
-  Matrix<RealType> rng_vals(nw, pset_leader.getTotalNum());
+  // The buffer lives in the multi-walker resource so a sweep allocates nothing.
+  auto& rng_vals = O_leader.mw_res_handle_.getResource().tmove_rng_vals;
+  rng_vals.resize(nw, pset_leader.getTotalNum());
   for (int iw = 0; iw < rng_vals.rows(); iw++)
   {
     auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
