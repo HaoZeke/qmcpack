@@ -398,6 +398,28 @@ public:
    */
   virtual int makeNonLocalMovesPbyP(TrialWaveFunction& psi, ParticleSet& P, NonLocalTOperator& move_op) { return 0; }
 
+  /** make non local moves for a walker batch, one operator slot at a time
+   * @param o_list this operator across the walker batch
+   * @param wf_list trial wavefunctions of the batch
+   * @param p_list particle sets of the batch
+   * @param move_op the T-move selector
+   * @return the number of accepted moves per walker
+   *
+   * The base implementation sweeps walkers with the per-walker virtual and
+   * therefore consumes the crowd-shared RNG stream in exactly the per-walker
+   * order. Overrides must preserve that consumption order.
+   */
+  virtual std::vector<int> mw_makeNonLocalMovesPbyP(const RefVectorWithLeader<OperatorBase>& o_list,
+                                                    const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                                    const RefVectorWithLeader<ParticleSet>& p_list,
+                                                    NonLocalTOperator& move_op) const
+  {
+    std::vector<int> num_accepts(o_list.size(), 0);
+    for (size_t iw = 0; iw < o_list.size(); ++iw)
+      num_accepts[iw] = o_list[iw].makeNonLocalMovesPbyP(wf_list[iw], p_list[iw], move_op);
+    return num_accepts;
+  }
+
   /** 
    * @brief Update data associated with a particleset.
    * Default implementation does nothing. Only A-A interactions for s needs to implement its own method.
