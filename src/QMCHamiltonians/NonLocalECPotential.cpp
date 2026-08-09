@@ -638,7 +638,19 @@ int NonLocalECPotential::makeNonLocalMovesPbyP(TrialWaveFunction& psi, ParticleS
 std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWithLeader<OperatorBase>& o_list,
                                                                const RefVectorWithLeader<TrialWaveFunction>& wf_list,
                                                                const RefVectorWithLeader<ParticleSet>& p_list,
-                                                               NonLocalTOperator& move_op)
+                                                               NonLocalTOperator& move_op) const
+{
+#if defined(ENABLE_OFFLOAD)
+  return mw_makeV1TmovesBatched(o_list, wf_list, p_list, move_op);
+#else
+  return OperatorBase::mw_makeNonLocalMovesPbyP(o_list, wf_list, p_list, move_op);
+#endif
+}
+
+std::vector<int> NonLocalECPotential::mw_makeV1TmovesBatched(const RefVectorWithLeader<OperatorBase>& o_list,
+                                                             const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                                             const RefVectorWithLeader<ParticleSet>& p_list,
+                                                             NonLocalTOperator& move_op)
 {
   const size_t nw = o_list.size();
   std::vector<int> num_accepted(nw, 0);

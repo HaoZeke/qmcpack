@@ -113,10 +113,21 @@ public:
    *
    * @return the number of accepted moves per walker
    */
-  static std::vector<int> mw_makeNonLocalMovesPbyP(const RefVectorWithLeader<OperatorBase>& o_list,
-                                                   const RefVectorWithLeader<TrialWaveFunction>& wf_list,
-                                                   const RefVectorWithLeader<ParticleSet>& p_list,
-                                                   NonLocalTOperator& move_op);
+  static std::vector<int> mw_makeV1TmovesBatched(const RefVectorWithLeader<OperatorBase>& o_list,
+                                                 const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                                 const RefVectorWithLeader<ParticleSet>& p_list,
+                                                 NonLocalTOperator& move_op);
+
+  /** dispatch between the batched sweep and the per-walker base loop
+   *
+   * Batching pays for the extra bookkeeping only where candidate
+   * evaluations carry kernel-launch latency, so offload builds take the
+   * batched sweep and host builds keep the per-walker loop.
+   */
+  std::vector<int> mw_makeNonLocalMovesPbyP(const RefVectorWithLeader<OperatorBase>& o_list,
+                                            const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                            const RefVectorWithLeader<ParticleSet>& p_list,
+                                            NonLocalTOperator& move_op) const override;
 
   Return_t evaluateValueAndDerivatives(TrialWaveFunction& psi,
                                        ParticleSet& P,
