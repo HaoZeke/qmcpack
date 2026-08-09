@@ -375,7 +375,7 @@ TmoveV1Result runTmoveV1(bool batched, bool use_VP)
 
   TmoveV1Result res;
   if (batched)
-    res.accepts = NonLocalECPotential::mw_makeNonLocalMovesPbyP(o_list, twf_list, p_list, move_op);
+    res.accepts = NonLocalECPotential::mw_makeV1TmovesBatched(o_list, twf_list, p_list, move_op);
   else
   {
     res.accepts.resize(2);
@@ -485,7 +485,7 @@ TmoveV1Result runTmoveV1Ragged(bool batched, bool use_VP)
 
   TmoveV1Result res;
   if (batched)
-    res.accepts = NonLocalECPotential::mw_makeNonLocalMovesPbyP(o_list, twf_list, p_list, move_op);
+    res.accepts = NonLocalECPotential::mw_makeV1TmovesBatched(o_list, twf_list, p_list, move_op);
   else
   {
     res.accepts.resize(3);
@@ -569,7 +569,7 @@ TmoveV1Result runTmoveV1SingleWalker(bool batched, bool use_VP, const QMCTraits:
 
   TmoveV1Result res;
   if (batched)
-    res.accepts = NonLocalECPotential::mw_makeNonLocalMovesPbyP(o_list, twf_list, p_list, move_op);
+    res.accepts = NonLocalECPotential::mw_makeV1TmovesBatched(o_list, twf_list, p_list, move_op);
   else
   {
     res.accepts.resize(1);
