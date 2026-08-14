@@ -378,6 +378,83 @@ struct test_shared_offload : public test_splines_base<T, 5>
   }
 };
 
+/** Coefficients split into blocks across ranks, evaluated on the device.
+ *
+ * The sharing case above keeps one block and gives every rank the whole table on its
+ * own device. Distributing splits the orbitals into one block per rank, which is what
+ * would let a multi-device node stop holding an identical copy of the coefficients on
+ * every device. MultiBsplineOffloadMapper::mw_evaluate_v already walks the blocks,
+ * taking each block's own spline pointer and coefficients and writing its results at
+ * that block's offset, so the device side of that arrangement is testable now even
+ * though no SPO class asks for it yet: SplineC2COMPTarget and SplineC2ROMPTarget reach
+ * the coefficients through getSplinePtr(), which throws with more than one block.
+ *
+ * The device result is compared against the host evaluation of the same object, which
+ * walks the blocks too, so what is under test is that the blocked device path agrees
+ * with the blocked host path rather than any hard-coded value.
+ */
+template<typename T>
+struct test_distributed_offload : public test_splines_base<T, 5>
+{
+  using base = test_splines_base<T, 5>;
+  using base::bc;
+  using base::data;
+  using base::grid;
+
+  void test(size_t num_splines, unsigned distributed_ranks)
+  {
+    const int world = OHMMS::Controller->size();
+    if (world % distributed_ranks > 0 || num_splines < distributed_ranks)
+      return;
+
+    // one group spanning every rank, as MultiBsplineMPIShared expects
+    auto comm_distributed = std::make_unique<Communicate>(*OHMMS::Controller, 1);
+    auto& comm(*comm_distributed);
+
+    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_distributed), distributed_ranks);
+    REQUIRE(bs.getNumBlocks() == distributed_ranks);
+
+    const size_t npad = getAlignedSize<T>(num_splines);
+    UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
+    auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
+    for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
+      bs.set_spline(*aspline, i);
+    comm.barrier();
+    destroy_Bspline(aspline);
+
+    const TinyVector<T, 3> pos = {0.1, 0.2, 0.3};
+    aligned_vector<T> v_host(npad);
+    bs.evaluate_v(pos, v_host);
+
+    MultiBsplineOffloadMapper<T> mapped_bs(bs);
+    mapped_bs.mapToDevice();
+    mapped_bs.updateToDevice();
+
+    Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
+    pos_arr.updateTo();
+    Vector<T, OffloadAllocator<T>> v_dev(npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    v_dev.updateFrom();
+
+    for (size_t i = 0; i < num_splines; i++)
+      CHECK(v_dev[i] == Approx(v_host[i]));
+  }
+};
+
+TEST_CASE("MultiBsplineMPIShared distributed offload double", "[spline2]")
+{
+  test_distributed_offload<double>().test(13, 1);
+  test_distributed_offload<double>().test(13, 2);
+  test_distributed_offload<double>().test(13, 4);
+}
+
+TEST_CASE("MultiBsplineMPIShared distributed offload float", "[spline2]")
+{
+  test_distributed_offload<float>().test(11, 1);
+  test_distributed_offload<float>().test(11, 2);
+  test_distributed_offload<float>().test(11, 4);
+}
+
 TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
 {
   test_shared_offload<double>().test(13, 1);
