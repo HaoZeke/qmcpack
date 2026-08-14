@@ -195,7 +195,6 @@ struct test_splines<T, 5> : public test_splines_base<T, 5>
     aligned_vector<T> v(npad);
     bs.evaluate_v(pos, v);
     CHECK(v[0] == Approx(-3.529930688e-12));
-    return;
 
     VectorSoaContainer<T, 3> dv(npad);
     VectorSoaContainer<T, 6> hess(npad);
