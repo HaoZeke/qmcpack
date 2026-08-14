@@ -14,7 +14,10 @@ add_library(spline2_omptarget OBJECT MultiBsplineOffloadMapper.cpp)
 if(HAVE_MPI)
   # shared host coefficients mapped to devices. Needs both the offload compile options
   # this target carries and MPI, so it cannot live in the plain spline2 target.
+  # message carries the include path for the bundled mpi3 wrapper that
+  # Message/Communicate.h pulls in; spline2 gets it below, spline2_omptarget did not.
   target_sources(spline2_omptarget PRIVATE MultiBsplineMPISharedOffload.cpp)
+  target_link_libraries(spline2_omptarget PRIVATE message)
 endif()
 target_link_libraries(spline2_omptarget PUBLIC einspline platform_runtime)
 
