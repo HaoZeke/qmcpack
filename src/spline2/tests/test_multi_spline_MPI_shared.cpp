@@ -329,23 +329,24 @@ struct test_shared_offload : public test_splines_base<T, 5>
   using base::data;
   using base::grid;
 
-  void test(size_t num_splines, unsigned shared_ranks)
+  void test(size_t num_splines, unsigned shared_ranks, unsigned distributed_ranks = 1)
   {
     // the second argument of Communicate(const Communicate&, int nparts, int) is the
-    // number of groups, not the size of one, so a group of shared_ranks ranks needs
-    // world/shared_ranks parts. Passing the world size instead yields that many groups
-    // of one rank each, comm.size() == 1 everywhere, and no sharing to test.
-    const int world = OHMMS::Controller->size();
-    if (world % shared_ranks > 0)
+    // number of groups, not the size of one, so a group of this size needs
+    // world/(distributed*shared) parts. Passing the world size instead yields that many
+    // groups of one rank each, comm.size() == 1 everywhere, and nothing to test.
+    const int world      = OHMMS::Controller->size();
+    const unsigned group = distributed_ranks * shared_ranks;
+    if (world % group > 0 || num_splines < distributed_ranks)
       return;
-    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, world / shared_ranks);
+    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, world / group);
     auto& comm(*comm_shared);
-    REQUIRE(comm.size() == static_cast<int>(shared_ranks));
+    REQUIRE(comm.size() == static_cast<int>(group));
 
-    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared));
+    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
+    REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
     const size_t npad = getAlignedSize<T>(num_splines);
-    REQUIRE(bs.getNumBlocks() == 1);
     REQUIRE(bs.num_splines_padded() == npad);
 
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
@@ -458,12 +459,17 @@ TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
 {
   test_shared_offload<double>().test(13, 1);
   test_shared_offload<double>().test(13, 2);
+  // shared and distributed together: two blocks, each shared across two ranks
+  test_shared_offload<double>().test(13, 2, 2);
+  test_shared_offload<double>().test(13, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2]")
 {
   test_shared_offload<float>().test(11, 1);
   test_shared_offload<float>().test(11, 2);
+  test_shared_offload<float>().test(11, 2, 2);
+  test_shared_offload<float>().test(11, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPIShared periodic double", "[spline2]")
