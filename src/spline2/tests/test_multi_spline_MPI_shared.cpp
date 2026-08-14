@@ -99,9 +99,12 @@ struct test_splines : public test_splines_base<T, GRID_SIZE>
 
   void test(size_t num_splines)
   {
-    auto comm_distributed = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size());
+    // one group spanning every rank: the constructor's communicator covers
+    // distributed_ranks * shared_ranks ranks, and this case shares across all of
+    // them without distributing, so distributed_ranks is 1
+    auto comm_distributed = std::make_unique<Communicate>(*OHMMS::Controller, 1);
     auto& comm(*comm_distributed);
-    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_distributed));
+    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_distributed), 1);
 
     const size_t npad = getAlignedSize<T>(num_splines);
     REQUIRE(bs.num_splines_padded() == getAlignedSize<T>(num_splines));
@@ -154,9 +157,17 @@ struct test_splines<T, 5> : public test_splines_base<T, 5>
 
   void test(size_t num_splines, unsigned shared_ranks)
   {
-    auto comm_distributed = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size());
+    // nparts is the number of groups the input communicator is split into, not the
+    // number of ranks in one, so 1 gives a single group spanning every rank. That is
+    // what this constructor wants: its communicator covers
+    // distributed_ranks * shared_ranks ranks, and distributed_ranks is derived from
+    // it below. Passing the world size instead produced that many groups of one rank
+    // each, which left comm.size() at 1 and made every shared_ranks > 1 call return
+    // at the guard without testing anything.
+    auto comm_distributed = std::make_unique<Communicate>(*OHMMS::Controller, 1);
 
     auto& comm(*comm_distributed);
+    REQUIRE(comm.size() == OHMMS::Controller->size());
 
     // need sufficient number of ranks to test the distributing and/or sharing feature.
     if (comm.size() % shared_ranks > 0)
