@@ -123,7 +123,12 @@ std::pair<int, int> EinsplineSetBuilder::obtainMemoryAttributes(const xmlNodePtr
   if (shared_ranks < 1)
     shared_ranks = 1;
 
-  if (auto node_comm_size = OHMMS::Controller->NodeComm().size(); node_comm_size % distributed_ranks * shared_ranks > 0)
+  // % and * share a precedence level and associate left to right, so the parentheses
+  // are what the message below describes. Without them this reads
+  // (node_comm_size % distributed_ranks) * shared_ranks, which is 0 whenever
+  // distributed_ranks is 1, and the check never fires.
+  if (auto node_comm_size = OHMMS::Controller->NodeComm().size();
+      node_comm_size % (distributed_ranks * shared_ranks) > 0)
     throw std::runtime_error("The number of MPI ranks per node (" + std::to_string(node_comm_size) +
                              ") is not divisible by the product of distributed_ranks and shared_ranks (" +
                              std::to_string(distributed_ranks * shared_ranks) + ").");
