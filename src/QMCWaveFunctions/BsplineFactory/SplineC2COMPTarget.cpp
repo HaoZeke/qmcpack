@@ -169,7 +169,6 @@ void SplineC2COMPTarget<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
   results_scratch.resize(sposet_padded_size * nVP);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr         = SplineInst->getSplinePtr();
   auto* offload_scratch_ptr      = offload_scratch.data();
   auto* results_scratch_ptr      = results_scratch.data();
   const auto myKcart_padded_size = myKcart->capacity();
@@ -178,8 +177,46 @@ void SplineC2COMPTarget<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
   auto* ratios_private_ptr       = ratios_private.data();
   const auto orb_size            = psiinv.size();
 
+  // per block evaluation, then one pass for the assignment and the ratio reduction,
+  // both of which read offload_scratch across the whole orbital range
+  const size_t num_blocks   = SplineInst->getNumBlocks();
+  const auto& block_offsets = SplineInst->getBlockOffsets();
+
   {
     ScopedTimer offload(offload_timer_);
+
+    for (size_t ib = 0; ib < num_blocks; ib++)
+    {
+      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const size_t block_splines = spline_ptr->num_splines;
+      if (block_splines == 0)
+        continue;
+      const size_t block_offset = block_offsets[ib];
+      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*nVP) \
+                  map(always, to: psiinv_ptr[0:psiinv_pos_copy.size()])")
+      for (int iat = 0; iat < nVP; iat++)
+        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+
+          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+          auto* restrict pos_scratch             = reinterpret_cast<RealType*>(psiinv_ptr + orb_size);
+
+          int ix, iy, iz;
+          ST a[4], b[4], c[4];
+          spline2::computeLocationAndFractional(spline_ptr, ST(pos_scratch[iat * 6 + 3]), ST(pos_scratch[iat * 6 + 4]),
+                                                ST(pos_scratch[iat * 6 + 5]), ix, iy, iz, a, b, c);
+
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = 0; index < last - first; index++)
+            spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
+                                               offload_scratch_iat_ptr + block_offset + first + index);
+        }
+    }
+
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*nVP) \
                 map(always, to: psiinv_ptr[0:psiinv_pos_copy.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*nVP])")
@@ -193,15 +230,6 @@ void SplineC2COMPTarget<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
         auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
         auto* restrict pos_scratch             = reinterpret_cast<RealType*>(psiinv_ptr + orb_size);
 
-        int ix, iy, iz;
-        ST a[4], b[4], c[4];
-        spline2::computeLocationAndFractional(spline_ptr, ST(pos_scratch[iat * 6 + 3]), ST(pos_scratch[iat * 6 + 4]),
-                                              ST(pos_scratch[iat * 6 + 5]), ix, iy, iz, a, b, c);
-
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = 0; index < last - first; index++)
-          spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                             offload_scratch_iat_ptr + first + index);
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, orb_size);
         PRAGMA_OFFLOAD("omp parallel for")
@@ -288,7 +316,6 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
   mw_results_scratch.resize(sposet_padded_size * mw_nVP);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr         = SplineInst->getSplinePtr();
   auto* offload_scratch_ptr      = mw_offload_scratch.data();
   auto* results_scratch_ptr      = mw_results_scratch.data();
   const auto myKcart_padded_size = myKcart->capacity();
@@ -296,8 +323,45 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
   auto* buffer_H2D_ptr           = det_ratios_buffer_H2D.data();
   auto* ratios_private_ptr       = mw_ratios_private.data();
 
+  // per block evaluation first, then assignment and reduction over the whole range
+  const size_t num_blocks   = SplineInst->getNumBlocks();
+  const auto& block_offsets = SplineInst->getBlockOffsets();
+
   {
     ScopedTimer offload(offload_timer_);
+
+    for (size_t ib = 0; ib < num_blocks; ib++)
+    {
+      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const size_t block_splines = spline_ptr->num_splines;
+      if (block_splines == 0)
+        continue;
+      const size_t block_offset = block_offsets[ib];
+      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+      for (int iat = 0; iat < mw_nVP; iat++)
+        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+
+          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+          auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+
+          int ix, iy, iz;
+          ST a[4], b[4], c[4];
+          spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
+                                                pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
+
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = 0; index < last - first; index++)
+            spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
+                                               offload_scratch_iat_ptr + block_offset + first + index);
+        }
+    }
+
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
                 map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
@@ -313,15 +377,6 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
         auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
         auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
-        int ix, iy, iz;
-        ST a[4], b[4], c[4];
-        spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
-                                              pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
-
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = 0; index < last - first; index++)
-          spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                             offload_scratch_iat_ptr + first + index);
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, orb_size);
         PRAGMA_OFFLOAD("omp parallel for")
