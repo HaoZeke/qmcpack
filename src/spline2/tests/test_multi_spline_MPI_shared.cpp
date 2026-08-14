@@ -321,10 +321,16 @@ struct test_shared_offload : public test_splines_base<T, 5>
 
   void test(size_t num_splines, unsigned shared_ranks)
   {
-    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size());
-    auto& comm(*comm_shared);
-    if (comm.size() % shared_ranks > 0)
+    // the second argument of Communicate(const Communicate&, int nparts, int) is the
+    // number of groups, not the size of one, so a group of shared_ranks ranks needs
+    // world/shared_ranks parts. Passing the world size instead yields that many groups
+    // of one rank each, comm.size() == 1 everywhere, and no sharing to test.
+    const int world = OHMMS::Controller->size();
+    if (world % shared_ranks > 0)
       return;
+    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, world / shared_ranks);
+    auto& comm(*comm_shared);
+    REQUIRE(comm.size() == static_cast<int>(shared_ranks));
 
     MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared));
 
