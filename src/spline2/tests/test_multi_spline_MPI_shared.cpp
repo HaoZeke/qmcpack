@@ -14,6 +14,7 @@
 #include "OhmmsSoA/VectorSoaContainer.h"
 #include "spline2/MultiBsplineMPIShared.hpp"
 #include "spline2/MultiBsplineOffloadMapper.hpp"
+#include "spline2/MultiBsplineMPISharedOffload.hpp"
 #include "spline2/MultiBsplineEval.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "config/stdlib/Constants.h"
@@ -299,6 +300,79 @@ struct test_splines<T, 5> : public test_splines_base<T, 5>
     CHECK(spline_vgh_vals_w2[num_splines_padded * SoAFields3D::HESS22] == Approx(34.53786329));
   }
 };
+
+/** Coefficients in a shared window, evaluated through a device mapping.
+ *
+ * Covers the path MultiBsplineMPISharedOffload puts into production: the coefficients
+ * are allocated once per group of ranks in an MPI-3 shared window, mapped onto the
+ * device, and read back by the mapper's multi-walker evaluation. The values are
+ * compared against the host evaluation of the same object, so the check is on the
+ * mapping rather than on any hard-coded number.
+ *
+ * Without ENABLE_OFFLOAD the offload pragmas compile away and this still exercises the
+ * shared window and the blocked evaluation, so it is worth running on host builds too.
+ */
+template<typename T>
+struct test_shared_offload : public test_splines_base<T, 5>
+{
+  using base = test_splines_base<T, 5>;
+  using base::bc;
+  using base::data;
+  using base::grid;
+
+  void test(size_t num_splines, unsigned shared_ranks)
+  {
+    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size());
+    auto& comm(*comm_shared);
+    if (comm.size() % shared_ranks > 0)
+      return;
+
+    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared));
+
+    const size_t npad = getAlignedSize<T>(num_splines);
+    REQUIRE(bs.getNumBlocks() == 1);
+    REQUIRE(bs.num_splines_padded() == npad);
+
+    UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
+    auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
+    for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
+      bs.set_spline(*aspline, i);
+    comm.barrier();
+    destroy_Bspline(aspline);
+
+    // pushes the shared coefficients to the device and repairs the device coefs pointer
+    bs.finalize();
+
+    const TinyVector<T, 3> pos = {0.1, 0.2, 0.3};
+    aligned_vector<T> v_host(npad);
+    bs.evaluate_v(pos, v_host);
+
+    MultiBsplineOffloadMapper<T> mapped_bs(bs);
+    mapped_bs.mapToDevice();
+    mapped_bs.updateToDevice();
+
+    Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
+    pos_arr.updateTo();
+    Vector<T, OffloadAllocator<T>> v_dev(npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    v_dev.updateFrom();
+
+    for (size_t i = 0; i < num_splines; i++)
+      CHECK(v_dev[i] == Approx(v_host[i]));
+  }
+};
+
+TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
+{
+  test_shared_offload<double>().test(13, 1);
+  test_shared_offload<double>().test(13, 2);
+}
+
+TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2]")
+{
+  test_shared_offload<float>().test(11, 1);
+  test_shared_offload<float>().test(11, 2);
+}
 
 TEST_CASE("MultiBsplineMPIShared periodic double", "[spline2]")
 {
