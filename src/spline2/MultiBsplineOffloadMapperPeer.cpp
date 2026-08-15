@@ -22,7 +22,7 @@ namespace qmcplusplus
 {
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
-    : Base(host_bsplines), comm_(comm), is_owner_(comm.rank() == 0)
+    : Base(host_bsplines), comm_(comm)
 {
   // the coefficient mappings here come from omp_target_associate_ptr against memory
   // this object may not own, so the base destructor must not try to delete them
@@ -33,21 +33,36 @@ MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBsplin
 template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 {
-  const int dev = omp_get_default_device();
-  device_ptrs_.assign(Base::host_bsplines_.getNumBlocks(), nullptr);
+  const int dev     = omp_get_default_device();
+  const int nranks  = comm_.size();
+  const int my_rank = comm_.rank();
+  const int nblocks = Base::host_bsplines_.getNumBlocks();
+  device_ptrs_.assign(nblocks, nullptr);
 
-  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
+  // Ownership is spread across the ranks rather than parked on rank 0, and that is
+  // what makes this worth doing. A single owner holding the whole table leaves its
+  // device carrying all of it while the others carry none, and since walkers are
+  // balanced across ranks the owner's device stays the binding constraint: the memory
+  // freed elsewhere cannot be used. Giving each rank one block puts an equal share on
+  // every device, and each reads the rest over the interconnect.
+  for (int ib = 0; ib < nblocks; ib++)
   {
-    auto* spline_m = &Base::host_bsplines_.getBlock(ib);
-    auto* coefs    = Base::block_coefs_[ib];
+    auto* spline_m     = &Base::host_bsplines_.getBlock(ib);
+    auto* coefs        = Base::block_coefs_[ib];
     const size_t bytes = spline_m->coefs_size * sizeof(T);
+    const int owner    = ib % nranks;
 
     // the descriptor is small and per rank; only the coefficients are worth sharing
     PRAGMA_OFFLOAD("omp target enter data map(to: spline_m[:1])")
 
+    // an empty block has nothing to export: cudaMalloc of zero bytes yields a pointer
+    // that cudaIpcGetMemHandle rejects with an invalid argument
+    if (bytes == 0)
+      continue;
+
     void* dptr = nullptr;
     cudaIpcMemHandle_t handle;
-    if (is_owner_)
+    if (my_rank == owner)
     {
       cudaErrorCheck(cudaMalloc(&dptr, bytes), "cudaMalloc failed in MultiBsplineOffloadMapperPeer!");
       cudaErrorCheck(cudaIpcGetMemHandle(&handle, dptr),
@@ -56,9 +71,9 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 
     // raw MPI_Bcast rather than Communicate::bcast, which is instantiated only for
     // the arithmetic types; an IPC handle is an opaque byte blob
-    MPI_Bcast(&handle, sizeof(handle), MPI_BYTE, 0, comm_.getMPI());
+    MPI_Bcast(&handle, sizeof(handle), MPI_BYTE, owner, comm_.getMPI());
 
-    if (!is_owner_)
+    if (my_rank != owner)
     {
       // cudaIpcMemLazyEnablePeerAccess turns on access to the owner's device on first
       // use. It fails with an invalid argument when the owner's device is not visible
@@ -82,10 +97,11 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
 {
-  // one physical copy, so one rank writes it and the rest wait rather than each
-  // pushing identical bytes over the link
-  if (is_owner_)
-    for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
+  // each block has one physical copy, so its owner writes it and the rest wait rather
+  // than pushing identical bytes at memory they do not own
+  const int nranks = comm_.size();
+  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
+    if (comm_.rank() == ib % nranks)
     {
       auto* spline_m = &Base::host_bsplines_.getBlock(ib);
       auto* coefs    = Base::block_coefs_[ib];
@@ -106,7 +122,7 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
     if (device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
     {
       omp_target_disassociate_ptr(coefs, dev);
-      if (is_owner_)
+      if (comm_.rank() == ib % comm_.size())
         cudaFree(device_ptrs_[ib]);
       else
         cudaIpcCloseMemHandle(device_ptrs_[ib]);

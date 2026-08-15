@@ -462,12 +462,16 @@ struct test_peer_offload : public test_splines_base<T, 5>
   using base::data;
   using base::grid;
 
-  void test(size_t num_splines)
+  void test(size_t num_splines, unsigned distributed_ranks = 1)
   {
+    const int world = OHMMS::Controller->size();
+    if (world % distributed_ranks > 0 || num_splines < distributed_ranks)
+      return;
     auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, 1);
     auto& comm(*comm_shared);
 
-    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_shared), 1);
+    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
+    REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
     const size_t npad      = getAlignedSize<T>(num_splines);
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
@@ -500,6 +504,10 @@ TEST_CASE("MultiBsplineOffloadMapperPeer shared device copy", "[spline2]")
 {
   test_peer_offload<double>().test(13);
   test_peer_offload<float>().test(11);
+  // more than one block, so ownership rotates and every rank allocates a share
+  test_peer_offload<double>().test(13, 2);
+  test_peer_offload<float>().test(11, 2);
+  test_peer_offload<double>().test(13, 4);
 }
 
 TEST_CASE("MultiBsplineMPIShared distributed offload double", "[spline2]")
