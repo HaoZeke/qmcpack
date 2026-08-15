@@ -42,6 +42,8 @@ void MultiBsplineOffloadMapper<T>::mapToDevice()
 template<typename T>
 MultiBsplineOffloadMapper<T>::~MultiBsplineOffloadMapper()
 {
+  if (!owns_coefs_mapping_)
+    return;
   for (int ib = 0; ib < host_bsplines_.getNumBlocks(); ib++)
   {
     auto* spline_m = &host_bsplines_.getBlock(ib);
