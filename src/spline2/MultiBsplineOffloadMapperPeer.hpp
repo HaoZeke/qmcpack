@@ -59,10 +59,8 @@ class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>
 
   /// ranks sharing one device copy; must all be on the same node
   Communicate& comm_;
-  /// device allocation per block, owned by rank 0 of comm_ and opened by the others
+  /// device allocation per block; block ib lives on the device of rank ib % size
   std::vector<void*> device_ptrs_;
-  /// whether this rank allocated the copy rather than opening someone else's
-  const bool is_owner_;
 
 public:
   MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm);
