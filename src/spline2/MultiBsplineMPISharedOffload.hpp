@@ -20,6 +20,7 @@
 #include "config.h"
 #include "MultiBsplineMPIShared.hpp"
 #include "MultiBsplineOffloadMapper.hpp"
+#include "MultiBsplineOffloadMapperPeer.hpp"
 
 namespace qmcplusplus
 {
@@ -76,7 +77,14 @@ public:
   {
     // the base constructor has published every block's coefs pointer by now, so the
     // mapper can record them and reserve device space to copy into at finalize time
-    mapper_ = std::make_unique<MultiBsplineOffloadMapper<T>>(*this);
+    // A group of more than one rank shares the coefficients on the host already, and
+    // on a node whose devices can address each other they can share the device copy
+    // too. That is the half that matters: the host copy is not what limits walkers per
+    // device, the device copy is. One rank per device otherwise, as before.
+    if (Base::getSharingComm().size() > 1)
+      mapper_ = std::make_unique<MultiBsplineOffloadMapperPeer<T>>(*this, Base::getSharingComm());
+    else
+      mapper_ = std::make_unique<MultiBsplineOffloadMapper<T>>(*this);
     mapper_->mapToDevice();
   }
 
