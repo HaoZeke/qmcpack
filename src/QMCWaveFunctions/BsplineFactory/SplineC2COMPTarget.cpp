@@ -10,6 +10,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 
+#include <stdexcept>
 #include "SplineC2COMPTarget.h"
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
@@ -27,6 +28,13 @@ SplineC2COMPTarget<ST>::SplineC2COMPTarget(const SplineC2COMPTarget& in) = defau
 template<typename ST>
 void SplineC2COMPTarget<ST>::storeParamsBeforeRotation()
 {
+  // Rotation mixes every orbital with every other, so with the coefficients divided
+  // into blocks each output block would need input from all of them: a cross-block
+  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // a single block. Saying so here beats the bare throw from getSplinePtr().
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineC2COMPTarget: orbital rotation is not implemented for coefficients "
+                             "distributed across ranks; set distributed_ranks to 1 for optimisation runs.");
   const auto spline_ptr     = SplineInst->getSplinePtr();
   const auto coefs_tot_size = spline_ptr->coefs_size;
   coef_copy_                = std::make_shared<std::vector<ST>>(coefs_tot_size);
@@ -37,6 +45,13 @@ void SplineC2COMPTarget<ST>::storeParamsBeforeRotation()
 template<typename ST>
 void SplineC2COMPTarget<ST>::applyRotation(const ValueMatrix& rot_mat, bool use_stored_copy)
 {
+  // Rotation mixes every orbital with every other, so with the coefficients divided
+  // into blocks each output block would need input from all of them: a cross-block
+  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // a single block. Saying so here beats the bare throw from getSplinePtr().
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineC2COMPTarget: orbital rotation is not implemented for coefficients "
+                             "distributed across ranks; set distributed_ranks to 1 for optimisation runs.");
   const auto spline_ptr = SplineInst->getSplinePtr();
   assert(spline_ptr != nullptr);
   const auto spl_coefs      = spline_ptr->coefs;
@@ -129,7 +144,7 @@ void SplineC2COMPTarget<ST>::evaluateValue(const ParticleSet& P, const int iat, 
     // Factor of 2 because psi is complex and the spline storage and evaluation uses a real type
     FairDivideAligned(2 * psi.size(), getAlignment<ST>(), omp_get_num_threads(), omp_get_thread_num(), first, last);
 
-    spline2::evaluate3d(SplineInst->getSplinePtr(), ru, myV, first, last);
+    SplineInst->evaluate_v(ru, myV, first, last);
     assign_v(r, myV, psi, first / 2, last / 2);
   }
 }
@@ -851,14 +866,34 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
           const auto* restrict pos_iw_ptr = reinterpret_cast<ST*>(buffer_H2D_ptr + buffer_H2D_stride * iw);
 
           int ix, iy, iz;
+          // The prologue is uniform across the team: one position gives one set of
+          // prefactors. In generic mode a single thread computed it; SPMD promotion has
+          // every thread recompute it, and that is not free. Widening the team to 256
+          // threads leaves occupancy and useful work unchanged yet doubles the kernel
+          // time, so this redundancy is a large part of what the kernel spends.
+          //
+          // Team-shared results computed under masked, with a barrier, give one
+          // evaluation per team again without giving up SPMD for the loop that follows.
           ST a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
-          spline2::computeLocationAndFractional(spline_ptr, pos_iw_ptr[3], pos_iw_ptr[4], pos_iw_ptr[5], ix, iy, iz, a,
-                                                b, c, da, db, dc, d2a, d2b, d2c);
+          ST symGGt[6];
+          PRAGMA_OFFLOAD("omp allocate(ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt) allocator(omp_pteam_mem_alloc)")
 
-          const ST symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
-                                GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
+          PRAGMA_OFFLOAD("omp parallel")
+          {
+            PRAGMA_OFFLOAD("omp masked")
+            {
+              spline2::computeLocationAndFractional(spline_ptr, pos_iw_ptr[3], pos_iw_ptr[4], pos_iw_ptr[5], ix, iy, iz,
+                                                    a, b, c, da, db, dc, d2a, d2b, d2c);
+              symGGt[0] = GGt_ptr[0];
+              symGGt[1] = GGt_ptr[1] + GGt_ptr[3];
+              symGGt[2] = GGt_ptr[2] + GGt_ptr[6];
+              symGGt[3] = GGt_ptr[4];
+              symGGt[4] = GGt_ptr[5] + GGt_ptr[7];
+              symGGt[5] = GGt_ptr[8];
+            }
+            PRAGMA_OFFLOAD("omp barrier")
 
-          PRAGMA_OFFLOAD("omp parallel for")
+            PRAGMA_OFFLOAD("omp for")
           for (int index = 0; index < last - first; index++)
           {
             // coefficients are indexed within the block, results at the global offset
@@ -873,6 +908,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
                          offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
                          offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
                          offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+            }
           }
         }
     }
@@ -1090,7 +1126,7 @@ void SplineC2COMPTarget<ST>::evaluateVGH(const ParticleSet& P,
     // Factor of 2 because psi is complex and the spline storage and evaluation uses a real type
     FairDivideAligned(2 * psi.size(), getAlignment<ST>(), omp_get_num_threads(), omp_get_thread_num(), first, last);
 
-    spline2::evaluate3d_vgh(SplineInst->getSplinePtr(), ru, myV, myG, myH, first, last);
+    SplineInst->evaluate_vgh(ru, myV, myG, myH, first, last);
     assign_vgh(r, psi, dpsi, grad_grad_psi, first / 2, last / 2);
   }
 }
@@ -1345,7 +1381,7 @@ void SplineC2COMPTarget<ST>::evaluateVGHGH(const ParticleSet& P,
     int first, last;
     FairDivideAligned(2 * psi.size(), getAlignment<ST>(), omp_get_num_threads(), omp_get_thread_num(), first, last);
 
-    spline2::evaluate3d_vghgh(SplineInst->getSplinePtr(), ru, myV, myG, myH, mygH, first, last);
+    SplineInst->evaluate_vghgh(ru, myV, myG, myH, mygH, first, last);
     assign_vghgh(r, psi, dpsi, grad_grad_psi, grad_grad_grad_psi, first / 2, last / 2);
   }
 }

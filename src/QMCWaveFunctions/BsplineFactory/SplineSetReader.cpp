@@ -57,13 +57,16 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   {
     // Sharing is supported on offload builds: the coefficients live in one MPI-3 shared
     // window per group of ranks and each rank maps that window onto its own device.
-    // Distributing is not, because SplineC2COMPTarget and SplineC2ROMPTarget reach the
-    // coefficients through getSplinePtr(), which requires a single block.
+    // Distributing is supported for the complex offload SPO, whose evaluation paths all
+    // walk the blocks. The real one still reaches the coefficients through
+    // getSplinePtr(), which requires a single block, so it stays restricted.
+#if !defined(QMC_COMPLEX)
     if (distributed_ranks > 1)
-      app_warning() << "Offload implementation doesn't support distributing the memory of spline coefficients. "
-                       "Overriding distributed_ranks to 1."
+      app_warning() << "Offload implementation doesn't support distributing the memory of spline coefficients "
+                       "for real-valued orbitals. Overriding distributed_ranks to 1."
                     << std::endl;
     distributed_ranks = 1;
+#endif
 #if !defined(HAVE_MPI)
     if (shared_ranks > 1)
       app_warning() << "Sharing the memory of spline coefficients requires an MPI build. "
@@ -95,9 +98,10 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   if (use_offload)
   {
 #if defined(HAVE_MPI)
-    if (shared_ranks > 1)
-      multi_splines_ptr =
-          std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines, std::move(dist_comm_ptr));
+    if (shared_ranks > 1 || distributed_ranks > 1)
+      multi_splines_ptr = std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines,
+                                                                             std::move(dist_comm_ptr),
+                                                                             distributed_ranks);
     else
 #endif
       multi_splines_ptr = std::make_unique<MultiBsplineOffload<ST>>(xyz_grid, xyz_bc, num_splines);
