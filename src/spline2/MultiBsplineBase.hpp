@@ -26,6 +26,9 @@
 #include "spline2/bspline_traits.hpp"
 #include "spline2/MultiBsplineEval.hpp"
 
+#include <algorithm>
+#include <utility>
+
 namespace qmcplusplus
 {
 
@@ -210,6 +213,75 @@ public:
   }
 
   virtual void finalize() {};
+
+  /** intersect a global spline range with a block, as [lo, hi) in global indices.
+   *
+   * The blocked evaluations below cover every spline. Callers that divide the range
+   * among threads need the part of each block that falls inside their share, which is
+   * what this returns; hi <= lo means the block is outside it entirely.
+   */
+  inline std::pair<size_t, size_t> blockRange(size_t ib, size_t first, size_t last) const
+  {
+    const size_t off = offsets_[ib];
+    const size_t end = off + spline_blocks[ib]->num_splines;
+    return {std::max(first, off), std::min(last, end)};
+  }
+
+  /** evaluate values for the splines in [first, last), walking the blocks.
+   *
+   * The range form exists because several callers split the splines across host threads
+   * and then evaluate their own share. Doing that through getSplinePtr() requires a
+   * single block; going through the blocks here does not.
+   */
+  template<typename PT, typename VT>
+  inline void evaluate_v(const PT& r, VT& psi, size_t first, size_t last)
+  {
+    for (size_t ib = 0; ib < spline_blocks.size(); ib++)
+    {
+      const auto* spline_m(spline_blocks[ib]);
+      if (spline_m->num_splines == 0)
+        continue;
+      const auto [lo, hi] = blockRange(ib, first, last);
+      if (lo >= hi)
+        continue;
+      spline2::evaluate_v_impl(spline_m, r[0], r[1], r[2], psi.data() + lo, lo - offsets_[ib],
+                               hi - offsets_[ib]);
+    }
+  }
+
+  /// evaluate values, gradients and hessians for the splines in [first, last)
+  template<typename PT, typename VT, typename GT, typename HT>
+  inline void evaluate_vgh(const PT& r, VT& psi, GT& grad, HT& hess, size_t first, size_t last)
+  {
+    for (size_t ib = 0; ib < spline_blocks.size(); ib++)
+    {
+      const auto* spline_m(spline_blocks[ib]);
+      if (spline_m->num_splines == 0)
+        continue;
+      const auto [lo, hi] = blockRange(ib, first, last);
+      if (lo >= hi)
+        continue;
+      spline2::evaluate_vgh_impl(spline_m, r[0], r[1], r[2], psi.data() + lo, grad.data() + lo, hess.data() + lo,
+                                 psi.size(), lo - offsets_[ib], hi - offsets_[ib]);
+    }
+  }
+
+  /// evaluate values, gradients, hessians and grad-hessians for the splines in [first, last)
+  template<typename PT, typename VT, typename GT, typename HT, typename GHT>
+  inline void evaluate_vghgh(const PT& r, VT& psi, GT& grad, HT& hess, GHT& ghess, size_t first, size_t last)
+  {
+    for (size_t ib = 0; ib < spline_blocks.size(); ib++)
+    {
+      const auto* spline_m(spline_blocks[ib]);
+      if (spline_m->num_splines == 0)
+        continue;
+      const auto [lo, hi] = blockRange(ib, first, last);
+      if (lo >= hi)
+        continue;
+      spline2::evaluate_vghgh_impl(spline_m, r[0], r[1], r[2], psi.data() + lo, grad.data() + lo, hess.data() + lo,
+                                   ghess.data() + lo, psi.size(), lo - offsets_[ib], hi - offsets_[ib]);
+    }
+  }
 
   template<typename PT, typename VT>
   inline void evaluate_v(const PT& r, VT& psi)
