@@ -44,6 +44,10 @@ private:
 
   using Base::offsets_;
 
+protected:
+  /// the group of ranks sharing this window, for derived classes that also share on device
+  Communicate& getSharingComm() const { return *comm_; }
+
 public:
   template<typename BCT>
   MultiBsplineMPIShared(const Ugrid grid[3],
