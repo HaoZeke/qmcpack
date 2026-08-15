@@ -26,10 +26,18 @@ class MultiBsplineOffloadMapper
 {
   using HostBspline = MultiBsplineBase<T>;
 
+protected:
   /// reference to a host spline object.
   const HostBspline& host_bsplines_;
   /// array of host coefficient pointers for all the blocks.
   std::vector<const T*> block_coefs_;
+  /** whether this object created the coefficient mappings and must delete them.
+   *
+   * A derived class that binds the coefficients some other way, for instance to memory
+   * another process allocated, clears this so the destructor here does not delete a
+   * mapping it never made.
+   */
+  bool owns_coefs_mapping_ = true;
 
   /// map host coefficients to devices
   void mapToDevice();
@@ -37,10 +45,10 @@ class MultiBsplineOffloadMapper
 public:
   MultiBsplineOffloadMapper(const HostBspline& host_bsplines);
 
-  ~MultiBsplineOffloadMapper();
+  virtual ~MultiBsplineOffloadMapper();
 
   /// update device coeficients
-  void updateToDevice();
+  virtual void updateToDevice();
 
   /** evaluate spline values
    * @param num_pos, number of electron positions
