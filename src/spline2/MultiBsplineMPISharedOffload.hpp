@@ -99,12 +99,46 @@ public:
    */
   void finalize() override
   {
+    // The blocks live in one shared window and are adjacent, so naming each block's
+    // coefs in its own map clause asks the runtime to extend a mapping it already
+    // holds, which it refuses: "explicit extension not allowed", after which any
+    // target region dereferencing them gets a null device pointer. The mapper has
+    // already allocated the whole span, so push it once and then only repair each
+    // descriptor's pointer, with no coefficient mapping in that clause.
+    const T* span_begin = nullptr;
+    const T* span_end   = nullptr;
+    for (size_t ib = 0; ib < Base::getNumBlocks(); ib++)
+    {
+      const auto& block = Base::getBlock(ib);
+      if (block.num_splines == 0)
+        continue;
+      const T* b = block.coefs;
+      const T* e = b + block.coefs_size;
+      span_begin = (span_begin == nullptr || b < span_begin) ? b : span_begin;
+      span_end   = (span_end == nullptr || e > span_end) ? e : span_end;
+    }
+
+    if (span_begin != nullptr)
+    {
+      auto* coefs             = span_begin;
+      const size_t span_count = static_cast<size_t>(span_end - span_begin);
+      PRAGMA_OFFLOAD("omp target update to(coefs[:span_count])")
+    }
+
     for (size_t ib = 0; ib < Base::getNumBlocks(); ib++)
     {
       auto* spline_m = &Base::getBlock(ib);
-      auto* coefs    = spline_m->coefs;
-      PRAGMA_OFFLOAD("omp target map(always, to: spline_m[:1], coefs[:spline_m->coefs_size])")
-      { spline_m->coefs = coefs; }
+      if (spline_m->num_splines == 0)
+        continue;
+      auto* coefs = spline_m->coefs;
+      // naming coefs in a map clause is what previously made this store a device
+      // address, and that is the clause that overlaps. use_device_ptr gets the same
+      // address from the span mapping instead, without asking for a second mapping.
+      T* dev_coefs = nullptr;
+      PRAGMA_OFFLOAD("omp target data use_device_ptr(coefs)")
+      { dev_coefs = coefs; }
+      PRAGMA_OFFLOAD("omp target map(always, to: spline_m[:1]) firstprivate(dev_coefs)")
+      { spline_m->coefs = dev_coefs; }
     }
   }
 

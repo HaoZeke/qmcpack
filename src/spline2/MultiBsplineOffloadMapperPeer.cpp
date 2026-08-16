@@ -11,6 +11,7 @@
 
 #include "MultiBsplineOffloadMapperPeer.hpp"
 #include "Message/UniformCommunicateError.h"
+#include <iostream>
 #include "config.h"
 
 #if defined(ENABLE_CUDA)
@@ -24,9 +25,15 @@ template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
     : Base(host_bsplines), comm_(comm)
 {
+#if defined(ENABLE_CUDA)
   // the coefficient mappings here come from omp_target_associate_ptr against memory
-  // this object may not own, so the base destructor must not try to delete them
+  // this object may not own, so the base destructor must not try to delete them.
+  // Without a device runtime that can share memory this class falls back to the base
+  // implementation, which DOES create the mappings, and clearing the flag there would
+  // leave them behind: the next object to allocate nearby is then refused with
+  // "explicit extension not allowed" under OMP_TARGET_OFFLOAD=mandatory.
   Base::owns_coefs_mapping_ = false;
+#endif
 }
 
 #if defined(ENABLE_CUDA)
@@ -59,6 +66,19 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
     // that cudaIpcGetMemHandle rejects with an invalid argument
     if (bytes == 0)
       continue;
+
+    // A group of one rank owns every block, so there is nothing to share and the
+    // ordinary mapping path is both sufficient and better behaved: associating memory
+    // this process already owns leaves the runtime holding the host range after
+    // teardown, and a later object allocating nearby is then refused with "explicit
+    // extension not allowed".
+    if (nranks == 1)
+    {
+      const T* coefs_local = coefs;
+      PRAGMA_OFFLOAD("omp target enter data map(alloc: coefs_local[:spline_m->coefs_size])")
+      device_ptrs_[ib] = nullptr; // nothing IPC-owned to release
+      continue;
+    }
 
     void* dptr = nullptr;
     cudaIpcMemHandle_t handle;
@@ -119,9 +139,19 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
   {
     auto* spline_m = &Base::host_bsplines_.getBlock(ib);
     auto* coefs    = Base::block_coefs_[ib];
-    if (device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
+    if (comm_.size() == 1)
     {
-      omp_target_disassociate_ptr(coefs, dev);
+      const T* coefs_local = coefs;
+      PRAGMA_OFFLOAD("omp target exit data map(delete: coefs_local[:spline_m->coefs_size])")
+    }
+    else if (device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
+    {
+      // a failed disassociate leaves the runtime holding this host range, and the
+      // next object to map an allocation at the same address is refused with
+      // "explicit extension not allowed"
+      if (const int st = omp_target_disassociate_ptr(coefs, dev); st != 0)
+        std::cerr << "MultiBsplineOffloadMapperPeer: omp_target_disassociate_ptr returned " << st
+                  << " for block " << ib << std::endl;
       if (comm_.rank() == ib % comm_.size())
         cudaFree(device_ptrs_[ib]);
       else
