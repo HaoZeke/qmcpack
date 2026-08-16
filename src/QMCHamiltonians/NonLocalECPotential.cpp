@@ -434,6 +434,64 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   ParticleSet& pset_leader = p_list.getLeader();
   const size_t nw          = o_list.size();
 
+  // The scan further down reads the electron-ion table on the host: every electron
+  // against every ion, for every walker, every step, to keep the pairs inside Rmax,
+  // which are a small fraction of what it reads. buildNeighborJobsOnDevice applies the
+  // same filter where the table already is and brings back only the survivors.
+  //
+  // This does not remove the table's own copy back to the host. That copy is what
+  // J1OrbitalSoA reads through getDistRow and getDisplRow, so the table cannot carry
+  // MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST while a one-body Jastrow shares it. What is
+  // removed here is the O(nelec * nions) host traversal per walker per step.
+  bool device_jobs = false;
+  if (const char* c = std::getenv("QMCPACK_DEVICE_NLPP_JOBS"); c && *c == '1')
+  {
+    device_jobs = true;
+    for (size_t iw = 0; iw < nw && device_jobs; iw++)
+    {
+      auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+      O.neighbor_lists.clear();
+      for (int ig = 0; ig < pset_leader.groups(); ++ig)
+        O.nlpp_jobs[ig].clear();
+    }
+
+    auto& res = O_leader.mw_res_handle_.getResource();
+    for (int ig = 0; ig < pset_leader.groups() && device_jobs; ++ig)
+    {
+      if (!buildNeighborJobsOnDevice(o_list, p_list, ig))
+      {
+        device_jobs = false; // no device table, every walker falls back together
+        break;
+      }
+      const size_t max_jobs = (pset_leader.last(ig) - pset_leader.first(ig)) * 2 + 8;
+      for (size_t iw = 0; iw < nw; iw++)
+      {
+        auto& O           = o_list.getCastedElement<NonLocalECPotential>(iw);
+        auto& joblist     = O.nlpp_jobs[ig];
+        const int njobs   = res.job_counts[iw];
+        for (int j = 0; j < njobs; j++)
+        {
+          const size_t slot = iw * max_jobs + j;
+          const int iat     = res.job_ion[slot];
+          const int jel     = res.job_elec[slot];
+          O.neighbor_lists.addElecIonPair(jel, iat);
+          joblist.emplace_back(iat, jel, res.job_dist[slot],
+                               PosType(res.job_displ[slot * 3 + 0], res.job_displ[slot * 3 + 1],
+                                       res.job_displ[slot * 3 + 2]));
+        }
+      }
+    }
+
+    if (!device_jobs) // a partial build must not leave half a list behind
+      for (size_t iw = 0; iw < nw; iw++)
+      {
+        auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+        O.neighbor_lists.clear();
+        for (int ig = 0; ig < pset_leader.groups(); ++ig)
+          O.nlpp_jobs[ig].clear();
+      }
+  }
+
   for (size_t iw = 0; iw < nw; iw++)
   {
     auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
@@ -447,23 +505,26 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         if (O.PPset[ipp])
           O.PPset[ipp]->rotateQuadratureGrid(generateRandomRotationMatrix(*O.myRNG));
 
-    O.neighbor_lists.clear();
     const auto& myTable = P.getDistTableAB(O.myTableIndex);
-    for (int ig = 0; ig < P.groups(); ++ig) //loop over species
+    if (!device_jobs)
     {
-      auto& joblist = O.nlpp_jobs[ig];
-      joblist.clear();
-
-      for (int jel = P.first(ig); jel < P.last(ig); ++jel)
+      O.neighbor_lists.clear();
+      for (int ig = 0; ig < P.groups(); ++ig) //loop over species
       {
-        const auto& dist  = myTable.getDistRow(jel);
-        const auto& displ = myTable.getDisplRow(jel);
-        for (int iat = 0; iat < O.PP.size(); iat++)
-          if (O.PP[iat] != nullptr && dist[iat] < O.PP[iat]->getRmax())
-          {
-            O.neighbor_lists.addElecIonPair(jel, iat);
-            joblist.emplace_back(iat, jel, dist[iat], -displ[iat]);
-          }
+        auto& joblist = O.nlpp_jobs[ig];
+        joblist.clear();
+
+        for (int jel = P.first(ig); jel < P.last(ig); ++jel)
+        {
+          const auto& dist  = myTable.getDistRow(jel);
+          const auto& displ = myTable.getDisplRow(jel);
+          for (int iat = 0; iat < O.PP.size(); iat++)
+            if (O.PP[iat] != nullptr && dist[iat] < O.PP[iat]->getRmax())
+            {
+              O.neighbor_lists.addElecIonPair(jel, iat);
+              joblist.emplace_back(iat, jel, dist[iat], -displ[iat]);
+            }
+        }
       }
     }
     // NOTE: this scan reads the electron-ion table on the host, which is why the table
@@ -479,8 +540,22 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
       for (int ig = 0; ig < P.groups(); ++ig)
         if (buildNeighborJobsOnDevice(o_list, p_list, ig))
         {
-          const int dev_count   = res.job_counts[0];
-          const auto& host_jobs = o_list.getCastedElement<NonLocalECPotential>(0).nlpp_jobs[ig];
+          const int dev_count = res.job_counts[0];
+          // Scan the host table here rather than reading nlpp_jobs: under
+          // QMCPACK_DEVICE_NLPP_JOBS that member is itself device-populated, and
+          // comparing the device against a copy of itself always agrees.
+          std::vector<NLPPJob<Real>> host_jobs;
+          {
+            const auto& myTable = p_list[0].getDistTableAB(O_leader.myTableIndex);
+            for (int jel = p_list[0].first(ig); jel < p_list[0].last(ig); ++jel)
+            {
+              const auto& dist  = myTable.getDistRow(jel);
+              const auto& displ = myTable.getDisplRow(jel);
+              for (int iat = 0; iat < O_leader.PP.size(); iat++)
+                if (O_leader.PP[iat] != nullptr && dist[iat] < O_leader.PP[iat]->getRmax())
+                  host_jobs.emplace_back(iat, jel, dist[iat], -displ[iat]);
+            }
+          }
           if (static_cast<size_t>(dev_count) != host_jobs.size())
             NLPPJobCheck::get().countDisagreed(ig, host_jobs.size(), dev_count);
           else
