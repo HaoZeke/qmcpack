@@ -139,6 +139,7 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   std::vector<RealType> rr_accepted(num_walkers, 0.0);
   // per-particle scratch, reused across the particle loop
   std::vector<RealType> rr(num_walkers, 0.0);
+  std::vector<int> rejects(num_walkers);
 
   {
     ScopedTimer pbyp_local_timer(timers.movepbyp_timer);
@@ -210,7 +211,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         };
 
         // Hopefully a phase change doesn't make any of these transformations fail.
-        std::vector<int> rejects(num_walkers); // instead of std::vector<bool>
+        // reused rather than allocated per particle, as with rr above
+        rejects.resize(num_walkers); // instead of std::vector<bool>
         for (int iw = 0; iw < num_walkers; ++iw)
         {
           checkPhaseChanged(ratios[iw], rejects[iw]);
