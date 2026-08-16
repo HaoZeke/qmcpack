@@ -14,6 +14,7 @@
 #include "OhmmsSoA/VectorSoaContainer.h"
 #include "spline2/MultiBsplineMPIShared.hpp"
 #include "spline2/MultiBsplineOffloadMapper.hpp"
+#include "spline2/MultiBsplineOffloadMapperPeer.hpp"
 #include "spline2/MultiBsplineMPISharedOffload.hpp"
 #include "spline2/MultiBsplineEval.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
@@ -330,23 +331,24 @@ struct test_shared_offload : public test_splines_base<T, 5>
   using base::data;
   using base::grid;
 
-  void test(size_t num_splines, unsigned shared_ranks)
+  void test(size_t num_splines, unsigned shared_ranks, unsigned distributed_ranks = 1)
   {
     // the second argument of Communicate(const Communicate&, int nparts, int) is the
-    // number of groups, not the size of one, so a group of shared_ranks ranks needs
-    // world/shared_ranks parts. Passing the world size instead yields that many groups
-    // of one rank each, comm.size() == 1 everywhere, and no sharing to test.
-    const int world = OHMMS::Controller->size();
-    if (world % shared_ranks > 0)
+    // number of groups, not the size of one, so a group of this size needs
+    // world/(distributed*shared) parts. Passing the world size instead yields that many
+    // groups of one rank each, comm.size() == 1 everywhere, and nothing to test.
+    const int world      = OHMMS::Controller->size();
+    const unsigned group = distributed_ranks * shared_ranks;
+    if (world % group > 0 || num_splines < distributed_ranks)
       return;
-    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, world / shared_ranks);
+    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, world / group);
     auto& comm(*comm_shared);
-    REQUIRE(comm.size() == static_cast<int>(shared_ranks));
+    REQUIRE(comm.size() == static_cast<int>(group));
 
-    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared));
+    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
+    REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
     const size_t npad = getAlignedSize<T>(num_splines);
-    REQUIRE(bs.getNumBlocks() == 1);
     REQUIRE(bs.num_splines_padded() == npad);
 
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
@@ -441,6 +443,73 @@ struct test_distributed_offload : public test_splines_base<T, 5>
   }
 };
 
+/** One device copy of the coefficients, read by every rank in the group.
+ *
+ * MultiBsplineOffloadMapperPeer has the owning rank allocate the device memory and
+ * export a handle, the others open it, and every rank binds it to its own host pointer
+ * with omp_target_associate_ptr. The evaluation is then the ordinary one: what is being
+ * checked is that a rank reading through a pointer it did not allocate gets the same
+ * values as the host evaluation.
+ *
+ * Without a device runtime carrying inter-process handles the class falls back to the
+ * per-rank mapping, so this remains a valid, if less interesting, test everywhere.
+ */
+template<typename T>
+struct test_peer_offload : public test_splines_base<T, 5>
+{
+  using base = test_splines_base<T, 5>;
+  using base::bc;
+  using base::data;
+  using base::grid;
+
+  void test(size_t num_splines, unsigned distributed_ranks = 1)
+  {
+    const int world = OHMMS::Controller->size();
+    if (world % distributed_ranks > 0 || num_splines < distributed_ranks)
+      return;
+    auto comm_shared = std::make_unique<Communicate>(*OHMMS::Controller, 1);
+    auto& comm(*comm_shared);
+
+    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
+    REQUIRE(bs.getNumBlocks() == distributed_ranks);
+
+    const size_t npad      = getAlignedSize<T>(num_splines);
+    UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
+    auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
+    for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
+      bs.set_spline(*aspline, i);
+    comm.barrier();
+    destroy_Bspline(aspline);
+
+    const TinyVector<T, 3> pos = {0.1, 0.2, 0.3};
+    aligned_vector<T> v_host(npad);
+    bs.evaluate_v(pos, v_host);
+
+    MultiBsplineOffloadMapperPeer<T> mapped_bs(bs, comm);
+    mapped_bs.mapToDevice();
+    mapped_bs.updateToDevice();
+
+    Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
+    pos_arr.updateTo();
+    Vector<T, OffloadAllocator<T>> v_dev(npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    v_dev.updateFrom();
+
+    for (size_t i = 0; i < num_splines; i++)
+      CHECK(v_dev[i] == Approx(v_host[i]));
+  }
+};
+
+TEST_CASE("MultiBsplineOffloadMapperPeer shared device copy", "[spline2]")
+{
+  test_peer_offload<double>().test(13);
+  test_peer_offload<float>().test(11);
+  // more than one block, so ownership rotates and every rank allocates a share
+  test_peer_offload<double>().test(13, 2);
+  test_peer_offload<float>().test(11, 2);
+  test_peer_offload<double>().test(13, 4);
+}
+
 TEST_CASE("MultiBsplineMPIShared distributed offload double", "[spline2]")
 {
   test_distributed_offload<double>().test(13, 1);
@@ -459,12 +528,17 @@ TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
 {
   test_shared_offload<double>().test(13, 1);
   test_shared_offload<double>().test(13, 2);
+  // shared and distributed together: two blocks, each shared across two ranks
+  test_shared_offload<double>().test(13, 2, 2);
+  test_shared_offload<double>().test(13, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2]")
 {
   test_shared_offload<float>().test(11, 1);
   test_shared_offload<float>().test(11, 2);
+  test_shared_offload<float>().test(11, 2, 2);
+  test_shared_offload<float>().test(11, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPIShared periodic double", "[spline2]")

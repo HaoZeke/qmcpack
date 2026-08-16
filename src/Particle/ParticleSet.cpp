@@ -312,7 +312,10 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     if (myName == psrc.getName())
       DistTables.push_back(createDistanceTable(*this, description));
     else
-      DistTables.push_back(createDistanceTableAB(psrc, myName, description));
+      // the dispatcher, so an offload source selects SoaDistanceTableABOMPTarget. That
+      // class now implements move() and update() on the host, as the AA offload table
+      // does, which is what particle-by-particle DMC needs from it.
+      DistTables.push_back(createDistanceTable(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
     myDistTableMap[psrc.getName()] = tid;
     app_debug() << "  ... ParticleSet::addTable Create Table #" << tid << " " << DistTables[tid]->getName()

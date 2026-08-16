@@ -17,6 +17,10 @@ if(HAVE_MPI)
   # message carries the include path for the bundled mpi3 wrapper that
   # Message/Communicate.h pulls in; spline2 gets it below, spline2_omptarget did not.
   target_sources(spline2_omptarget PRIVATE MultiBsplineMPISharedOffload.cpp)
+  # one device copy of the coefficients shared across the ranks of a node. Needs a
+  # device runtime with inter-process memory handles, so it compiles to the plain
+  # per-rank mapping without one.
+  target_sources(spline2_omptarget PRIVATE MultiBsplineOffloadMapperPeer.cpp)
   target_link_libraries(spline2_omptarget PRIVATE message)
 endif()
 target_link_libraries(spline2_omptarget PUBLIC einspline platform_runtime)

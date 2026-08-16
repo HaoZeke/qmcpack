@@ -349,6 +349,73 @@ struct PolynomialFunctor3D : public OptimizableFunctorBase
   }
 
   // assume r_1I < L && r_2I < L, compression and screening is handled outside
+  /** One triplet of the polynomial, callable inside a target region.
+   *
+   * The body is the inner block of evaluateV with the array indirection removed: gamma
+   * arrives as a flat (N_eI+1)(N_eI+1)(N_ee+1) block rather than an Array<T,3>, because
+   * a device region cannot walk the host container. Kept beside evaluateV so the two
+   * are edited together; any change to the polynomial has to land in both.
+   */
+  PRAGMA_OFFLOAD("omp declare target")
+  static inline real_type evaluateV_impl(real_type r_12,
+                                         real_type r_1I,
+                                         real_type r_2I,
+                                         const real_type* restrict gamma_flat,
+                                         int N_eI_in,
+                                         int N_ee_in,
+                                         int C_in,
+                                         real_type L)
+  {
+    constexpr real_type czero(0);
+    constexpr real_type cone(1);
+
+    real_type val = czero;
+    real_type r2l(cone);
+    const int mstride = N_ee_in + 1;
+    const int lstride = (N_eI_in + 1) * mstride;
+    for (int l = 0; l <= N_eI_in; l++)
+    {
+      real_type r2m(r2l);
+      for (int m = 0; m <= N_eI_in; m++)
+      {
+        real_type r2n(r2m);
+        const real_type* restrict grow = gamma_flat + l * lstride + m * mstride;
+        for (int n = 0; n <= N_ee_in; n++)
+        {
+          val += grow[n] * r2n;
+          r2n *= r_12;
+        }
+        r2m *= r_2I;
+      }
+      r2l *= r_1I;
+    }
+    const real_type both_minus_L = (r_2I - L) * (r_1I - L);
+    for (int i = 0; i < C_in; i++)
+      val *= both_minus_L;
+    return val;
+  }
+  PRAGMA_OFFLOAD("omp end declare target")
+
+  /// flatten gamma into dst, which must hold (N_eI+1)^2 (N_ee+1) elements
+  inline void copyGammaFlat(real_type* dst) const
+  {
+    const int mstride = N_ee + 1;
+    const int lstride = (N_eI + 1) * mstride;
+    for (int l = 0; l <= N_eI; l++)
+      for (int m = 0; m <= N_eI; m++)
+        for (int n = 0; n <= N_ee; n++)
+          dst[l * lstride + m * mstride + n] = gamma(l, m, n);
+  }
+
+  inline size_t gammaFlatSize() const
+  {
+    return static_cast<size_t>(N_eI + 1) * (N_eI + 1) * (N_ee + 1);
+  }
+
+  inline int getNeI() const { return N_eI; }
+  inline int getNee() const { return N_ee; }
+  inline int getC() const { return C; }
+
   inline real_type evaluateV(int Nptcl,
                              const real_type* restrict r_12_array,
                              const real_type* restrict r_1I_array,
