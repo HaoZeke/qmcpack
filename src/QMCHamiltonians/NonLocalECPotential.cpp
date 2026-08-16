@@ -17,6 +17,9 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <atomic>
+#include <mutex>
+
 #include "NonLocalECPotential.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
 
@@ -368,6 +371,56 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
   return true;
 }
 
+/** Tallies the device neighbour-job check across crowds.
+ *
+ * Every crowd runs the comparison concurrently, so printing per call interleaves the
+ * lines and a torn line cannot be read as either a pass or a failure. The counts are
+ * accumulated instead and reported once, which is also the only form in which
+ * "every job matched" is a statement about the whole run rather than about whichever
+ * lines survived intact.
+ */
+class NLPPJobCheck
+{
+public:
+  static NLPPJobCheck& get()
+  {
+    static NLPPJobCheck singleton;
+    return singleton;
+  }
+
+  void entered() { calls_.fetch_add(1, std::memory_order_relaxed); }
+  void unavailable() { unavailable_.fetch_add(1, std::memory_order_relaxed); }
+
+  void compared(size_t jobs, size_t bad)
+  {
+    jobs_.fetch_add(jobs, std::memory_order_relaxed);
+    mismatches_.fetch_add(bad, std::memory_order_relaxed);
+    groups_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void countDisagreed(int ig, size_t host, int device)
+  {
+    disagreed_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::cerr << "NLPPCHECK count disagreement ig=" << ig << " host=" << host << " device=" << device << '\n';
+  }
+
+  ~NLPPJobCheck()
+  {
+    if (calls_.load() == 0)
+      return;
+    std::cerr << "NLPPCHECK summary: mw_evaluateImpl calls=" << calls_.load() << " group scans=" << groups_.load()
+              << " jobs compared=" << jobs_.load() << " mismatches=" << mismatches_.load()
+              << " count disagreements=" << disagreed_.load() << " device unavailable=" << unavailable_.load()
+              << std::endl;
+  }
+
+private:
+  NLPPJobCheck() = default;
+  std::atomic<size_t> calls_{0}, groups_{0}, jobs_{0}, mismatches_{0}, disagreed_{0}, unavailable_{0};
+  std::mutex mutex_;
+};
+
 void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase>& o_list,
                                           const RefVectorWithLeader<TrialWaveFunction>& wf_list,
                                           const RefVectorWithLeader<ParticleSet>& p_list,
@@ -375,7 +428,8 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
                                           const std::optional<ListenerOption<Real>> listeners,
                                           bool keep_grid)
 {
-  if (std::getenv("QMCPACK_CHECK_DEVICE_NLPP_JOBS")) std::cerr << "NLPPCHECK mw_evaluateImpl entered" << std::endl;
+  if (const char* c = std::getenv("QMCPACK_CHECK_DEVICE_NLPP_JOBS"); c && *c == '1')
+    NLPPJobCheck::get().entered();
   auto& O_leader           = o_list.getCastedLeader<NonLocalECPotential>();
   ParticleSet& pset_leader = p_list.getLeader();
   const size_t nw          = o_list.size();
@@ -425,12 +479,10 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
       for (int ig = 0; ig < P.groups(); ++ig)
         if (buildNeighborJobsOnDevice(o_list, p_list, ig))
         {
-          const size_t max_jobs = (P.last(ig) - P.first(ig)) * 2 + 8;
           const int dev_count   = res.job_counts[0];
           const auto& host_jobs = o_list.getCastedElement<NonLocalECPotential>(0).nlpp_jobs[ig];
           if (static_cast<size_t>(dev_count) != host_jobs.size())
-            std::cerr << "NLPPCHECK ig=" << ig << " count host=" << host_jobs.size() << " device=" << dev_count
-                      << std::endl;
+            NLPPJobCheck::get().countDisagreed(ig, host_jobs.size(), dev_count);
           else
           {
             size_t bad = 0;
@@ -438,11 +490,11 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
               if (res.job_ion[j] != host_jobs[j].ion_id || res.job_elec[j] != host_jobs[j].electron_id ||
                   std::abs(res.job_dist[j] - host_jobs[j].ion_elec_dist) > Real(1e-6))
                 bad++;
-            std::cerr << "NLPPCHECK ig=" << ig << " jobs=" << dev_count << " mismatches=" << bad << std::endl;
+            NLPPJobCheck::get().compared(dev_count, bad);
           }
         }
         else
-          std::cerr << "NLPPCHECK ig=" << ig << " device path unavailable" << std::endl;
+          NLPPJobCheck::get().unavailable();
     }
 
     O.value_ = 0.0;
