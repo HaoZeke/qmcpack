@@ -31,11 +31,35 @@ MultiBsplineOffloadMapper<T>::MultiBsplineOffloadMapper(const HostBspline& host_
 template<typename T>
 void MultiBsplineOffloadMapper<T>::mapToDevice()
 {
+  // Blocks are not independent allocations. MultiBsplineMPIShared places them in one
+  // MPI-3 shared window, so consecutive blocks are adjacent, and mapping them one at a
+  // time makes the second overlap the first:
+  //
+  //   explicit extension not allowed: host address specified is 0x..8c0 (32768 bytes),
+  //   but device allocation maps to host at 0x..6c0 (32768 bytes)
+  //
+  // after which any target region dereferencing them gets a null device pointer. The
+  // descriptors are separate objects and still map individually; the coefficients are
+  // mapped as the single span that covers every block.
+  const T* span_begin = nullptr;
+  const T* span_end   = nullptr;
   for (int ib = 0; ib < host_bsplines_.getNumBlocks(); ib++)
   {
     auto* spline_m = &host_bsplines_.getBlock(ib);
-    auto* coefs    = block_coefs_[ib];
-    PRAGMA_OFFLOAD("omp target enter data map(to: spline_m[:1]) map(alloc: coefs[:spline_m->coefs_size])")
+    if (spline_m->num_splines == 0)
+      continue;
+    PRAGMA_OFFLOAD("omp target enter data map(to: spline_m[:1])")
+    const T* b = block_coefs_[ib];
+    const T* e = b + spline_m->coefs_size;
+    span_begin = (span_begin == nullptr || b < span_begin) ? b : span_begin;
+    span_end   = (span_end == nullptr || e > span_end) ? e : span_end;
+  }
+
+  if (span_begin != nullptr)
+  {
+    auto* coefs             = span_begin;
+    const size_t span_count = static_cast<size_t>(span_end - span_begin);
+    PRAGMA_OFFLOAD("omp target enter data map(alloc: coefs[:span_count])")
   }
 }
 
@@ -44,11 +68,24 @@ MultiBsplineOffloadMapper<T>::~MultiBsplineOffloadMapper()
 {
   if (!owns_coefs_mapping_)
     return;
+  const T* span_begin = nullptr;
+  const T* span_end   = nullptr;
   for (int ib = 0; ib < host_bsplines_.getNumBlocks(); ib++)
   {
     auto* spline_m = &host_bsplines_.getBlock(ib);
-    auto* coefs    = block_coefs_[ib];
-    PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1]) map(delete: coefs[:spline_m->coefs_size])")
+    if (spline_m->num_splines == 0)
+      continue;
+    PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1])")
+    const T* b = block_coefs_[ib];
+    const T* e = b + spline_m->coefs_size;
+    span_begin = (span_begin == nullptr || b < span_begin) ? b : span_begin;
+    span_end   = (span_end == nullptr || e > span_end) ? e : span_end;
+  }
+  if (span_begin != nullptr)
+  {
+    auto* coefs             = span_begin;
+    const size_t span_count = static_cast<size_t>(span_end - span_begin);
+    PRAGMA_OFFLOAD("omp target exit data map(delete: coefs[:span_count])")
   }
 }
 
@@ -58,6 +95,8 @@ void MultiBsplineOffloadMapper<T>::updateToDevice()
   for (int ib = 0; ib < host_bsplines_.getNumBlocks(); ib++)
   {
     auto* spline_m = &host_bsplines_.getBlock(ib);
+    if (spline_m->num_splines == 0)
+      continue;
     auto* coefs    = block_coefs_[ib];
     PRAGMA_OFFLOAD("omp target update to(coefs[:spline_m->coefs_size])")
   }
