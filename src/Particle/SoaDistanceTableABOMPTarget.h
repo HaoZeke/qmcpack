@@ -326,13 +326,24 @@ public:
   ///evaluate the temporary pair relations
   inline void move(const ParticleSet& P, const PosType& rnew, const IndexType iat, bool prepare_old) override
   {
-    throw std::runtime_error("Report bug! SoaDistanceTableABOMPTarget::move should never be called!");
+    // Single particle against all sources is cheap and is computed on the host, as
+    // SoaDistanceTableAAOMPTarget::move does. The device side is not written here: the
+    // full table is recomputed by mw_evaluate, so anything stored into distances_ or
+    // displacements_ (which alias the device-mapped mw_r_dr) is for host consumers
+    // only and must not be relied on inside a target region.
+    DTD_BConds<T, D, SC>::computeDistances(rnew, origin_.getCoordinates().getAllParticlePos(), temp_r_.data(),
+                                           temp_dr_, 0, num_sources_);
+    if (!(modes_ & DTModes::NEED_FULL_TABLE_ANYTIME) && prepare_old)
+      DTD_BConds<T, D, SC>::computeDistances(P.R[iat], origin_.getCoordinates().getAllParticlePos(),
+                                             distances_[iat].data(), displacements_[iat], 0, num_sources_);
   }
 
   ///update the stripe for jat-th particle
   inline void update(IndexType iat) override
   {
-    throw std::runtime_error("Report bug! SoaDistanceTableABOMPTarget::update should never be called!");
+    std::copy_n(temp_r_.data(), num_sources_, distances_[iat].data());
+    for (int idim = 0; idim < D; ++idim)
+      std::copy_n(temp_dr_.data(idim), num_sources_, displacements_[iat].data(idim));
   }
 
 private:
