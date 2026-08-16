@@ -204,6 +204,16 @@ private:
 #endif
   ///NLPP job list of ion-electron pairs by spin group
   std::vector<std::vector<NLPPJob<Real>>> nlpp_jobs;
+
+  /** build the per-walker neighbour lists on the device for electron group ig.
+   *
+   * Returns false when no multi-walker device table is available, in which case the
+   * caller keeps using the host scan. See the definition for why this exists: the host
+   * scan is what forces the electron-ion distance table to be copied back every step.
+   */
+  static bool buildNeighborJobsOnDevice(const RefVectorWithLeader<OperatorBase>& o_list,
+                                        const RefVectorWithLeader<ParticleSet>& p_list,
+                                        int ig);
   /// mult walker shared resource
   ResourceHandle<NonLocalECPotentialMultiWalkerResource> mw_res_handle_;
 
