@@ -17,9 +17,11 @@
 #include "Configuration.h"
 #if !defined(QMC_BUILD_SANDBOX_ONLY)
 #include "QMCWaveFunctions/WaveFunctionComponent.h"
+#include "ResourceCollection.h"
 #endif
 #include "Particle/DistanceTable.h"
 #include "CPU/SIMD/aligned_allocator.hpp"
+#include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "CPU/SIMD/algorithm.hpp"
 #include <map>
 #include <numeric>
@@ -79,6 +81,168 @@ private:
   std::atomic<size_t> calls_{0}, triplets_{0}, nearby_{0};
 };
 
+/** Device-side mirrors of the state JeeIOrbitalSoA::computeU walks on the host.
+ *
+ * elecs_inside is Array<std::vector<int>,2>: ragged, and a target region cannot follow
+ * it. Everything here is the same information in offsets-plus-values form, refreshed
+ * per call rather than kept in sync with accepted moves, which keeps the invariant
+ * trivial at the price of one repack per ratio evaluation.
+ */
+/** Which path mw_evaluateRatios actually took.
+ *
+ * The device and host paths agree on energies when the device path works AND when it
+ * silently falls back, so identical energies alone cannot tell them apart. This says
+ * which one ran.
+ */
+struct JeeIPathTally
+{
+  static JeeIPathTally& get()
+  {
+    static JeeIPathTally singleton;
+    return singleton;
+  }
+  static bool enabled()
+  {
+    static const bool on = [] {
+      const char* c = std::getenv("QMCPACK_TALLY_J3_PATH");
+      return c && *c == '1';
+    }();
+    return on;
+  }
+  void device() { dev_.fetch_add(1, std::memory_order_relaxed); }
+  void fallback() { host_.fetch_add(1, std::memory_order_relaxed); }
+  ~JeeIPathTally()
+  {
+    if (dev_.load() || host_.load())
+      std::cerr << "J3PATH device=" << dev_.load() << " fallback=" << host_.load() << std::endl;
+  }
+
+private:
+  JeeIPathTally() = default;
+  std::atomic<size_t> dev_{0}, host_{0};
+};
+
+template<typename VALT>
+struct JeeIMultiWalkerMem : public Resource
+{
+  Vector<size_t, OffloadPinnedAllocator<size_t>> memb_offsets;
+  Vector<int, OffloadPinnedAllocator<int>> memb_elec;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> memb_dist;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
+  Vector<char, OffloadPinnedAllocator<char>> fn_have;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
+  Vector<int, OffloadPinnedAllocator<int>> ion_group;
+  Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
+
+  size_t memb_walker_stride = 0;
+  size_t gamma_size         = 0;
+  int N_eI = 0, N_ee = 0, C = 0;
+  VALT L   = 0;
+
+  JeeIMultiWalkerMem() : Resource("JeeIMultiWalkerMem") {}
+  JeeIMultiWalkerMem(const JeeIMultiWalkerMem&) : JeeIMultiWalkerMem() {}
+  std::unique_ptr<Resource> makeClone() const override { return std::make_unique<JeeIMultiWalkerMem>(*this); }
+
+  /// flatten every walker's elecs_inside into one offsets/values pair
+  template<typename WFCPTRS>
+  void packMembership(const WFCPTRS& wfcs, int eGroups, int Nion)
+  {
+    const size_t nw    = wfcs.size();
+    memb_walker_stride = static_cast<size_t>(eGroups) * Nion;
+    memb_offsets.resize(nw * memb_walker_stride + 1);
+
+    size_t total = 0;
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const auto& wfc = *wfcs[iw];
+      for (int kg = 0; kg < eGroups; kg++)
+        for (int iat = 0; iat < Nion; iat++)
+        {
+          memb_offsets[iw * memb_walker_stride + static_cast<size_t>(kg) * Nion + iat] = total;
+          total += wfc.getElecsInside(kg, iat).size();
+        }
+    }
+    memb_offsets[nw * memb_walker_stride] = total;
+    memb_elec.resize(total);
+    memb_dist.resize(total);
+
+    size_t at = 0;
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const auto& wfc = *wfcs[iw];
+      for (int kg = 0; kg < eGroups; kg++)
+        for (int iat = 0; iat < Nion; iat++)
+        {
+          const auto& els = wfc.getElecsInside(kg, iat);
+          const auto& dst = wfc.getElecsInsideDist(kg, iat);
+          for (size_t n = 0; n < els.size(); n++, at++)
+          {
+            memb_elec[at] = els[n];
+            memb_dist[at] = dst[n];
+          }
+        }
+    }
+    memb_offsets.updateTo();
+    memb_elec.updateTo();
+    memb_dist.updateTo();
+  }
+
+  /// one flat gamma block per (ion group, j group, k group), plus a present/absent flag
+  template<typename FARRAY>
+  void packFunctors(const FARRAY& F, int eGroups, int iGroups)
+  {
+    const size_t ncombo = static_cast<size_t>(iGroups) * eGroups * eGroups;
+    fn_have.resize(static_cast<size_t>(eGroups) * eGroups * eGroups);
+    std::fill(fn_have.begin(), fn_have.end(), char(0));
+
+    const auto* sample = [&]() -> decltype(F(0, 0, 0)) {
+      for (int ig = 0; ig < iGroups; ig++)
+        for (int jg = 0; jg < eGroups; jg++)
+          for (int kg = 0; kg < eGroups; kg++)
+            if (F(ig, jg, kg))
+              return F(ig, jg, kg);
+      return nullptr;
+    }();
+    if (sample == nullptr)
+      return;
+
+    gamma_size = sample->gammaFlatSize();
+    N_eI       = sample->getNeI();
+    N_ee       = sample->getNee();
+    C          = sample->getC();
+    L          = VALT(0.5) * sample->cutoff_radius;
+
+    gamma_flat.resize(gamma_size * static_cast<size_t>(eGroups) * eGroups * eGroups);
+    std::fill(gamma_flat.begin(), gamma_flat.end(), VALT(0));
+    for (int ig = 0; ig < iGroups; ig++)
+      for (int jg = 0; jg < eGroups; jg++)
+        for (int kg = 0; kg < eGroups; kg++)
+          if (F(ig, jg, kg))
+          {
+            const size_t fidx = (static_cast<size_t>(ig) * eGroups + jg) * eGroups + kg;
+            F(ig, jg, kg)->copyGammaFlat(gamma_flat.data() + fidx * gamma_size);
+            fn_have[fidx] = char(1);
+          }
+    gamma_flat.updateTo();
+    fn_have.updateTo();
+  }
+
+  template<typename CUTVEC, typename GRPVEC>
+  void packIons(const CUTVEC& cutoffs, const GRPVEC& groups, int Nion)
+  {
+    ion_cutoff.resize(Nion);
+    ion_group.resize(Nion);
+    for (int iat = 0; iat < Nion; iat++)
+    {
+      ion_cutoff[iat] = cutoffs[iat];
+      ion_group[iat]  = groups[iat];
+    }
+    ion_cutoff.updateTo();
+    ion_group.updateTo();
+  }
+};
+
 template<class FT>
 class JeeIOrbitalSoA : public WaveFunctionComponent
 {
@@ -131,6 +295,10 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   Array<std::vector<posT>, 2> elecs_inside_displ;
   /// the ids of ions within the cutoff radius of an electron on which a move is proposed
   std::vector<int> ions_nearby_old, ions_nearby_new;
+
+  /// device path for mw_evaluateRatios; off unless the target particle set is offloaded
+  bool use_offload_ = false;
+  ResourceHandle<JeeIMultiWalkerMem<valT>> mw_mem_handle_;
 
   /// work buffer size
   size_t Nbuffer;
@@ -202,10 +370,34 @@ public:
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
+    // the batched ratio path reads the virtual-particle tables through
+    // getMultiWalkerDataPtr, which only the offload tables provide
+    const char* off = std::getenv("QMCPACK_DISABLE_J3_OFFLOAD");
+    use_offload_    = elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD &&
+        !(off && *off == '1');
     init(elecs);
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
+
+  void createResource(ResourceCollection& collection) const override
+  {
+    collection.addResource(std::make_unique<JeeIMultiWalkerMem<valT>>());
+  }
+
+  void acquireResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override
+  {
+    auto& wfc_leader          = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    wfc_leader.mw_mem_handle_ = collection.lendResource<JeeIMultiWalkerMem<valT>>();
+  }
+
+  void releaseResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    collection.takebackResource(wfc_leader.mw_mem_handle_);
+  }
 
   std::unique_ptr<WaveFunctionComponent> makeClone(ParticleSet& elecs) const override
   {
@@ -442,6 +634,175 @@ public:
     DiffVal = Uat[iat] - cur_Uat;
     return std::exp(static_cast<PsiValue>(DiffVal));
   }
+
+  /** Batched ratios for the quadrature knots of every walker, on the device.
+   *
+   * The base class loops walkers serially into evaluateRatios, which loops knots into
+   * computeU on the host. On CO2/Cu(110) that measured 207.56 s of thread-summed time
+   * for 13,975,174,235 triplets, 14.85 ns each with the gather included, and the
+   * polynomial's own 64-iteration dependency chain accounts for nearly all of it. The
+   * triplets are mutually independent, which is the case a device is for.
+   *
+   * The gather runs on the device too. Handing the host the triplets instead would move
+   * 14e9 of them, and at three doubles apiece that is hundreds of gigabytes; the filter
+   * is cheap in comparison, only 1.05 of 33 ions surviving the cutoff per call.
+   */
+  void mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                         std::vector<std::vector<ValueType>>& ratios) const override
+  {
+    if (wfc_list.size() == 0)
+      return;
+    if (!use_offload_)
+    {
+      if (JeeIPathTally::enabled())
+        JeeIPathTally::get().fallback();
+      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
+      return;
+    }
+
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    auto& vp_leader  = vp_list.getLeader();
+    auto& mem        = wfc_leader.mw_mem_handle_.getResource();
+
+    const auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
+    const size_t nVPs       = mw_refPctls.size();
+    const int nw            = wfc_list.size();
+
+    const auto& dt_ei = vp_leader.getDistTableAB(wfc_leader.ei_Table_ID_);
+    const auto& dt_ee = vp_leader.getDistTableAB(wfc_leader.ee_Table_ID_);
+    const RealType* mw_ei = nullptr;
+    const RealType* mw_ee = nullptr;
+    try
+    {
+      mw_ei = dt_ei.getMultiWalkerDataPtr();
+      mw_ee = dt_ee.getMultiWalkerDataPtr();
+    }
+    catch (...)
+    {
+      if (JeeIPathTally::enabled())
+        JeeIPathTally::get().fallback();
+      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
+      return;
+    }
+    if (mw_ei == nullptr || mw_ee == nullptr)
+    {
+      if (JeeIPathTally::enabled())
+        JeeIPathTally::get().fallback();
+      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
+      return;
+    }
+    if (JeeIPathTally::enabled())
+      JeeIPathTally::get().device();
+
+    const size_t stride_ei = dt_ei.getPerTargetPctlStrideSize();
+    const size_t stride_ee = dt_ee.getPerTargetPctlStrideSize();
+
+    // elecs_inside is Array<std::vector<int>,2>, ragged and host only. Flatten it once
+    // per call into offsets plus values, which is also what lets the knots share one
+    // walk of it: the host path rebuilds this structure for every knot.
+    std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
+    for (int iw = 0; iw < nw; iw++)
+      wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion);
+    mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+    mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    mem.vp_walker.resize(nVPs);
+    {
+      size_t ivp = 0;
+      for (int iw = 0; iw < nw; ++iw)
+        for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+          mem.vp_walker[ivp] = iw;
+      mem.vp_walker.updateTo();
+    }
+    mem.vals.resize(nVPs);
+
+    const int Nion    = wfc_leader.Nion;
+    const int eGroups = wfc_leader.eGroups;
+    const auto& refPS = vp_leader.getRefPS();
+    mem.vp_jg.resize(nVPs);
+    for (size_t ivp = 0; ivp < nVPs; ivp++)
+      mem.vp_jg[ivp] = refPS.getGroupID(mw_refPctls[ivp]);
+    mem.vp_jg.updateTo();
+
+    auto* memb_off   = mem.memb_offsets.data();
+    auto* memb_elec  = mem.memb_elec.data();
+    auto* memb_dist  = mem.memb_dist.data();
+    auto* gamma_flat = mem.gamma_flat.data();
+    auto* fn_have    = mem.fn_have.data();
+    auto* ion_cut    = mem.ion_cutoff.data();
+    auto* ion_grp    = mem.ion_group.data();
+    auto* vals       = mem.vals.data();
+    auto* walker_of  = mem.vp_walker.data();
+    auto* jg_of      = mem.vp_jg.data();
+    auto* refp       = mw_refPctls.data();
+
+    const size_t memb_stride = mem.memb_walker_stride;
+    const size_t gsize       = mem.gamma_size;
+    const int N_eI_k         = mem.N_eI;
+    const int N_ee_k         = mem.N_ee;
+    const int C_k            = mem.C;
+    const RealType L_k       = mem.L;
+    const size_t n_memb      = mem.memb_elec.size();
+    const size_t n_off       = mem.memb_offsets.size();
+
+    PRAGMA_OFFLOAD("omp target teams distribute \
+                    map(to: refp[:nVPs], walker_of[:nVPs], jg_of[:nVPs]) \
+                    map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb]) \
+                    map(to: gamma_flat[:gsize * eGroups * eGroups * eGroups], \
+                            fn_have[:eGroups * eGroups * eGroups]) \
+                    map(to: ion_cut[:Nion], ion_grp[:Nion]) \
+                    map(always, from: vals[:nVPs]) \
+                    is_device_ptr(mw_ei, mw_ee)")
+    for (size_t ivp = 0; ivp < nVPs; ivp++)
+    {
+      const int jel            = refp[ivp];
+      const int jg             = jg_of[ivp];
+      const size_t memb_base   = static_cast<size_t>(walker_of[ivp]) * memb_stride;
+      const RealType* ei_row   = mw_ei + ivp * stride_ei;
+      const RealType* ee_row   = mw_ee + ivp * stride_ee;
+      RealType sum             = 0;
+
+      PRAGMA_OFFLOAD("omp parallel for reduction(+: sum)")
+      for (int iat = 0; iat < Nion; iat++)
+      {
+        const RealType r_jI = ei_row[iat];
+        if (r_jI >= ion_cut[iat])
+          continue;
+        const int ig = ion_grp[iat];
+        for (int kg = 0; kg < eGroups; kg++)
+        {
+          const int fidx = (ig * eGroups + jg) * eGroups + kg;
+          if (!fn_have[fidx])
+            continue;
+          const RealType* grow = gamma_flat + static_cast<size_t>(fidx) * gsize;
+          const size_t slot    = memb_base + static_cast<size_t>(kg) * Nion + iat;
+          const size_t begin   = memb_off[slot];
+          const size_t end     = memb_off[slot + 1];
+          for (size_t idx = begin; idx < end; idx++)
+          {
+            const int kel = memb_elec[idx];
+            if (kel == jel)
+              continue;
+            sum += FT::evaluateV_impl(ee_row[kel], r_jI, memb_dist[idx], grow, N_eI_k, N_ee_k, C_k, L_k);
+          }
+        }
+      }
+      vals[ivp] = sum;
+    }
+
+    size_t ivp = 0;
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      const auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+      for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+        ratios[iw][k] = std::exp(wfc.Uat[mw_refPctls[ivp]] - mem.vals[ivp]);
+    }
+    assert(ivp == nVPs);
+  }
+
+  const std::vector<int>& getElecsInside(int kg, int iat) const { return elecs_inside(kg, iat); }
+  const std::vector<valT>& getElecsInsideDist(int kg, int iat) const { return elecs_inside_dist(kg, iat); }
 
   void evaluateRatios(const VirtualParticleSet& VP, std::vector<ValueType>& ratios) override
   {
