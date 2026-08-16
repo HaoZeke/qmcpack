@@ -12,6 +12,8 @@
 
 #ifndef QMCPLUSPLUS_EEIJASTROW_OPTIMIZED_SOA_H
 #define QMCPLUSPLUS_EEIJASTROW_OPTIMIZED_SOA_H
+#include <atomic>
+
 #include "Configuration.h"
 #if !defined(QMC_BUILD_SANDBOX_ONLY)
 #include "QMCWaveFunctions/WaveFunctionComponent.h"
@@ -32,6 +34,51 @@ namespace qmcplusplus
  *For electrons, distinct pair correlation functions are used
  *for spins up-up/down-down and up-down/down-up.
  */
+/** Counts the work computeU does, so the gather can be told apart from the polynomial.
+ *
+ * The 48.64 s that JeeIOrbitalSoA:J3::NLratio costs on CO2/Cu(110) is one exclusive
+ * timer leaf covering both the data-dependent gather over elecs_inside and the
+ * polynomial evaluation it feeds. perf cannot separate them because both are inline in
+ * this header and merge into the enclosing symbol. Counting triplets gives the
+ * denominator a standalone benchmark of the functor needs to be comparable.
+ */
+struct JeeIWorkTally
+{
+  static JeeIWorkTally& get()
+  {
+    static JeeIWorkTally singleton;
+    return singleton;
+  }
+
+  static bool enabled()
+  {
+    static const bool on = [] {
+      const char* c = std::getenv("QMCPACK_TALLY_J3_WORK");
+      return c && *c == '1';
+    }();
+    return on;
+  }
+
+  void add(size_t triplets, size_t nearby)
+  {
+    calls_.fetch_add(1, std::memory_order_relaxed);
+    triplets_.fetch_add(triplets, std::memory_order_relaxed);
+    nearby_.fetch_add(nearby, std::memory_order_relaxed);
+  }
+
+  ~JeeIWorkTally()
+  {
+    if (calls_.load() == 0)
+      return;
+    std::cerr << "J3TALLY computeU calls=" << calls_.load() << " triplets=" << triplets_.load()
+              << " nearby ion visits=" << nearby_.load() << std::endl;
+  }
+
+private:
+  JeeIWorkTally() = default;
+  std::atomic<size_t> calls_{0}, triplets_{0}, nearby_{0};
+};
+
 template<class FT>
 class JeeIOrbitalSoA : public WaveFunctionComponent
 {
@@ -601,6 +648,7 @@ public:
       if (distjI[iat] < Ion_cutoff[iat])
         ions_nearby.push_back(iat);
 
+    size_t tally_triplets = 0;
     valT Uj = valT(0);
     for (int kg = 0; kg < eGroups; ++kg)
     {
@@ -622,6 +670,7 @@ public:
             if (kel_counter == Nbuffer)
             {
               const FT& feeI(*F(ig, jg, kg));
+              tally_triplets += kel_counter;
               Uj += feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(),
                                    DistkI_Compressed.data());
               kel_counter = 0;
@@ -631,12 +680,15 @@ public:
         if ((iind + 1 == ions_nearby.size() || ig != Ions.GroupID[ions_nearby[iind + 1]]) && kel_counter > 0)
         {
           const FT& feeI(*F(ig, jg, kg));
+          tally_triplets += kel_counter;
           Uj +=
               feeI.evaluateV(kel_counter, Distjk_Compressed.data(), DistjI_Compressed.data(), DistkI_Compressed.data());
           kel_counter = 0;
         }
       }
     }
+    if (JeeIWorkTally::enabled())
+      JeeIWorkTally::get().add(tally_triplets, ions_nearby.size());
     return Uj;
   }
 
