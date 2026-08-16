@@ -137,6 +137,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
   std::vector<RealType> rr_proposed(num_walkers, 0.0);
   std::vector<RealType> rr_accepted(num_walkers, 0.0);
+  // per-particle scratch, reused across the particle loop
+  std::vector<RealType> rr(num_walkers, 0.0);
 
   {
     ScopedTimer pbyp_local_timer(timers.movepbyp_timer);
@@ -163,7 +165,10 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         // only DMC does this
         // TODO: rr needs a real name
-        std::vector<RealType> rr(num_walkers, 0.0);
+        // Reused across the particle loop rather than allocated inside it: this body
+        // runs once per particle per step, so a fresh vector here is one heap
+        // allocation per particle per step per crowd.
+        rr.resize(num_walkers);
         assert(rr.size() == deltas.positions.size());
         std::transform(deltas.positions.begin(), deltas.positions.end(), rr.begin(),
                        [t = taus.tauovermass](auto& delta_r) { return t * dot(delta_r, delta_r); });
