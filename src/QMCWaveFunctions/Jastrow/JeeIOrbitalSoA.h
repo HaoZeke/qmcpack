@@ -1111,6 +1111,11 @@ public:
                          const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                          std::vector<std::vector<ValueType>>& ratios) const override;
 
+  /// device path for the quadrature ratios; false when it cannot run and the host loop stands in
+  bool mw_evaluateRatios_offload(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                 const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                 std::vector<std::vector<ValueType>>& ratios) const;
+
   void evaluateDerivatives(ParticleSet& P,
                            const OptVariables& optvars,
                            Vector<ValueType>& dlogpsi,

@@ -115,6 +115,104 @@ inline void poly3d_eval_one(const RT r_12,
   hess02 /= (r_12 * r_2I);
 }
 
+/** Value of one triplet, no gradients.
+ *
+ * poly3d_eval_one computes VGL. The quadrature ratios behind NonLocalECP need only the
+ * value, and there are enough of them for the unused derivatives to be worth avoiding:
+ * CO2/Cu(110) evaluates 13,975,174,235 triplets in a run whose J3::NLratio is 207.56 s.
+ * Same accumulation as the value part of poly3d_eval_one, so the two have to stay in
+ * step.
+ */
+template<typename RT>
+inline RT poly3d_value_one(const RT r_12,
+                           const RT r_1I,
+                           const RT r_2I,
+                           const RT cutoff_radius,
+                           const int N_eI,
+                           const int N_ee,
+                           const int C,
+                           const RT* restrict gamma)
+{
+  constexpr RT czero(0);
+  constexpr RT cone(1);
+  const RT L = RT(0.5) * cutoff_radius;
+
+  const int Lm = N_eI + 1;
+  const int Ln = N_ee + 1;
+  RT val       = czero;
+  RT r2l(cone);
+  for (int l = 0; l <= N_eI; l++)
+  {
+    RT r2m(r2l);
+    for (int m = 0; m <= N_eI; m++)
+    {
+      RT r2n(r2m);
+      for (int n = 0; n <= N_ee; n++)
+      {
+        val += gamma[gamma_index(l, m, n, Lm, Ln)] * r2n;
+        r2n *= r_12;
+      }
+      r2m *= r_2I;
+    }
+    r2l *= r_1I;
+  }
+  const RT both_minus_L = (r_2I - L) * (r_1I - L);
+  for (int i = 0; i < C; i++)
+    val *= both_minus_L;
+  return val;
+}
+
+/** Sum over the triplets a virtual particle forms with the electrons inside each ion.
+ *
+ * The dense electron-ion table is already device resident here, so membership is
+ * decided by comparing against the ion cutoff in place rather than from a flattened
+ * copy of elecs_inside.
+ */
+template<typename RT>
+inline RT dense_vp_value_one(const int jel,
+                             const int jg,
+                             const int Nelec,
+                             const int Nion,
+                             const int Ni_pad,
+                             const int eGroups,
+                             const int* restrict e_grp,
+                             const int* restrict i_grp,
+                             const RT* restrict ion_cut,
+                             const RT* restrict vp_ei_r,
+                             const RT* restrict vp_ee_r,
+                             const RT* restrict ei_r_full,
+                             const RT** gamma_ptrs,
+                             const RT* restrict fun_cutoff,
+                             const int* restrict fun_NeI,
+                             const int* restrict fun_Nee,
+                             const int* restrict fun_C)
+{
+  RT sum = RT(0);
+  for (int iat = 0; iat < Nion; iat++)
+  {
+    const RT r_jI = vp_ei_r[iat];
+    if (r_jI >= ion_cut[iat])
+      continue;
+    const int ig = i_grp[iat];
+    for (int kel = 0; kel < Nelec; kel++)
+    {
+      if (kel == jel)
+        continue;
+      const RT r_kI = ei_r_full[kel * Ni_pad + iat];
+      if (r_kI >= ion_cut[iat])
+        continue;
+      const int kg      = e_grp[kel];
+      const int fid     = (ig * eGroups + jg) * eGroups + kg;
+      const RT* gamma   = gamma_ptrs[fid];
+      if (gamma == nullptr)
+        continue;
+      sum += poly3d_value_one<RT>(vp_ee_r[kel], r_jI, r_kI, fun_cutoff[fid], fun_NeI[fid], fun_Nee[fid], fun_C[fid],
+                                  gamma);
+    }
+  }
+  return sum;
+}
+
 /** Dense dual-table VGL for moving electron jel.
  *  Layout:
  *    ee_r   [Ne_pad], ee_dr[3][Ne_pad]

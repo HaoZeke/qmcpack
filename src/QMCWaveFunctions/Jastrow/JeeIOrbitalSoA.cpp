@@ -1127,8 +1127,165 @@ void JeeIOrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctio
       jeei_sync_host_state(leader.mw_mem_handle_.getResource(), nw, static_cast<int>(leader.Nelec_padded));
   }
 #endif
+  if (use_offload_ && mw_evaluateRatios_offload(wfc_list, vp_list, ratios))
+    return;
+
   for (int iw = 0; iw < nw; iw++)
     wfc_list[iw].evaluateRatios(vp_list[iw], ratios[iw]);
+}
+
+/** Quadrature ratios for every walker's knots in one launch.
+ *
+ * The path above syncs device state and then walks the knots on the host, one walker at
+ * a time. On CO2/Cu(110) that is 207.56 s of thread-summed J3::NLratio, 44 percent of
+ * NonLocalECP, spent on 13,975,174,235 triplets that do not depend on each other.
+ *
+ * Membership comes from the dense electron-ion table that mw_ratioGrad_offload already
+ * keeps device resident, compared against the ion cutoff in place, so there is no
+ * flattened copy of elecs_inside to build or keep current.
+ *
+ * Returns false when anything needed is absent, leaving the caller on the host path.
+ */
+template<typename FT>
+bool JeeIOrbitalSoA<FT>::mw_evaluateRatios_offload(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                                   const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                                   std::vector<std::vector<ValueType>>& ratios) const
+{
+  auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  if (!leader.mw_mem_handle_)
+    return false;
+  auto& mem = leader.mw_mem_handle_.getResource();
+
+  const int nw = wfc_list.size();
+  if (nw == 0)
+    return false;
+
+  auto& vp_leader         = vp_list.getLeader();
+  const auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
+  const size_t nVPs       = mw_refPctls.size();
+  if (nVPs == 0)
+    return false;
+
+  const valT* vp_ei = nullptr;
+  const valT* vp_ee = nullptr;
+  size_t st_ei = 0, st_ee = 0;
+  try
+  {
+    const auto& dt_ei = vp_leader.getDistTableAB(leader.ei_Table_ID_);
+    const auto& dt_ee = vp_leader.getDistTableAB(leader.ee_Table_ID_);
+    vp_ei             = dt_ei.getMultiWalkerDataPtr();
+    vp_ee             = dt_ee.getMultiWalkerDataPtr();
+    st_ei             = dt_ei.getPerTargetPctlStrideSize();
+    st_ee             = dt_ee.getPerTargetPctlStrideSize();
+  }
+  catch (...)
+  {
+    return false;
+  }
+  if (vp_ei == nullptr || vp_ee == nullptr)
+    return false;
+  if (mem.mw_ei_full_r.size() == 0)
+    return false;
+
+  const int Ne   = leader.Nelec;
+  const int Ni   = leader.Nion;
+  const int Nip  = getAlignedSize<valT>(Ni);
+  const int eG   = leader.eGroups;
+  const int iG   = leader.iGroups;
+  const int nfun = iG * eG * eG;
+
+  std::vector<const valT*> gamma_host(nfun, nullptr);
+  std::vector<valT> fun_cut(nfun, valT(0));
+  std::vector<int> fun_NeI(nfun, 0), fun_Nee(nfun, 0), fun_C(nfun, 0);
+  for (int ig = 0; ig < iG; ++ig)
+    for (int jg = 0; jg < eG; ++jg)
+      for (int kg = 0; kg < eG; ++kg)
+      {
+        const int fid = (ig * eG + jg) * eG + kg;
+        FT* f         = leader.F(ig, jg, kg);
+        if (!f)
+          continue;
+        gamma_host[fid] = f->gammaOffloadData();
+        fun_cut[fid]    = static_cast<valT>(f->cutoff_radius);
+        fun_NeI[fid]    = f->N_eI;
+        fun_Nee[fid]    = f->N_ee;
+        fun_C[fid]      = f->C;
+      }
+
+  const size_t tb_bytes = sizeof(valT*) * nfun + sizeof(valT) * nfun + sizeof(int) * nfun * 3;
+  mem.transfer_buffer.resize(tb_bytes);
+  auto* tb          = mem.transfer_buffer.data();
+  auto** gamma_ptrs = reinterpret_cast<valT**>(tb);
+  auto* cut_ptr     = reinterpret_cast<valT*>(tb + sizeof(valT*) * nfun);
+  auto* nei_ptr     = reinterpret_cast<int*>(tb + sizeof(valT*) * nfun + sizeof(valT) * nfun);
+  auto* nee_ptr     = nei_ptr + nfun;
+  auto* c_ptr       = nee_ptr + nfun;
+  for (int f = 0; f < nfun; ++f)
+  {
+    gamma_ptrs[f] = const_cast<valT*>(gamma_host[f]);
+    cut_ptr[f]    = fun_cut[f];
+    nei_ptr[f]    = fun_NeI[f];
+    nee_ptr[f]    = fun_Nee[f];
+    c_ptr[f]      = fun_C[f];
+  }
+
+  mem.mw_vals.resize(nVPs);
+  Vector<int, OffloadPinnedAllocator<int>> vp_iw(nVPs), vp_jg(nVPs), vp_ref(nVPs);
+  {
+    const auto& refPS = vp_leader.getRefPS();
+    size_t ivp        = 0;
+    for (int iw = 0; iw < nw; ++iw)
+      for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+      {
+        vp_iw[ivp]  = iw;
+        vp_ref[ivp] = mw_refPctls[ivp];
+        vp_jg[ivp]  = refPS.getGroupID(mw_refPctls[ivp]);
+      }
+    vp_iw.updateTo();
+    vp_ref.updateTo();
+    vp_jg.updateTo();
+  }
+
+  auto* vals_ptr  = mem.mw_vals.data();
+  auto* egrp_ptr  = mem.e_grp.data();
+  auto* igrp_ptr  = mem.i_grp.data();
+  auto* cuti_ptr  = mem.ion_cutoff.data();
+  auto* full_r    = mem.mw_ei_full_r.data();
+  auto* tb_ptr    = mem.transfer_buffer.data();
+  auto* iw_ptr    = vp_iw.data();
+  auto* jg_ptr    = vp_jg.data();
+  auto* ref_ptr   = vp_ref.data();
+  const size_t fr_sz = mem.mw_ei_full_r.size();
+  const size_t tb_sz = mem.transfer_buffer.size();
+
+  PRAGMA_OFFLOAD("omp target teams distribute \
+      map(to: iw_ptr[:nVPs], jg_ptr[:nVPs], ref_ptr[:nVPs]) \
+      map(to: egrp_ptr[:Ne], igrp_ptr[:Ni], cuti_ptr[:Ni], tb_ptr[:tb_sz], full_r[:fr_sz]) \
+      map(always, from: vals_ptr[:nVPs]) \
+      is_device_ptr(vp_ei, vp_ee)")
+  for (size_t ivp = 0; ivp < nVPs; ++ivp)
+  {
+    valT** gptrs = reinterpret_cast<valT**>(tb_ptr);
+    valT* fcut   = reinterpret_cast<valT*>(tb_ptr + sizeof(valT*) * nfun);
+    int* fNeI    = reinterpret_cast<int*>(tb_ptr + sizeof(valT*) * nfun + sizeof(valT) * nfun);
+    int* fNee    = fNeI + nfun;
+    int* fC      = fNee + nfun;
+
+    const valT* fr = full_r + static_cast<size_t>(iw_ptr[ivp]) * Ne * Nip;
+    vals_ptr[ivp] =
+        jeei_offload::dense_vp_value_one<valT>(ref_ptr[ivp], jg_ptr[ivp], Ne, Ni, Nip, eG, egrp_ptr, igrp_ptr, cuti_ptr,
+                                               vp_ei + ivp * st_ei, vp_ee + ivp * st_ee, fr,
+                                               const_cast<const valT**>(gptrs), fcut, fNeI, fNee, fC);
+  }
+
+  size_t ivp = 0;
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    const auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+      ratios[iw][k] = std::exp(wfc.Uat[mw_refPctls[ivp]] - mem.mw_vals[ivp]);
+  }
+  return true;
 }
 
 template class JeeIOrbitalSoA<PolynomialFunctor3D>;
