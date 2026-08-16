@@ -313,6 +313,11 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     if (myName == psrc.getName())
       DistTables.push_back(createDistanceTable(*this, description));
     else
+      // createDistanceTableAB, not the createDistanceTable dispatcher: the offload AB
+      // implementation supports only the batched multi-walker API and aborts with
+      // "SoaDistanceTableABOMPTarget::move should never be called!" on the
+      // particle-by-particle path that DMC uses. Selecting it here is therefore not a
+      // missing dispatch but a change that needs move() implemented first.
       DistTables.push_back(createDistanceTableAB(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
     myDistTableMap[psrc.getName()] = tid;
