@@ -186,6 +186,72 @@ void VirtualParticleSet::makeMovesWithSpin(const ParticleSet& refp,
   update();
 }
 
+void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+                                                const RefVectorWithLeader<ParticleSet>& refp_list,
+                                                const std::vector<std::vector<std::vector<PosType>>>& deltaV_lists,
+                                                const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                                bool sphere)
+{
+  auto& vp_leader    = vp_list.getLeader();
+  vp_leader.onSphere = sphere;
+  vp_leader.refPS    = refp_list.getLeader();
+
+  // Each job carries its own quadrature: deltaV depends on the job's ion-electron
+  // displacement, so a walker's jobs cannot share one offset list.
+  size_t nVPs = 0;
+  for (size_t iw = 0; iw < vp_list.size(); iw++)
+    for (size_t j = 0; j < joblists[iw].size(); j++)
+      nVPs += deltaV_lists[iw][j].size();
+
+  auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
+  mw_refPctls.resize(nVPs);
+  RefVectorWithLeader<ParticleSet> p_list(vp_leader);
+  p_list.reserve(vp_list.size());
+
+  size_t ivp = 0;
+  for (size_t iw = 0; iw < vp_list.size(); iw++)
+  {
+    VirtualParticleSet& vp(vp_list[iw]);
+    const auto& deltaVs = deltaV_lists[iw];
+    const auto& jobs    = joblists[iw];
+    assert(deltaVs.size() == jobs.size());
+
+    vp.onSphere      = sphere;
+    vp.refPS         = refp_list[iw];
+    vp.multi_source_ = jobs.size() > 1;
+    // every job of a walker is the same electron, which is what refPtcl means; the source
+    // varies and is kept per virtual particle
+    vp.refPtcl       = jobs.empty() ? 0 : jobs[0].electron_id;
+    vp.refSourcePtcl = jobs.empty() ? 0 : jobs[0].ion_id;
+    size_t vp_count = 0;
+    for (const auto& dv : deltaVs)
+      vp_count += dv.size();
+    vp.resize(vp_count);
+    vp.source_ptcl_per_vp.resize(vp.R.size());
+
+    size_t k = 0;
+    for (size_t j = 0; j < jobs.size(); j++)
+    {
+      const auto& job     = jobs[j];
+      const auto& deltaV  = deltaVs[j];
+      assert(job.electron_id == vp.refPtcl);
+      for (size_t q = 0; q < deltaV.size(); q++, k++, ivp++)
+      {
+        vp.R[k]                    = refp_list[iw].R[vp.refPtcl] + deltaV[q];
+        vp.source_ptcl_per_vp[k]   = job.ion_id;
+        mw_refPctls[ivp]           = vp.refPtcl;
+        if (vp_leader.isSpinor())
+          vp.spins[k] = refp_list[iw].spins[vp.refPtcl];
+      }
+    }
+    p_list.push_back(vp);
+  }
+  assert(ivp == nVPs);
+
+  mw_refPctls.updateTo();
+  ParticleSet::mw_update(p_list);
+}
+
 void VirtualParticleSet::mw_makeMoves(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
                                       const RefVectorWithLeader<ParticleSet>& refp_list,
                                       const RefVector<const std::vector<PosType>>& deltaV_list,

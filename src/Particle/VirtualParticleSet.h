@@ -123,6 +123,24 @@ public:
                          bool sphere = false,
                          int iat     = -1);
 
+  /** One set per walker carrying the knots of several ions for the same electron.
+   *
+   *  The per-ion form takes one job per walker, so a T-move sweep over an electron's
+   *  neighbouring ions issues one launch per ion index. All of those jobs share
+   *  electron_id, which is what refPtcl holds, so they can occupy one set; only the source
+   *  particle differs, and that is recorded per virtual particle.
+   *
+   *  joblists[iw] are the jobs of walker iw, all with the same electron_id.
+   *  deltaV_lists[iw][j] is the quadrature of joblists[iw][j]: the offsets follow the job's
+   *  ion-electron displacement, so jobs cannot share one list even within a species, and
+   *  the knot count may differ between species.
+   */
+  static void mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+                                      const RefVectorWithLeader<ParticleSet>& refp_list,
+                                      const std::vector<std::vector<std::vector<PosType>>>& deltaV_lists,
+                                      const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                      bool sphere);
+
   static void mw_makeMoves(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
                            const RefVectorWithLeader<ParticleSet>& p_list,
                            const RefVector<const std::vector<PosType>>& deltaV_list,
