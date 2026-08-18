@@ -55,6 +55,22 @@ private:
 public:
   /// Reference particle
   int refPtcl;
+
+  /** Which source particle each virtual particle belongs to, when one set carries the
+   *  quadrature knots of several ions for the same electron.
+   *
+   *  refSourcePtcl is a single int and HybridRepCenterOrbitals reads it as one, to test a
+   *  whole set against one atomic sphere. A set spanning several ions makes that test
+   *  wrong without making it fail, so multi_source_ exists to be refused there rather
+   *  than to be silently mishandled.
+   */
+  std::vector<int> source_ptcl_per_vp;
+  bool multi_source_ = false;
+
+  bool isMultiSource() const { return multi_source_; }
+
+  /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
+  bool getMultiWalkerRefPctlsHeld() const { return bool(mw_mem_handle_); }
   /// Reference source particle, used when onSphere=true
   int refSourcePtcl;
 
@@ -122,6 +138,21 @@ public:
                          const std::vector<RealType>& deltaS,
                          bool sphere = false,
                          int iat     = -1);
+
+  /** One set per walker carrying the knots of several ions for the same electron.
+   *
+   *  The per-ion form takes one job per walker, so a T-move sweep over an electron's
+   *  neighbouring ions issues one launch per ion index. All of those jobs share
+   *  electron_id, which is what refPtcl holds, so they can occupy one set; only the source
+   *  particle differs, and that is recorded per virtual particle.
+   *
+   *  joblists[iw] are the jobs of walker iw, all with the same electron_id.
+   */
+  static void mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+                                      const RefVectorWithLeader<ParticleSet>& refp_list,
+                                      const RefVector<const std::vector<PosType>>& deltaV_list,
+                                      const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                      bool sphere);
 
   static void mw_makeMoves(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
                            const RefVectorWithLeader<ParticleSet>& p_list,

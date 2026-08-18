@@ -603,6 +603,10 @@ public:
    */
   bool is_VP_batching_safe(const VirtualParticleSet& VP) const
   {
+    if (VP.isMultiSource())
+      throw std::runtime_error("HybridRepCenterOrbitals cannot use a VirtualParticleSet "
+                               "spanning several source particles: refSourcePtcl is read as "
+                               "one ion here and the sphere test would silently be wrong.");
     const int center_idx = VP.refSourcePtcl;
     auto& myCenter       = AtomicCenters[Super2Prim[center_idx]];
     return VP.getRefPS().getDistTableAB(myTableID).getDistRow(VP.refPtcl)[center_idx] <
@@ -613,6 +617,10 @@ public:
   template<typename VM>
   inline void evaluateValuesC2X(const VirtualParticleSet& VP, VM& multi_myV, LocationSmoothingInfo& info)
   {
+    if (VP.isMultiSource())
+      throw std::runtime_error("HybridRepCenterOrbitals cannot use a VirtualParticleSet "
+                               "spanning several source particles: refSourcePtcl is read as "
+                               "one ion here and the sphere test would silently be wrong.");
     const int center_idx = VP.refSourcePtcl;
     info.dist_r          = VP.getRefPS().getDistTableAB(myTableID).getDistRow(VP.refPtcl)[center_idx];
     auto& myCenter       = AtomicCenters[Super2Prim[center_idx]];
@@ -630,6 +638,10 @@ public:
                                 SV& bc_signs,
                                 LocationSmoothingInfo& info)
   {
+    if (VP.isMultiSource())
+      throw std::runtime_error("HybridRepCenterOrbitals cannot use a VirtualParticleSet "
+                               "spanning several source particles: refSourcePtcl is read as "
+                               "one ion here and the sphere test would silently be wrong.");
     const int center_idx = VP.refSourcePtcl;
     info.dist_r          = VP.getRefPS().getDistTableAB(myTableID).getDistRow(VP.refPtcl)[center_idx];
     auto& myCenter       = AtomicCenters[Super2Prim[center_idx]];
