@@ -188,7 +188,7 @@ void VirtualParticleSet::makeMovesWithSpin(const ParticleSet& refp,
 
 void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
                                                 const RefVectorWithLeader<ParticleSet>& refp_list,
-                                                const RefVector<const std::vector<PosType>>& deltaV_list,
+                                                const std::vector<std::vector<std::vector<PosType>>>& deltaV_lists,
                                                 const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
                                                 bool sphere)
 {
@@ -196,9 +196,12 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
   vp_leader.onSphere = sphere;
   vp_leader.refPS    = refp_list.getLeader();
 
+  // Each job carries its own quadrature: deltaV depends on the job's ion-electron
+  // displacement, so a walker's jobs cannot share one offset list.
   size_t nVPs = 0;
   for (size_t iw = 0; iw < vp_list.size(); iw++)
-    nVPs += joblists[iw].size() * deltaV_list[iw].get().size();
+    for (size_t j = 0; j < joblists[iw].size(); j++)
+      nVPs += deltaV_lists[iw][j].size();
 
   auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
   mw_refPctls.resize(nVPs);
@@ -209,8 +212,9 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
   for (size_t iw = 0; iw < vp_list.size(); iw++)
   {
     VirtualParticleSet& vp(vp_list[iw]);
-    const std::vector<PosType>& deltaV(deltaV_list[iw]);
-    const auto& jobs = joblists[iw];
+    const auto& deltaVs = deltaV_lists[iw];
+    const auto& jobs    = joblists[iw];
+    assert(deltaVs.size() == jobs.size());
 
     vp.onSphere      = sphere;
     vp.refPS         = refp_list[iw];
@@ -219,12 +223,17 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
     // varies and is kept per virtual particle
     vp.refPtcl       = jobs.empty() ? 0 : jobs[0].electron_id;
     vp.refSourcePtcl = jobs.empty() ? 0 : jobs[0].ion_id;
-    vp.resize(jobs.size() * deltaV.size());
+    size_t vp_count = 0;
+    for (const auto& dv : deltaVs)
+      vp_count += dv.size();
+    vp.resize(vp_count);
     vp.source_ptcl_per_vp.resize(vp.R.size());
 
     size_t k = 0;
-    for (const auto& job : jobs)
+    for (size_t j = 0; j < jobs.size(); j++)
     {
+      const auto& job     = jobs[j];
+      const auto& deltaV  = deltaVs[j];
       assert(job.electron_id == vp.refPtcl);
       for (size_t q = 0; q < deltaV.size(); q++, k++, ivp++)
       {
