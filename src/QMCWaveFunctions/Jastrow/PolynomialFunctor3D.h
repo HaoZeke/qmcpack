@@ -22,6 +22,7 @@
 #include "OhmmsData/AttributeSet.h"
 #include "Numerics/LinearFit.h"
 #include "Numerics/DeterminantOperators.h"
+#include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include <cstdio>
 #include <algorithm>
 
@@ -30,8 +31,18 @@ namespace qmcplusplus
 struct PolynomialFunctor3D : public OptimizableFunctorBase
 {
   using value_type = real_type;
+
+  /// Offload-capable: gamma_offload_ + dense dual-table kernels (see PolynomialFunctor3DOffload.h)
+  constexpr static bool isOMPoffload() { return true; }
+
+  const real_type* gammaOffloadData() const { return gamma_offload_.data(); }
+  real_type* gammaOffloadData() { return gamma_offload_.data(); }
+  int gammaOffloadSize() const { return static_cast<int>(gamma_offload_.size()); }
+
   int N_eI, N_ee;
   Array<real_type, 3> gamma;
+  /// Flat dual-space copy of gamma for OpenMP offload (layout matches Array offset)
+  Vector<real_type, OffloadPinnedAllocator<real_type>> gamma_offload_;
   // Permutation vector, used when we need to pivot
   // columns
   std::vector<int> GammaPerm;
@@ -255,6 +266,18 @@ struct PolynomialFunctor3D : public OptimizableFunctorBase
         for (int n = 0; n <= N_ee; n++)
           //	    gamma(m,l,n) = gamma(l,m,n) = unpermuted[num++];
           gamma(m, l, n) = gamma(l, m, n) = GammaVec[num++];
+    // Dual-space flat gamma for offload kernels
+    {
+      const int Lm = N_eI + 1;
+      const int Ln = N_ee + 1;
+      const int nflat = Lm * Lm * Ln;
+      gamma_offload_.resize(nflat);
+      for (int l = 0; l <= N_eI; ++l)
+        for (int m = 0; m <= N_eI; ++m)
+          for (int n = 0; n <= N_ee; ++n)
+            gamma_offload_[(l * Lm + m) * Ln + n] = gamma(l, m, n);
+      gamma_offload_.updateTo();
+    }
     // Now check that constraints have been satisfied
     // e-e constraints
     for (int k = 0; k <= 2 * N_eI; k++)
