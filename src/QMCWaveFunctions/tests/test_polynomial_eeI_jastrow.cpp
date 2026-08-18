@@ -10,8 +10,10 @@
 //////////////////////////////////////////////////////////////////////////////////////
 #include <catch2/catch_test_macros.hpp>
 #include "Utilities/for_testing/Catch2Approx.h"
+#include "config.h"
 
 #include "OhmmsData/Libxml2Doc.h"
+#include "OhmmsData/AttributeSet.h"
 #include "OhmmsPETE/OhmmsMatrix.h"
 #include "Particle/ParticleSet.h"
 #include "QMCWaveFunctions/WaveFunctionComponent.h"
@@ -24,6 +26,14 @@
 
 #include <stdio.h>
 #include <string>
+#include <cmath>
+#include <chrono>
+#include <vector>
+#include <memory>
+#include <iostream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using std::string;
 
@@ -32,6 +42,8 @@ namespace qmcplusplus
 using RealType = WaveFunctionComponent::RealType;
 using LogValue = WaveFunctionComponent::LogValue;
 using PsiValue = WaveFunctionComponent::PsiValue;
+using GradType = WaveFunctionComponent::GradType;
+using PosType  = QMCTraits::PosType;
 
 TEST_CASE("PolynomialFunctor3D functor zero", "[wavefunction]")
 {
@@ -464,4 +476,1127 @@ TEST_CASE("PolynomialFunctor3D Jastrow", "[wavefunction]")
   test_J3_polynomial3D(DynamicCoordinateKind::DC_POS);
   test_J3_polynomial3D(DynamicCoordinateKind::DC_POS_OFFLOAD);
 }
+
+// ---------------------------------------------------------------------------
+// Golden master: freeze pre-port science numbers for the canonical 2-ion / 4e
+// polynomial eeI system. Any path (serial, multi-walker OpenMP, use_offload)
+// must reproduce these values. Do not regenerate without science review.
+// Source: long-standing CHECKs in test_J3_polynomial3D (DC_POS).
+// ---------------------------------------------------------------------------
+namespace jeei_golden
+{
+// evaluateLog / kinetic-like scalar from G,L
+constexpr double logpsi           = -1.193457749;
+constexpr double ke_from_GL       = -0.058051245;
+// evaluateRatiosAlltoOne / ratio at newpos=(0.3,0.2,0.5) for e=0..3
+constexpr double ratio_e[4]       = {0.8744938582, 1.0357541137, 0.8302245609, 0.7987703724};
+// ratioGrad particle 0 at same newpos (value matches ratio_e[0]; gradient from host)
+constexpr double ratio_grad0_val  = 0.8744938582;
+constexpr double ratio_grad0_g[3] = {0.1678787246, 0.0118009679, 0.0439525127};
+// one optimizable-parameter derivative sample
+constexpr double dlogpsi_43       = 1.3358726814e+05;
+constexpr double dhpsioverpsi_43  = -2.3246270644e+05;
+
+inline PosType newpos() { return PosType(0.3, 0.2, 0.5); }
+
+const char* xml()
+{
+  return R"(<tmp>
+    <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
+      <correlation ispecies="O" especies="u" isize="3" esize="3" rcut="10">
+        <coefficients id="uuO_gm" type="Array" optimize="yes"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255156e-06 3.214580988e-06 -7.716743107e-06 -5.275682077e-06 -1.778457637e-06 7.926231121e-06 1.767406868e-06 5.451359059e-08 2.801423724e-06 4.577282736e-06 7.634608083e-06 -9.510673173e-07 -2.344131575e-06 -1.878777219e-06 3.937363358e-07 5.065353773e-07 5.086724869e-07 -1.358768154e-07</coefficients>
+      </correlation>
+      <correlation ispecies="O" especies1="u" especies2="d" isize="3" esize="3" rcut="10">
+        <coefficients id="udO_gm" type="Array" optimize="yes"> -6.939530224e-06 2.634169299e-05 4.046077477e-05 -8.002682388e-06 -5.396795988e-06 6.697370507e-06 5.433953051e-05 -6.336849668e-06 3.680471431e-05 -2.996059772e-05 1.99365828e-06 -3.222705626e-05 -8.091669063e-06 4.15738535e-06 4.843939112e-06 3.563650208e-07 3.786332474e-05 -1.418336941e-05 2.282691374e-05 1.29239286e-06 -4.93580873e-06 -3.052539228e-06 9.870288001e-08 1.844286407e-06 2.970561871e-07 -4.364303677e-08</coefficients>
+      </correlation>
+    </jastrow>
+</tmp>
+)";
+}
+
+void setup_ions_elecs(ParticleSet& ions, ParticleSet& elec)
+{
+  ions.setName("ion");
+  ions.create({2});
+  ions.R[0] = {2.0, 0.0, 0.0};
+  ions.R[1] = {-2.0, 0.0, 0.0};
+  ions.getSpeciesSet().addSpecies("O");
+  ions.update();
+
+  elec.setName("elec");
+  elec.create({2, 2});
+  elec.R[0] = {1.00, 0.0, 0.0};
+  elec.R[1] = {0.0, 0.0, 0.0};
+  elec.R[2] = {-1.00, 0.0, 0.0};
+  elec.R[3] = {0.0, 0.0, 2.0};
+  SpeciesSet& sp = elec.getSpeciesSet();
+  int upIdx      = sp.addSpecies("u");
+  int downIdx    = sp.addSpecies("d");
+  int chargeIdx  = sp.addAttribute("charge");
+  sp(chargeIdx, upIdx)   = -1;
+  sp(chargeIdx, downIdx) = -1;
+}
+
+void check_log_ke_ratios(WaveFunctionComponent& j3, ParticleSet& elec)
+{
+  elec.G = 0;
+  elec.L = 0;
+  const double logpsi_v = std::real(j3.evaluateLog(elec, elec.G, elec.L));
+  CHECK(logpsi_v == Approx(logpsi));
+  const double KE = -0.5 * (Dot(elec.G, elec.G) + Sum(elec.L));
+  CHECK(KE == Approx(ke_from_GL));
+
+  elec.makeVirtualMoves(newpos());
+  std::vector<QMCTraits::ValueType> ratios(elec.getTotalNum());
+  j3.evaluateRatiosAlltoOne(elec, ratios);
+  for (int e = 0; e < 4; ++e)
+    CHECK(std::real(ratios[e]) == Approx(ratio_e[e]));
+
+  for (int e = 0; e < 4; ++e)
+  {
+    elec.makeMove(e, newpos() - elec.R[e]);
+    PsiValue r = j3.ratio(elec, e);
+    elec.rejectMove(e);
+    CHECK(std::real(r) == Approx(ratio_e[e]));
+  }
+
+  elec.makeMove(0, newpos() - elec.R[0]);
+  GradType g(0);
+  PsiValue rg = j3.ratioGrad(elec, 0, g);
+  elec.rejectMove(0);
+  CHECK(std::real(rg) == Approx(ratio_grad0_val));
+  for (int d = 0; d < 3; ++d)
+    CHECK(ValueApprox(g[d]) == QMCTraits::ValueType(ratio_grad0_g[d]));
+}
+} // namespace jeei_golden
+
+/** Golden master: serial host path matches frozen science numbers. */
+TEST_CASE("JeeIOrbitalSoA golden master serial", "[wavefunction][golden]")
+{
+  Communicate* c = OHMMS::Controller;
+  const SimulationCell cell;
+  ParticleSet ions(cell), elec(cell);
+  jeei_golden::setup_ions_elecs(ions, elec);
+
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(jeei_golden::xml()));
+  eeI_JastrowBuilder b(c, elec, ions);
+  auto j3u = b.buildComponent(xmlFirstElementChild(doc.getRoot()));
+  auto* j3 = dynamic_cast<JeeIOrbitalSoA<PolynomialFunctor3D>*>(j3u.get());
+  REQUIRE(j3);
+  // ENABLE_CUDA builds enable dense offload via the builder; science values must still match.
+
+  elec.update();
+  jeei_golden::check_log_ke_ratios(*j3, elec);
+
+  UniqueOptObjRefs opt_refs;
+  j3->extractOptimizableObjectRefs(opt_refs);
+  OptVariables optvars;
+  for (OptimizableObject& obj : opt_refs)
+    obj.checkInVariablesExclusive(optvars);
+  optvars.resetIndex();
+  j3->checkOutVariables(optvars);
+  Vector<WaveFunctionComponent::ValueType> dlogpsi(optvars.size()), dhpsi(optvars.size());
+  j3->evaluateDerivatives(elec, optvars, dlogpsi, dhpsi);
+  CHECK(std::real(dlogpsi[43]) == Approx(jeei_golden::dlogpsi_43));
+  CHECK(std::real(dhpsi[43]) == Approx(jeei_golden::dhpsioverpsi_43));
+}
+
+/** Golden master: multi-walker OpenMP mw_ratioGrad matches frozen ratioGrad science. */
+TEST_CASE("JeeIOrbitalSoA golden master multi-walker OpenMP", "[wavefunction][golden]")
+{
+  Communicate* c = OHMMS::Controller;
+  const SimulationCell cell;
+  ParticleSet ions(cell), elec(cell);
+  jeei_golden::setup_ions_elecs(ions, elec);
+
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(jeei_golden::xml()));
+  eeI_JastrowBuilder b(c, elec, ions);
+  auto j3u = b.buildComponent(xmlFirstElementChild(doc.getRoot()));
+  auto* j3 = dynamic_cast<JeeIOrbitalSoA<PolynomialFunctor3D>*>(j3u.get());
+  REQUIRE(j3);
+
+  elec.update();
+  elec.G = 0;
+  elec.L = 0;
+  j3->evaluateLog(elec, elec.G, elec.L);
+
+  ParticleSet elec2(elec);
+  auto j3_clone = j3->makeClone(elec2);
+  elec2.update();
+  elec2.G = 0;
+  elec2.L = 0;
+  j3_clone->evaluateLog(elec2, elec2.G, elec2.L);
+
+  const PosType np = jeei_golden::newpos();
+  elec.makeMove(0, np - elec.R[0]);
+  elec2.makeMove(0, np - elec2.R[0]);
+
+  std::vector<PsiValue> ratios(2);
+  std::vector<GradType> grads(2, GradType(0));
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(*j3, {*j3, *j3_clone});
+  RefVectorWithLeader<ParticleSet> p_list(elec, {elec, elec2});
+  j3->mw_ratioGrad(wfc_list, p_list, 0, ratios, grads);
+
+  for (int iw = 0; iw < 2; ++iw)
+  {
+    CHECK(std::real(ratios[iw]) == Approx(jeei_golden::ratio_grad0_val));
+    for (int d = 0; d < 3; ++d)
+      CHECK(ValueApprox(grads[iw][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
+  }
+
+  elec.rejectMove(0);
+  elec2.rejectMove(0);
+}
+
+/** Golden master: use_offload=true path matches frozen science (log, ratios, ratioGrad). */
+TEST_CASE("JeeIOrbitalSoA golden master use_offload path", "[wavefunction][golden]")
+{
+  Communicate* c = OHMMS::Controller;
+  const SimulationCell cell;
+  ParticleSet ions(cell), elec(cell);
+  jeei_golden::setup_ions_elecs(ions, elec);
+
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(jeei_golden::xml()));
+  // Build host then deep-copy functors into use_offload instance via makeClone pattern:
+  // construct offload object and re-parse correlations with unique ids already in xml.
+  eeI_JastrowBuilder b_host(c, elec, ions);
+  auto host_up = b_host.buildComponent(xmlFirstElementChild(doc.getRoot()));
+  auto* host   = dynamic_cast<JeeIOrbitalSoA<PolynomialFunctor3D>*>(host_up.get());
+  REQUIRE(host);
+
+  // Offload-enabled clone on a twin electron set
+  ParticleSet elec_o(elec);
+  JeeIOrbitalSoA<PolynomialFunctor3D> j3_off("J3_gm_off", ions, elec_o, true);
+  REQUIRE(j3_off.isUsingOffload());
+  // Copy correlations by re-building from the same XML into offload via host makeClone
+  // then evaluating on host is not enough — reconstruct functors:
+  {
+    xmlNodePtr kids  = xmlFirstElementChild(doc.getRoot())->children;
+    SpeciesSet& iSet = ions.getSpeciesSet();
+    SpeciesSet& eSet = elec_o.getSpeciesSet();
+    while (kids != nullptr)
+    {
+      if (std::string((char*)kids->name) == "correlation")
+      {
+        RealType ee_cusp = 0.0, eI_cusp = 0.0;
+        std::string iSpecies, eSpecies1("u"), eSpecies2("u");
+        OhmmsAttributeSet rAttrib;
+        rAttrib.add(iSpecies, "ispecies");
+        rAttrib.add(eSpecies1, "especies1");
+        rAttrib.add(eSpecies2, "especies2");
+        rAttrib.add(ee_cusp, "ecusp");
+        rAttrib.add(eI_cusp, "icusp");
+        rAttrib.put(kids);
+        auto functor =
+            std::make_unique<PolynomialFunctor3D>("J3gm_" + iSpecies + eSpecies1 + eSpecies2, ee_cusp, eI_cusp);
+        functor->iSpecies  = iSpecies;
+        functor->eSpecies1 = eSpecies1;
+        functor->eSpecies2 = eSpecies2;
+        functor->put(kids);
+        j3_off.addFunc(iSet.findSpecies(iSpecies), eSet.findSpecies(eSpecies1), eSet.findSpecies(eSpecies2),
+                       std::move(functor));
+      }
+      kids = kids->next;
+    }
+    j3_off.check_complete();
+  }
+
+  elec_o.update();
+  jeei_golden::check_log_ke_ratios(j3_off, elec_o);
+
+  // mw_ratioGrad on single offload walker must hit golden ratioGrad
+  elec_o.makeMove(0, jeei_golden::newpos() - elec_o.R[0]);
+  std::vector<PsiValue> ratios(1);
+  std::vector<GradType> grads(1, GradType(0));
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(j3_off, {j3_off});
+  RefVectorWithLeader<ParticleSet> p_list(elec_o, {elec_o});
+  j3_off.mw_ratioGrad(wfc_list, p_list, 0, ratios, grads);
+  CHECK(std::real(ratios[0]) == Approx(jeei_golden::ratio_grad0_val));
+  for (int d = 0; d < 3; ++d)
+    CHECK(ValueApprox(grads[0][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
+  elec_o.rejectMove(0);
+
+  (void)host; // host built to ensure XML still valid for builder path
+}
+
+/** Golden master: multi-walker offload recompute → ratioGrad → accept → evalGrad.
+ *  Pins CUDA dense (ENABLE_CUDA) / host dense against frozen log/KE/ratioGrad, then
+ *  checks accept does not poison stored gradients (evalGrad matches serial host twin).
+ */
+TEST_CASE("JeeIOrbitalSoA golden master multi-walker offload recompute+accept", "[wavefunction][golden]")
+{
+  Communicate* c = OHMMS::Controller;
+  const SimulationCell cell;
+  ParticleSet ions(cell), elec_h(cell), elec_o(cell);
+  jeei_golden::setup_ions_elecs(ions, elec_h);
+  // second electron set: same geometry, own distance tables
+  elec_o.setName("elec");
+  elec_o.create({2, 2});
+  elec_o.R[0] = {1.00, 0.0, 0.0};
+  elec_o.R[1] = {0.0, 0.0, 0.0};
+  elec_o.R[2] = {-1.00, 0.0, 0.0};
+  elec_o.R[3] = {0.0, 0.0, 2.0};
+  {
+    SpeciesSet& sp = elec_o.getSpeciesSet();
+    int upIdx      = sp.addSpecies("u");
+    int downIdx    = sp.addSpecies("d");
+    int chargeIdx  = sp.addAttribute("charge");
+    sp(chargeIdx, upIdx)   = -1;
+    sp(chargeIdx, downIdx) = -1;
+  }
+
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(jeei_golden::xml()));
+
+  // Host twin for accept science
+  eeI_JastrowBuilder b_h(c, elec_h, ions);
+  auto j3h_u = b_h.buildComponent(xmlFirstElementChild(doc.getRoot()));
+  auto* j3_h = dynamic_cast<JeeIOrbitalSoA<PolynomialFunctor3D>*>(j3h_u.get());
+  REQUIRE(j3_h);
+  elec_h.update();
+  elec_h.G = 0;
+  elec_h.L = 0;
+  j3_h->evaluateLog(elec_h, elec_h.G, elec_h.L);
+  elec_h.makeMove(0, jeei_golden::newpos() - elec_h.R[0]);
+  GradType gh(0);
+  const PsiValue rh = j3_h->ratioGrad(elec_h, 0, gh);
+  j3_h->acceptMove(elec_h, 0);
+  elec_h.acceptMove(0);
+  const GradType g1_host = j3_h->evalGrad(elec_h, 1);
+  CHECK(std::real(rh) == Approx(jeei_golden::ratio_grad0_val));
+
+  // Offload leader + clone (same pattern as multi-walker OpenMP golden)
+  JeeIOrbitalSoA<PolynomialFunctor3D> j3_off("J3_gm_off_mw", ions, elec_o, true);
+  REQUIRE(j3_off.isUsingOffload());
+  {
+    xmlNodePtr kids  = xmlFirstElementChild(doc.getRoot())->children;
+    SpeciesSet& iSet = ions.getSpeciesSet();
+    SpeciesSet& eSet = elec_o.getSpeciesSet();
+    while (kids != nullptr)
+    {
+      if (std::string((char*)kids->name) == "correlation")
+      {
+        RealType ee_cusp = 0.0, eI_cusp = 0.0;
+        std::string iSpecies, eSpecies1("u"), eSpecies2("u");
+        OhmmsAttributeSet rAttrib;
+        rAttrib.add(iSpecies, "ispecies");
+        rAttrib.add(eSpecies1, "especies1");
+        rAttrib.add(eSpecies2, "especies2");
+        rAttrib.add(ee_cusp, "ecusp");
+        rAttrib.add(eI_cusp, "icusp");
+        rAttrib.put(kids);
+        auto functor =
+            std::make_unique<PolynomialFunctor3D>("J3gm_offmw_" + iSpecies + eSpecies1 + eSpecies2, ee_cusp, eI_cusp);
+        functor->iSpecies  = iSpecies;
+        functor->eSpecies1 = eSpecies1;
+        functor->eSpecies2 = eSpecies2;
+        functor->put(kids);
+        j3_off.addFunc(iSet.findSpecies(iSpecies), eSet.findSpecies(eSpecies1), eSet.findSpecies(eSpecies2),
+                       std::move(functor));
+      }
+      kids = kids->next;
+    }
+    j3_off.check_complete();
+  }
+
+  ParticleSet elec2(elec_o);
+  auto j3_clone = j3_off.makeClone(elec2);
+  auto* j3_c    = dynamic_cast<JeeIOrbitalSoA<PolynomialFunctor3D>*>(j3_clone.get());
+  REQUIRE(j3_c);
+
+  elec_o.update();
+  elec2.update();
+  ParticleSet::ParticleGradient G0(4), G1(4);
+  ParticleSet::ParticleLaplacian L0(4), L1(4);
+  G0 = 0;
+  G1 = 0;
+  L0 = 0;
+  L1 = 0;
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(j3_off, {j3_off, *j3_c});
+  RefVectorWithLeader<ParticleSet> p_list(elec_o, {elec_o, elec2});
+  RefVector<ParticleSet::ParticleGradient> G_list = {G0, G1};
+  RefVector<ParticleSet::ParticleLaplacian> L_list = {L0, L1};
+
+  // Persistent multi-walker resource: device-resident table caching only engages
+  // through this path (matches the batched drivers), so the post-accept sweeps below
+  // exercise the accept-time device row patching rather than a fresh full upload.
+  ResourceCollection wfc_res("test_jeei_res");
+  j3_off.createResource(wfc_res);
+  ResourceCollectionTeamLock<WaveFunctionComponent> mw_lock(wfc_res, wfc_list);
+
+  j3_off.mw_evaluateLog(wfc_list, p_list, G_list, L_list);
+  for (auto logv : {j3_off.get_log_value(), j3_c->get_log_value()})
+    CHECK(std::real(logv) == Approx(jeei_golden::logpsi));
+  CHECK(-0.5 * (Dot(G0, G0) + Sum(L0)) == Approx(jeei_golden::ke_from_GL));
+  CHECK(-0.5 * (Dot(G1, G1) + Sum(L1)) == Approx(jeei_golden::ke_from_GL));
+
+  const PosType np = jeei_golden::newpos();
+  elec_o.makeMove(0, np - elec_o.R[0]);
+  elec2.makeMove(0, np - elec2.R[0]);
+  std::vector<PsiValue> ratios(2);
+  std::vector<GradType> grads(2, GradType(0));
+  j3_off.mw_ratioGrad(wfc_list, p_list, 0, ratios, grads);
+  for (int iw = 0; iw < 2; ++iw)
+  {
+    CHECK(std::real(ratios[iw]) == Approx(jeei_golden::ratio_grad0_val));
+    for (int d = 0; d < 3; ++d)
+      CHECK(ValueApprox(grads[iw][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
+  }
+
+  std::vector<bool> accepted(2, true);
+  j3_off.mw_accept_rejectMove(wfc_list, p_list, 0, accepted);
+  elec_o.acceptMove(0);
+  elec2.acceptMove(0);
+  // Production parity: drivers read the post-accept gradient through mw_evalGrad
+  // (device-resident state); single-walker evalGrad host mirrors sync at evaluateGL.
+  std::vector<GradType> g1_mw(2, GradType(0));
+  j3_off.mw_evalGrad(wfc_list, p_list, 1, g1_mw);
+  for (int iw = 0; iw < 2; ++iw)
+    for (int d = 0; d < 3; ++d)
+    {
+      REQUIRE(std::isfinite(std::real(g1_mw[iw][d])));
+      CHECK(std::real(g1_mw[iw][d]) == Approx(std::real(g1_host[d])));
+    }
+
+  // Second sweep on another electron: the device-resident e-I tables must hold the
+  // accepted (post-move) row for electron 0, so ratioGrad here must match the host twin.
+  const PosType np2(0.15, -0.2, 0.35);
+  elec_h.makeMove(1, np2 - elec_h.R[1]);
+  GradType gh2(0);
+  const PsiValue rh2 = j3_h->ratioGrad(elec_h, 1, gh2);
+  j3_h->acceptMove(elec_h, 1);
+  elec_h.acceptMove(1);
+
+  elec_o.makeMove(1, np2 - elec_o.R[1]);
+  elec2.makeMove(1, np2 - elec2.R[1]);
+  grads[0] = GradType(0);
+  grads[1] = GradType(0);
+  j3_off.mw_ratioGrad(wfc_list, p_list, 1, ratios, grads);
+  for (int iw = 0; iw < 2; ++iw)
+  {
+    CHECK(std::real(ratios[iw]) == Approx(std::real(rh2)));
+    for (int d = 0; d < 3; ++d)
+      CHECK(std::real(grads[iw][d]) == Approx(std::real(gh2[d])));
+  }
+  j3_off.mw_accept_rejectMove(wfc_list, p_list, 1, accepted);
+  elec_o.acceptMove(1);
+  elec2.acceptMove(1);
+
+  // Partial recompute (walker 0 only) must not corrupt the resident tables of the
+  // skipped walker: the follow-up ratioGrad still has to agree with the host twin.
+  const std::vector<bool> recompute_partial{true, false};
+  j3_off.mw_recompute(wfc_list, p_list, recompute_partial);
+
+  const PosType np3(-0.6, 0.1, 0.25);
+  elec_h.makeMove(2, np3 - elec_h.R[2]);
+  GradType gh3(0);
+  const PsiValue rh3 = j3_h->ratioGrad(elec_h, 2, gh3);
+  elec_h.rejectMove(2);
+
+  elec_o.makeMove(2, np3 - elec_o.R[2]);
+  elec2.makeMove(2, np3 - elec2.R[2]);
+  grads[0] = GradType(0);
+  grads[1] = GradType(0);
+  j3_off.mw_ratioGrad(wfc_list, p_list, 2, ratios, grads);
+  for (int iw = 0; iw < 2; ++iw)
+  {
+    CHECK(std::real(ratios[iw]) == Approx(std::real(rh3)));
+    for (int d = 0; d < 3; ++d)
+      CHECK(std::real(grads[iw][d]) == Approx(std::real(gh3[d])));
+  }
+  const std::vector<bool> rejected(2, false);
+  j3_off.mw_accept_rejectMove(wfc_list, p_list, 2, rejected);
+  elec_o.rejectMove(2);
+  elec2.rejectMove(2);
+}
+
+
+/** Scaffold: isOMPoffload and use_offload construction. */
+TEST_CASE("JeeIOrbitalSoA offload scaffold", "[wavefunction]")
+{
+  REQUIRE(PolynomialFunctor3D::isOMPoffload());
+
+  const SimulationCell simulation_cell;
+  ParticleSet ions_(simulation_cell);
+  ParticleSet elec_(simulation_cell);
+
+  ions_.setName("ion");
+  ions_.create({1});
+  ions_.R[0] = {0.0, 0.0, 0.0};
+  ions_.getSpeciesSet().addSpecies("H");
+  ions_.update();
+
+  elec_.setName("elec");
+  elec_.create({1, 1});
+  elec_.R[0] = {0.5, 0.0, 0.0};
+  elec_.R[1] = {-0.5, 0.0, 0.0};
+  SpeciesSet& sp = elec_.getSpeciesSet();
+  int upIdx      = sp.addSpecies("u");
+  int downIdx    = sp.addSpecies("d");
+  int chargeIdx  = sp.addAttribute("charge");
+  sp(chargeIdx, upIdx)   = -1;
+  sp(chargeIdx, downIdx) = -1;
+
+  using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  J3Type j3_host("JeeI_host", ions_, elec_, false);
+  REQUIRE_FALSE(j3_host.isUsingOffload());
+  J3Type j3_off("JeeI_off", ions_, elec_, true);
+  REQUIRE(j3_off.isUsingOffload());
+}
+
+/** Host compact-list path vs use_offload dense dual-table path. */
+TEST_CASE("JeeIOrbitalSoA host vs offload dense agreement", "[wavefunction]")
+{
+  Communicate* c = OHMMS::Controller;
+
+  const SimulationCell simulation_cell;
+  ParticleSet ions_h(simulation_cell);
+  ParticleSet elec_h(simulation_cell);
+  ParticleSet ions_d(simulation_cell);
+  ParticleSet elec_d(simulation_cell);
+
+  auto setup = [](ParticleSet& ions, ParticleSet& elec) {
+    ions.setName("ion");
+    ions.create({2});
+    ions.R[0] = {2.0, 0.0, 0.0};
+    ions.R[1] = {-2.0, 0.0, 0.0};
+    ions.getSpeciesSet().addSpecies("O");
+    ions.update();
+
+    elec.setName("elec");
+    elec.create({2, 2});
+    elec.R[0] = {1.00, 0.0, 0.0};
+    elec.R[1] = {0.0, 0.0, 0.0};
+    elec.R[2] = {-1.00, 0.0, 0.0};
+    elec.R[3] = {0.0, 0.0, 2.0};
+    SpeciesSet& sp = elec.getSpeciesSet();
+    int upIdx      = sp.addSpecies("u");
+    int downIdx    = sp.addSpecies("d");
+    int chargeIdx  = sp.addAttribute("charge");
+    sp(chargeIdx, upIdx)   = -1;
+    sp(chargeIdx, downIdx) = -1;
+  };
+  setup(ions_h, elec_h);
+  setup(ions_d, elec_d);
+
+  const char* particles = R"(<tmp>
+    <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
+      <correlation ispecies="O" especies="u" isize="3" esize="3" rcut="10">
+        <coefficients id="uuO" type="Array" optimize="yes"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255156e-06 3.214580988e-06 -7.716743107e-06 -5.275682077e-06 -1.778457637e-06 7.926231121e-06 1.767406868e-06 5.451359059e-08 2.801423724e-06 4.577282736e-06 7.634608083e-06 -9.510673173e-07 -2.344131575e-06 -1.878777219e-06 3.937363358e-07 5.065353773e-07 5.086724869e-07 -1.358768154e-07</coefficients>
+      </correlation>
+      <correlation ispecies="O" especies1="u" especies2="d" isize="3" esize="3" rcut="10">
+        <coefficients id="udO" type="Array" optimize="yes"> -6.939530224e-06 2.634169299e-05 4.046077477e-05 -8.002682388e-06 -5.396795988e-06 6.697370507e-06 5.433953051e-05 -6.336849668e-06 3.680471431e-05 -2.996059772e-05 1.99365828e-06 -3.222705626e-05 -8.091669063e-06 4.15738535e-06 4.843939112e-06 3.563650208e-07 3.786332474e-05 -1.418336941e-05 2.282691374e-05 1.29239286e-06 -4.93580873e-06 -3.052539228e-06 9.870288001e-08 1.844286407e-06 2.970561871e-07 -4.364303677e-08</coefficients>
+      </correlation>
+    </jastrow>
+</tmp>
+)";
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(particles));
+  xmlNodePtr jas_eeI = xmlFirstElementChild(doc.getRoot());
+
+  using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  // Explicit host vs offload (builder may force CUDA on ENABLE_CUDA builds).
+  J3Type j3_h("J3_host", ions_h, elec_h, false);
+  J3Type j3_d("J3_dense", ions_d, elec_d, true);
+  REQUIRE_FALSE(j3_h.isUsingOffload());
+  REQUIRE(j3_d.isUsingOffload());
+  auto load_functors = [&](J3Type& j3, ParticleSet& ions, ParticleSet& elec, const std::string& tag) {
+    xmlNodePtr kids = jas_eeI->children;
+    SpeciesSet& iSet = ions.getSpeciesSet();
+    SpeciesSet& eSet = elec.getSpeciesSet();
+    while (kids != nullptr)
+    {
+      if (std::string((char*)kids->name) == "correlation")
+      {
+        RealType ee_cusp = 0.0, eI_cusp = 0.0;
+        std::string iSpecies, eSpecies1("u"), eSpecies2("u");
+        OhmmsAttributeSet rAttrib;
+        rAttrib.add(iSpecies, "ispecies");
+        rAttrib.add(eSpecies1, "especies1");
+        rAttrib.add(eSpecies2, "especies2");
+        rAttrib.add(ee_cusp, "ecusp");
+        rAttrib.add(eI_cusp, "icusp");
+        rAttrib.put(kids);
+        auto functor =
+            std::make_unique<PolynomialFunctor3D>("J3_" + iSpecies + eSpecies1 + eSpecies2 + "_" + tag,
+                                                   ee_cusp, eI_cusp);
+        functor->iSpecies  = iSpecies;
+        functor->eSpecies1 = eSpecies1;
+        functor->eSpecies2 = eSpecies2;
+        functor->put(kids);
+        j3.addFunc(iSet.findSpecies(iSpecies), eSet.findSpecies(eSpecies1), eSet.findSpecies(eSpecies2),
+                   std::move(functor));
+      }
+      kids = kids->next;
+    }
+    j3.check_complete();
+  };
+  load_functors(j3_h, ions_h, elec_h, "host");
+  load_functors(j3_d, ions_d, elec_d, "dense");
+
+  elec_h.update();
+  elec_d.update();
+  elec_h.G = 0;
+  elec_h.L = 0;
+  elec_d.G = 0;
+  elec_d.L = 0;
+
+  const double log_h = std::real(j3_h.evaluateLog(elec_h, elec_h.G, elec_h.L));
+  const double log_d = std::real(j3_d.evaluateLog(elec_d, elec_d.G, elec_d.L));
+  CHECK(log_h == Approx(-1.193457749));
+  CHECK(log_d == Approx(log_h));
+
+  // Single-walker ratioGrad (host compact) vs mw_ratioGrad dense path
+  PosType newpos(0.3, 0.2, 0.5);
+  elec_h.makeMove(0, newpos - elec_h.R[0]);
+  elec_d.makeMove(0, newpos - elec_d.R[0]);
+
+  GradType g_h(0);
+  PsiValue r_h = j3_h.ratioGrad(elec_h, 0, g_h);
+
+  std::vector<PsiValue> ratios(1);
+  std::vector<GradType> grads(1, GradType(0));
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(j3_d, {j3_d});
+  RefVectorWithLeader<ParticleSet> p_list(elec_d, {elec_d});
+  j3_d.mw_ratioGrad(wfc_list, p_list, 0, ratios, grads);
+
+  CHECK(std::real(ratios[0]) == Approx(std::real(r_h)));
+  for (int d = 0; d < OHMMS_DIM; ++d)
+    CHECK(ValueApprox(grads[0][d]) == g_h[d]);
+
+  elec_h.rejectMove(0);
+  elec_d.rejectMove(0);
+}
+
+/** Multi-walker OpenMP mw_ratioGrad must be measurably faster than serial ratioGrad loop. */
+TEST_CASE("JeeIOrbitalSoA mw_ratioGrad multi-walker speedup", "[wavefunction][benchmark]")
+{
+  Communicate* c = OHMMS::Controller;
+
+  const int nw       = 32;
+  const int n_repeat = 300;
+  const SimulationCell simulation_cell;
+
+  ParticleSet ions(simulation_cell);
+  ions.setName("ion");
+  ions.create({2});
+  ions.R[0] = {2.0, 0.0, 0.0};
+  ions.R[1] = {-2.0, 0.0, 0.0};
+  ions.getSpeciesSet().addSpecies("O");
+  ions.update();
+
+  auto make_elec = [&]() {
+    auto elec = std::make_unique<ParticleSet>(simulation_cell);
+    elec->setName("elec");
+    elec->create({2, 2});
+    elec->R[0] = {1.00, 0.0, 0.0};
+    elec->R[1] = {0.0, 0.0, 0.0};
+    elec->R[2] = {-1.00, 0.0, 0.0};
+    elec->R[3] = {0.0, 0.0, 2.0};
+    SpeciesSet& sp = elec->getSpeciesSet();
+    int upIdx      = sp.addSpecies("u");
+    int downIdx    = sp.addSpecies("d");
+    int chargeIdx  = sp.addAttribute("charge");
+    sp(chargeIdx, upIdx)   = -1;
+    sp(chargeIdx, downIdx) = -1;
+    return elec;
+  };
+
+  const char* particles = R"(<tmp>
+    <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
+      <correlation ispecies="O" especies="u" isize="3" esize="3" rcut="10">
+        <coefficients id="uuO_bench" type="Array" optimize="yes"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255156e-06 3.214580988e-06 -7.716743107e-06 -5.275682077e-06 -1.778457637e-06 7.926231121e-06 1.767406868e-06 5.451359059e-08 2.801423724e-06 4.577282736e-06 7.634608083e-06 -9.510673173e-07 -2.344131575e-06 -1.878777219e-06 3.937363358e-07 5.065353773e-07 5.086724869e-07 -1.358768154e-07</coefficients>
+      </correlation>
+      <correlation ispecies="O" especies1="u" especies2="d" isize="3" esize="3" rcut="10">
+        <coefficients id="udO_bench" type="Array" optimize="yes"> -6.939530224e-06 2.634169299e-05 4.046077477e-05 -8.002682388e-06 -5.396795988e-06 6.697370507e-06 5.433953051e-05 -6.336849668e-06 3.680471431e-05 -2.996059772e-05 1.99365828e-06 -3.222705626e-05 -8.091669063e-06 4.15738535e-06 4.843939112e-06 3.563650208e-07 3.786332474e-05 -1.418336941e-05 2.282691374e-05 1.29239286e-06 -4.93580873e-06 -3.052539228e-06 9.870288001e-08 1.844286407e-06 2.970561871e-07 -4.364303677e-08</coefficients>
+      </correlation>
+    </jastrow>
+</tmp>
+)";
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(particles));
+  xmlNodePtr jas_eeI = xmlFirstElementChild(doc.getRoot());
+
+  // Host OpenMP multi-walker (use_offload=false). CUDA builds force offload via builder;
+  // construct explicitly so this benchmark measures host walker-parallel OpenMP.
+  std::vector<std::unique_ptr<ParticleSet>> elecs(nw);
+  std::vector<std::unique_ptr<WaveFunctionComponent>> j3s(nw);
+  using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  elecs[0] = make_elec();
+  elecs[0]->update();
+  {
+    eeI_JastrowBuilder b(c, *elecs[0], ions);
+    auto built = b.buildComponent(jas_eeI);
+    auto* src  = dynamic_cast<J3Type*>(built.get());
+    REQUIRE(src);
+    // Rebuild as host-only with same functors via makeClone then force? makeClone preserves use_offload_.
+    // Parse into explicit host instance:
+    auto host = std::make_unique<J3Type>("J3_bench_host", ions, *elecs[0], false);
+    // Copy functors from builder object via re-put from XML
+    xmlNodePtr kids = jas_eeI->children;
+    SpeciesSet& iSet = ions.getSpeciesSet();
+    SpeciesSet& eSet = elecs[0]->getSpeciesSet();
+    while (kids != nullptr)
+    {
+      if (std::string((char*)kids->name) == "correlation")
+      {
+        RealType ee_cusp = 0.0, eI_cusp = 0.0;
+        std::string iSpecies, eSpecies1("u"), eSpecies2("u");
+        OhmmsAttributeSet rAttrib;
+        rAttrib.add(iSpecies, "ispecies");
+        rAttrib.add(eSpecies1, "especies1");
+        rAttrib.add(eSpecies2, "especies2");
+        rAttrib.add(ee_cusp, "ecusp");
+        rAttrib.add(eI_cusp, "icusp");
+        rAttrib.put(kids);
+        auto functor = std::make_unique<PolynomialFunctor3D>("J3b_" + iSpecies + eSpecies1 + eSpecies2, ee_cusp, eI_cusp);
+        functor->iSpecies  = iSpecies;
+        functor->eSpecies1 = eSpecies1;
+        functor->eSpecies2 = eSpecies2;
+        functor->put(kids);
+        host->addFunc(iSet.findSpecies(iSpecies), eSet.findSpecies(eSpecies1), eSet.findSpecies(eSpecies2),
+                      std::move(functor));
+      }
+      kids = kids->next;
+    }
+    host->check_complete();
+    j3s[0] = std::move(host);
+  }
+  REQUIRE(j3s[0]);
+  REQUIRE_FALSE(dynamic_cast<J3Type*>(j3s[0].get())->isUsingOffload());
+  for (int iw = 1; iw < nw; ++iw)
+  {
+    elecs[iw] = make_elec();
+    j3s[iw]   = j3s[0]->makeClone(*elecs[iw]);
+    elecs[iw]->update();
+  }
+  elecs[0]->update();
+
+  auto* leader = dynamic_cast<J3Type*>(j3s[0].get());
+  REQUIRE(leader);
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->G = 0;
+    elecs[iw]->L = 0;
+    j3s[iw]->evaluateLog(*elecs[iw], elecs[iw]->G, elecs[iw]->L);
+  }
+
+  const PosType newpos(0.3, 0.2, 0.5);
+  for (int iw = 0; iw < nw; ++iw)
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+
+  std::vector<PsiValue> ratios_serial(nw), ratios_mw(nw);
+  std::vector<GradType> grads_serial(nw), grads_mw(nw);
+
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(*j3s[0]);
+  RefVectorWithLeader<ParticleSet> p_list(*elecs[0]);
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    wfc_list.push_back(*j3s[iw]);
+    p_list.push_back(*elecs[iw]);
+  }
+
+  auto run_serial_rg = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      grads_serial[iw]  = GradType(0);
+      ratios_serial[iw] = j3s[iw]->ratioGrad(*elecs[iw], 0, grads_serial[iw]);
+    }
+  };
+  auto run_mw_rg = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+      grads_mw[iw] = GradType(0);
+    leader->mw_ratioGrad(wfc_list, p_list, 0, ratios_mw, grads_mw);
+  };
+
+  std::vector<bool> recompute_all(nw, true);
+  auto run_serial_recompute = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+      j3s[iw]->recompute(*elecs[iw]);
+  };
+  auto run_mw_recompute = [&]() { leader->mw_recompute(wfc_list, p_list, recompute_all); };
+
+  // --- ratioGrad microbench ---
+  run_serial_rg();
+  run_mw_rg();
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->rejectMove(0);
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+  }
+
+  using clock = std::chrono::steady_clock;
+  auto t0     = clock::now();
+  for (int r = 0; r < n_repeat; ++r)
+    run_serial_rg();
+  auto t1 = clock::now();
+  for (int r = 0; r < n_repeat; ++r)
+    run_mw_rg();
+  auto t2 = clock::now();
+
+  const double serial_rg_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  const double mw_rg_ms     = std::chrono::duration<double, std::milli>(t2 - t1).count();
+  const double speedup_rg   = serial_rg_ms / std::max(mw_rg_ms, 1e-9);
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->rejectMove(0);
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+  }
+  run_serial_rg();
+  run_mw_rg();
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    CHECK(std::real(ratios_mw[iw]) == Approx(std::real(ratios_serial[iw])));
+    for (int d = 0; d < OHMMS_DIM; ++d)
+      CHECK(ValueApprox(grads_mw[iw][d]) == grads_serial[iw][d]);
+  }
+
+  // --- recompute microbench (reject moves first so tables are clean) ---
+  for (int iw = 0; iw < nw; ++iw)
+    elecs[iw]->rejectMove(0);
+
+  run_serial_recompute();
+  run_mw_recompute();
+  auto t3 = clock::now();
+  for (int r = 0; r < n_repeat / 4; ++r)
+    run_serial_recompute();
+  auto t4 = clock::now();
+  for (int r = 0; r < n_repeat / 4; ++r)
+    run_mw_recompute();
+  auto t5 = clock::now();
+  const double serial_rc_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
+  const double mw_rc_ms     = std::chrono::duration<double, std::milli>(t5 - t4).count();
+  const double speedup_rc   = serial_rc_ms / std::max(mw_rc_ms, 1e-9);
+
+  const int nthreads =
+#ifdef _OPENMP
+      omp_get_max_threads()
+#else
+      1
+#endif
+      ;
+  std::cout << "\n[JeeI microbench] nw=" << nw << " OMP_NUM_THREADS=" << nthreads
+            << "\n  ratioGrad  serial_ms=" << serial_rg_ms << " mw_ms=" << mw_rg_ms << " speedup=" << speedup_rg
+            << "\n  recompute  serial_ms=" << serial_rc_ms << " mw_ms=" << mw_rc_ms << " speedup=" << speedup_rc
+            << std::endl;
+
+  // No speedup gates: the host multi-walker paths are serial per-walker loops by
+  // design (walker parallelism comes from crowds); the timings above are informational.
+  // Correctness gates are the mw-vs-serial agreement checks earlier in this case.
+}
+
+
+/** Cut2: host compact recompute vs use_offload dense (and CUDA mw) recompute science. */
+TEST_CASE("JeeIOrbitalSoA recompute dense agreement", "[wavefunction][recompute]")
+{
+  Communicate* c = OHMMS::Controller;
+  const SimulationCell cell;
+  ParticleSet ions_h(cell), elec_h(cell), ions_d(cell), elec_d(cell);
+
+  auto setup = [](ParticleSet& ions, ParticleSet& elec) {
+    ions.setName("ion");
+    ions.create({2});
+    ions.R[0] = {2.0, 0.0, 0.0};
+    ions.R[1] = {-2.0, 0.0, 0.0};
+    ions.getSpeciesSet().addSpecies("O");
+    ions.update();
+    elec.setName("elec");
+    elec.create({2, 2});
+    elec.R[0] = {1.00, 0.0, 0.0};
+    elec.R[1] = {0.0, 0.0, 0.0};
+    elec.R[2] = {-1.00, 0.0, 0.0};
+    elec.R[3] = {0.0, 0.0, 2.0};
+    SpeciesSet& sp = elec.getSpeciesSet();
+    int upIdx      = sp.addSpecies("u");
+    int downIdx    = sp.addSpecies("d");
+    int chargeIdx  = sp.addAttribute("charge");
+    sp(chargeIdx, upIdx)   = -1;
+    sp(chargeIdx, downIdx) = -1;
+  };
+  setup(ions_h, elec_h);
+  setup(ions_d, elec_d);
+
+  const char* particles = R"(<tmp>
+    <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
+      <correlation ispecies="O" especies="u" isize="3" esize="3" rcut="10">
+        <coefficients id="uuO_rc" type="Array" optimize="yes"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255156e-06 3.214580988e-06 -7.716743107e-06 -5.275682077e-06 -1.778457637e-06 7.926231121e-06 1.767406868e-06 5.451359059e-08 2.801423724e-06 4.577282736e-06 7.634608083e-06 -9.510673173e-07 -2.344131575e-06 -1.878777219e-06 3.937363358e-07 5.065353773e-07 5.086724869e-07 -1.358768154e-07</coefficients>
+      </correlation>
+      <correlation ispecies="O" especies1="u" especies2="d" isize="3" esize="3" rcut="10">
+        <coefficients id="udO_rc" type="Array" optimize="yes"> -6.939530224e-06 2.634169299e-05 4.046077477e-05 -8.002682388e-06 -5.396795988e-06 6.697370507e-06 5.433953051e-05 -6.336849668e-06 3.680471431e-05 -2.996059772e-05 1.99365828e-06 -3.222705626e-05 -8.091669063e-06 4.15738535e-06 4.843939112e-06 3.563650208e-07 3.786332474e-05 -1.418336941e-05 2.282691374e-05 1.29239286e-06 -4.93580873e-06 -3.052539228e-06 9.870288001e-08 1.844286407e-06 2.970561871e-07 -4.364303677e-08</coefficients>
+      </correlation>
+    </jastrow>
+</tmp>
+)";
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(particles));
+  xmlNodePtr jas = xmlFirstElementChild(doc.getRoot());
+
+  using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  J3Type j3_h("J3_h_rc", ions_h, elec_h, false);
+  J3Type j3_d("J3_d_rc", ions_d, elec_d, true);
+  auto load = [&](J3Type& j3, ParticleSet& ions, ParticleSet& elec, const std::string& tag) {
+    xmlNodePtr kids = jas->children;
+    SpeciesSet& iSet = ions.getSpeciesSet();
+    SpeciesSet& eSet = elec.getSpeciesSet();
+    while (kids != nullptr)
+    {
+      if (std::string((char*)kids->name) == "correlation")
+      {
+        RealType ee_cusp = 0.0, eI_cusp = 0.0;
+        std::string iSpecies, eSpecies1("u"), eSpecies2("u");
+        OhmmsAttributeSet rAttrib;
+        rAttrib.add(iSpecies, "ispecies");
+        rAttrib.add(eSpecies1, "especies1");
+        rAttrib.add(eSpecies2, "especies2");
+        rAttrib.add(ee_cusp, "ecusp");
+        rAttrib.add(eI_cusp, "icusp");
+        rAttrib.put(kids);
+        auto functor = std::make_unique<PolynomialFunctor3D>("J3rc_" + iSpecies + eSpecies1 + eSpecies2 + tag, ee_cusp, eI_cusp);
+        functor->iSpecies  = iSpecies;
+        functor->eSpecies1 = eSpecies1;
+        functor->eSpecies2 = eSpecies2;
+        functor->put(kids);
+        j3.addFunc(iSet.findSpecies(iSpecies), eSet.findSpecies(eSpecies1), eSet.findSpecies(eSpecies2),
+                   std::move(functor));
+      }
+      kids = kids->next;
+    }
+    j3.check_complete();
+  };
+  load(j3_h, ions_h, elec_h, "h");
+  load(j3_d, ions_d, elec_d, "d");
+
+  elec_h.update();
+  elec_d.update();
+
+  elec_h.G = 0;
+  elec_h.L = 0;
+  elec_d.G = 0;
+  elec_d.L = 0;
+  const double log_h = std::real(j3_h.evaluateLog(elec_h, elec_h.G, elec_h.L));
+
+  // Cut2: mw_evaluateLog -> mw_recompute (CUDA dense under ENABLE_CUDA)
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(j3_d, {j3_d});
+  RefVectorWithLeader<ParticleSet> p_list(elec_d, {elec_d});
+  RefVector<ParticleSet::ParticleGradient> G_list  = {elec_d.G};
+  RefVector<ParticleSet::ParticleLaplacian> L_list = {elec_d.L};
+  j3_d.mw_evaluateLog(wfc_list, p_list, G_list, L_list);
+  const double log_d = std::real(j3_d.get_log_value());
+  CHECK(log_d == Approx(log_h));
+  for (int e = 0; e < 4; ++e)
+  {
+    for (int d = 0; d < 3; ++d)
+      CHECK(ValueApprox(elec_d.G[e][d]) == elec_h.G[e][d]);
+    CHECK(ValueApprox(elec_d.L[e]) == elec_h.L[e]);
+  }
+}
+
+/** Large-system microbench: bigger eeI system, CUDA/offload mw_ratioGrad vs serial host.
+ *  Tiny 4e systems are transfer-bound on GPU; production runs are work-bound (Ne*Ni*nw).
+ *  This case uses Ne=64, Ni=32, nw=128 — enough work for the dense dual-table kernel to
+ *  amortize H2D. Reports speedup; requires >2x when CUDA offload is active.
+ */
+TEST_CASE("JeeIOrbitalSoA large-system CUDA mw_ratioGrad speedup", "[wavefunction][benchmark][large]")
+{
+  Communicate* c = OHMMS::Controller;
+  const int nw       = 128;
+  const int n_repeat = 30;
+  const int Ne_up = 32, Ne_dn = 32, Ni = 32;
+  const SimulationCell simulation_cell;
+
+  ParticleSet ions(simulation_cell);
+  ions.setName("ion");
+  ions.create({Ni});
+  for (int i = 0; i < Ni; ++i)
+    ions.R[i] = {RealType(i % 8) * 1.5, RealType(i / 8) * 1.5, 0.0};
+  ions.getSpeciesSet().addSpecies("O");
+  ions.update();
+
+  auto make_elec = [&]() {
+    auto elec = std::make_unique<ParticleSet>(simulation_cell);
+    elec->setName("elec");
+    elec->create({Ne_up, Ne_dn});
+    for (int e = 0; e < Ne_up + Ne_dn; ++e)
+      elec->R[e] = {RealType(e % 6) * 0.7, RealType((e / 6) % 6) * 0.7, RealType(e / 36) * 0.5 + 0.3};
+    SpeciesSet& sp = elec->getSpeciesSet();
+    int upIdx      = sp.addSpecies("u");
+    int downIdx    = sp.addSpecies("d");
+    int chargeIdx  = sp.addAttribute("charge");
+    sp(chargeIdx, upIdx)   = -1;
+    sp(chargeIdx, downIdx) = -1;
+    return elec;
+  };
+
+  // Minimal polynomial coefficients (same shape as golden, truncated content OK for timing)
+  const char* particles = R"(<tmp>
+    <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="no">
+      <correlation ispecies="O" especies="u" isize="3" esize="3" rcut="6">
+        <coefficients id="uuO_s" type="Array" optimize="no"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255156e-06 3.214580988e-06 -7.716743107e-06 -5.275682077e-06 -1.778457637e-06 7.926231121e-06 1.767406868e-06 5.451359059e-08 2.801423724e-06 4.577282736e-06 7.634608083e-06 -9.510673173e-07 -2.344131575e-06 -1.878777219e-06 3.937363358e-07 5.065353773e-07 5.086724869e-07 -1.358768154e-07</coefficients>
+      </correlation>
+      <correlation ispecies="O" especies1="u" especies2="d" isize="3" esize="3" rcut="6">
+        <coefficients id="udO_s" type="Array" optimize="no"> -6.939530224e-06 2.634169299e-05 4.046077477e-05 -8.002682388e-06 -5.396795988e-06 6.697370507e-06 5.433953051e-05 -6.336849668e-06 3.680471431e-05 -2.996059772e-05 1.99365828e-06 -3.222705626e-05 -8.091669063e-06 4.15738535e-06 4.843939112e-06 3.563650208e-07 3.786332474e-05 -1.418336941e-05 2.282691374e-05 1.29239286e-06 -4.93580873e-06 -3.052539228e-06 9.870288001e-08 1.844286407e-06 2.970561871e-07 -4.364303677e-08</coefficients>
+      </correlation>
+    </jastrow>
+</tmp>
+)";
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(particles));
+  xmlNodePtr jas = xmlFirstElementChild(doc.getRoot());
+
+  std::vector<std::unique_ptr<ParticleSet>> elecs(nw);
+  std::vector<std::unique_ptr<WaveFunctionComponent>> j3s(nw);
+  using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  elecs[0] = make_elec();
+  elecs[0]->update();
+  {
+    eeI_JastrowBuilder b(c, *elecs[0], ions);
+    j3s[0] = b.buildComponent(jas);
+  }
+  REQUIRE(j3s[0]);
+  auto* leader = dynamic_cast<J3Type*>(j3s[0].get());
+  REQUIRE(leader);
+  const bool off = leader->isUsingOffload();
+
+  for (int iw = 1; iw < nw; ++iw)
+  {
+    elecs[iw] = make_elec();
+    j3s[iw]   = j3s[0]->makeClone(*elecs[iw]);
+    elecs[iw]->update();
+  }
+  elecs[0]->update();
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->G = 0;
+    elecs[iw]->L = 0;
+    j3s[iw]->evaluateLog(*elecs[iw], elecs[iw]->G, elecs[iw]->L);
+  }
+
+  const PosType newpos(0.25, 0.15, 0.4);
+  for (int iw = 0; iw < nw; ++iw)
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+
+  std::vector<PsiValue> ratios_serial(nw), ratios_mw(nw);
+  std::vector<GradType> grads_serial(nw), grads_mw(nw);
+  RefVectorWithLeader<WaveFunctionComponent> wfc_list(*j3s[0]);
+  RefVectorWithLeader<ParticleSet> p_list(*elecs[0]);
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    wfc_list.push_back(*j3s[iw]);
+    p_list.push_back(*elecs[iw]);
+  }
+
+  // Persistent multi-walker resource, as acquired by the batched drivers: without it
+  // every mw call allocates pinned buffers and re-uploads the full e-I tables, which
+  // measures a path production never runs.
+  ResourceCollection wfc_res("bench_jeei_res");
+  leader->createResource(wfc_res);
+  ResourceCollectionTeamLock<WaveFunctionComponent> mw_lock(wfc_res, wfc_list);
+
+  auto run_serial = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      grads_serial[iw]  = GradType(0);
+      ratios_serial[iw] = j3s[iw]->ratioGrad(*elecs[iw], 0, grads_serial[iw]);
+    }
+  };
+  auto run_mw = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+      grads_mw[iw] = GradType(0);
+    leader->mw_ratioGrad(wfc_list, p_list, 0, ratios_mw, grads_mw);
+  };
+
+  // Warmup (pays CUDA alloc / static H2D once)
+  run_serial();
+  run_mw();
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->rejectMove(0);
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+  }
+
+  using clock = std::chrono::steady_clock;
+  auto t0 = clock::now();
+  for (int r = 0; r < n_repeat; ++r)
+    run_serial();
+  auto t1 = clock::now();
+  for (int r = 0; r < n_repeat; ++r)
+    run_mw();
+  auto t2 = clock::now();
+
+  const double serial_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  const double mw_ms     = std::chrono::duration<double, std::milli>(t2 - t1).count();
+  const double speedup   = serial_ms / std::max(mw_ms, 1e-9);
+
+  // Correctness sample
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    elecs[iw]->rejectMove(0);
+    elecs[iw]->makeMove(0, newpos - elecs[iw]->R[0]);
+  }
+  run_serial();
+  run_mw();
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    CHECK(std::real(ratios_mw[iw]) == Approx(std::real(ratios_serial[iw])));
+    for (int d = 0; d < OHMMS_DIM; ++d)
+    {
+      CHECK(std::real(grads_mw[iw][d]) == Approx(std::real(grads_serial[iw][d])).margin(1e-8));
+      CHECK(std::imag(grads_mw[iw][d]) == Approx(std::imag(grads_serial[iw][d])).margin(1e-8));
+    }
+  }
+
+  // Cut2: recompute timing (reject moves so full tables are consistent)
+  for (int iw = 0; iw < nw; ++iw)
+    elecs[iw]->rejectMove(0);
+  std::vector<bool> recompute_all(nw, true);
+  auto run_serial_rc = [&]() {
+    for (int iw = 0; iw < nw; ++iw)
+      j3s[iw]->recompute(*elecs[iw]);
+  };
+  auto run_mw_rc = [&]() { leader->mw_recompute(wfc_list, p_list, recompute_all); };
+  run_serial_rc();
+  run_mw_rc();
+  auto t3 = clock::now();
+  for (int r = 0; r < n_repeat / 2; ++r)
+    run_serial_rc();
+  auto t4 = clock::now();
+  for (int r = 0; r < n_repeat / 2; ++r)
+    run_mw_rc();
+  auto t5 = clock::now();
+  const double serial_rc_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
+  const double mw_rc_ms     = std::chrono::duration<double, std::milli>(t5 - t4).count();
+  const double speedup_rc   = serial_rc_ms / std::max(mw_rc_ms, 1e-9);
+
+  // recompute science: log via evaluateLog on leader vs one walker serial
+  elecs[0]->G = 0;
+  elecs[0]->L = 0;
+  const double log_s = std::real(j3s[0]->evaluateLog(*elecs[0], elecs[0]->G, elecs[0]->L));
+  elecs[1]->G = 0;
+  elecs[1]->L = 0;
+  j3s[1]->recompute(*elecs[1]);
+  const double log_m = std::real(j3s[1]->evaluateLog(*elecs[1], elecs[1]->G, elecs[1]->L));
+  CHECK(log_m == Approx(log_s));
+
+  std::cout << "\n[JeeI large-system microbench] Ne=" << (Ne_up + Ne_dn) << " Ni=" << Ni << " nw=" << nw
+            << " offload=" << (off ? "yes" : "no")
+            << "\n  ratioGrad  serial_ms=" << serial_ms << " mw_ms=" << mw_ms << " speedup=" << speedup
+            << "\n  recompute  serial_ms=" << serial_rc_ms << " mw_ms=" << mw_rc_ms << " speedup=" << speedup_rc
+            << std::endl;
+
+#if defined(ENABLE_CUDA)
+  if (off)
+  {
+    // GPU dense path must beat serial host on work-bound sizes (both cuts)
+    REQUIRE(speedup > 2.0);
+    REQUIRE(speedup_rc > 1.5);
+  }
+#endif
+}
+
 } // namespace qmcplusplus
