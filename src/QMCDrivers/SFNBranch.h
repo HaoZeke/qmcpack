@@ -24,8 +24,32 @@
 #include "DMC/DMCRefEnergy.h"
 #include <bitset>
 
+#include <cmath>
+#include <limits>
+
+#include "config.h"
+
 namespace qmcplusplus
 {
+/** Fixed-node phase test, callable from a target region.
+ *
+ *  The test reads no branch state, only the phase itself, so the same function
+ *  serves the host acceptance path and a device side one. On complex builds the
+ *  node is not crossed by a phase change and the test is vacuous.
+ */
+PRAGMA_OFFLOAD("omp begin declare target")
+template<typename T>
+inline bool phaseChangedSFN(T psi0)
+{
+// TODO: remove ifdef
+#if defined(QMC_COMPLEX)
+  return false;
+#else
+  return std::cos(psi0) < std::numeric_limits<T>::epsilon();
+#endif
+}
+PRAGMA_OFFLOAD("omp end declare target")
+
 /** Manages the state of QMC sections and handles population control for DMCs
  *
  * \todo: Remove duplicate reading of Driver XML section with own copies of input
@@ -158,15 +182,7 @@ public:
 
   ~SFNBranch();
 
-  inline bool phaseChanged(RealType psi0) const
-  {
-// TODO: remove ifdef
-#if defined(QMC_COMPLEX)
-    return false;
-#else
-    return std::cos(psi0) < std::numeric_limits<RealType>::epsilon();
-#endif
-  }
+  inline bool phaseChanged(RealType psi0) const { return phaseChangedSFN(psi0); }
 
   /** increment QMCCounter
    *
