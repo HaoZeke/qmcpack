@@ -1,0 +1,1518 @@
+//////////////////////////////////////////////////////////////////////////////////////
+// This file is distributed under the University of Illinois/NCSA Open Source License.
+// See LICENSE file in top directory for details.
+//
+// Copyright (c) 2026 QMCPACK developers.
+//
+// File developed by: QMCPACK developers
+//
+// File created by: QMCPACK developers
+//////////////////////////////////////////////////////////////////////////////////////
+// -*- C++ -*-
+
+#include <cstdlib>
+
+#include "JeeIOrbitalSoA.h"
+#include "ResourceCollection.h"
+#include "OhmmsPETE/OhmmsMatrix.h"
+#include "PolynomialFunctor3DOffload.h"
+#include "config.h"
+#include <algorithm>
+#if defined(ENABLE_CUDA)
+#include <atomic>
+#include "JeeIDenseCUDA.h"
+#endif
+
+namespace qmcplusplus
+{
+
+template<typename T>
+struct JeeIOrbitalSoAMultiWalkerMem : public Resource
+{
+  Vector<char, OffloadPinnedAllocator<char>> mw_update_buffer;
+  Vector<char, OffloadPinnedAllocator<char>> mw_ratiograd_buffer;
+  Vector<char, OffloadPinnedAllocator<char>> transfer_buffer;
+  Vector<T, OffloadPinnedAllocator<T>> mw_vals;
+  Matrix<T, OffloadPinnedAllocator<T>> mw_vgl;
+  Vector<T, OffloadPinnedAllocator<T>> mw_allUat;
+  Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
+  // packed dual-table distances for mw_ratioGrad
+  Vector<T, OffloadPinnedAllocator<T>> mw_ee_temp;     // [nw][1+DIM][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ei_temp;     // [nw][1+DIM][Ni_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ei_full_r;   // [nw][Nelec][Ni_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ei_full_dr;  // [nw][DIM][Nelec][Ni_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ee_full_r;   // [nw][Nelec][Ne_pad] AA lower triangle
+  Vector<T, OffloadPinnedAllocator<T>> mw_ee_full_dr;  // [nw][DIM][Nelec][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_Uk;          // [nw][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_dUk;         // [nw][DIM][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_d2Uk;        // [nw][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_Uat_batch;   // [nw][Ne_pad] recompute output
+  Vector<T, OffloadPinnedAllocator<T>> mw_dUat_batch;  // [nw][DIM][Ne_pad]
+  Vector<T, OffloadPinnedAllocator<T>> mw_d2Uat_batch; // [nw][Ne_pad]
+  Vector<int, OffloadPinnedAllocator<int>> e_grp;
+  Vector<int, OffloadPinnedAllocator<int>> i_grp;
+  Vector<T, OffloadPinnedAllocator<T>> ion_cutoff;
+  // CUDA static pack (species / gamma / cutoffs); version bumps whenever the pack
+  // content changes so the device workspace can detect stale tables.
+  /// cached functor pack for the quadrature kernel, uploaded only when it changes
+  Vector<T, OffloadPinnedAllocator<T>> vp_gpool, vp_gcut;
+  Vector<int, OffloadPinnedAllocator<int>> vp_goff, vp_gnei, vp_gnee, vp_gcn;
+  bool vp_pack_ready = false;
+
+  bool cuda_static_ready              = false;
+  unsigned long long cuda_static_version = 0;
+  // Full e-I tables dirty after recompute/accept; ratioGrad can skip pack+H2D when clean
+  bool cuda_full_dirty = true;
+  // Device Uat/dUat/d2Uat authoritative since the last host sync (accepts applied on device)
+  bool device_state_dirty = false;
+  // Workspace holding the resident state (thread_local on the crowd's thread)
+  void* resident_ws = nullptr;
+  // Coordinates resident on device (open-BC cells): temp rows generate on device
+  bool device_coords = false;
+  // Last ratioGrad used device-generated temps (proposal is resident for accept)
+  bool last_move_dev_temps = false;
+  Vector<T, OffloadPinnedAllocator<T>> mw_epos; // [nw][Nelec][3]
+  Vector<T, OffloadPinnedAllocator<T>> mw_ipos; // [Nion][3]
+  Vector<T, OffloadPinnedAllocator<T>> mw_prop; // [nw][3]
+  std::vector<int> cuda_gamma_offset;
+  std::vector<int> cuda_gamma_len;
+  std::vector<double> cuda_fun_cut;
+  std::vector<int> cuda_fun_NeI;
+  std::vector<int> cuda_fun_Nee;
+  std::vector<int> cuda_fun_C;
+  std::vector<double> cuda_gamma_pool;
+
+  JeeIOrbitalSoAMultiWalkerMem() : Resource("JeeIOrbitalSoAMultiWalkerMem") {}
+  JeeIOrbitalSoAMultiWalkerMem(const JeeIOrbitalSoAMultiWalkerMem&) : JeeIOrbitalSoAMultiWalkerMem() {}
+  std::unique_ptr<Resource> makeClone() const override
+  {
+    return std::make_unique<JeeIOrbitalSoAMultiWalkerMem>(*this);
+  }
+};
+
+#if defined(ENABLE_CUDA)
+namespace
+{
+/// process-wide pack version source: unique per rebuild, so an old owner freed and a
+/// new one allocated at the same address can never alias a stale device static pack
+std::atomic<unsigned long long> jeei_cuda_pack_counter{1};
+
+/** Rebuild the flat gamma/cutoff/species pack for the CUDA kernels.
+ *  With force=false only the first build runs (hot path); with force=true the pack is
+ *  rebuilt and the version bumps when content changed (parameter updates between blocks).
+ */
+template<typename FT, typename T>
+void refresh_cuda_static_pack(const Array<FT*, 3>& F,
+                              int iG,
+                              int eG,
+                              JeeIOrbitalSoAMultiWalkerMem<T>& mem,
+                              bool force)
+{
+  if (mem.cuda_static_ready && !force)
+    return;
+  const int nfun = iG * eG * eG;
+  std::vector<int> goff(nfun, -1), glen(nfun, 0), gNeI(nfun, 0), gNee(nfun, 0), gC(nfun, 0);
+  std::vector<double> gcut(nfun, 0.0), gpool;
+  for (int ig = 0; ig < iG; ++ig)
+    for (int jg = 0; jg < eG; ++jg)
+      for (int kg = 0; kg < eG; ++kg)
+      {
+        const int fid = (ig * eG + jg) * eG + kg;
+        FT* f         = F(ig, jg, kg);
+        if (!f || f->gammaOffloadSize() == 0)
+          continue;
+        goff[fid]      = static_cast<int>(gpool.size());
+        glen[fid]      = f->gammaOffloadSize();
+        const auto* gp = f->gammaOffloadData();
+        gpool.insert(gpool.end(), gp, gp + glen[fid]);
+        gcut[fid] = static_cast<double>(f->cutoff_radius);
+        gNeI[fid] = f->N_eI;
+        gNee[fid] = f->N_ee;
+        gC[fid]   = f->C;
+      }
+  const bool changed = !mem.cuda_static_ready || gpool != mem.cuda_gamma_pool || goff != mem.cuda_gamma_offset ||
+      glen != mem.cuda_gamma_len || gcut != mem.cuda_fun_cut || gNeI != mem.cuda_fun_NeI ||
+      gNee != mem.cuda_fun_Nee || gC != mem.cuda_fun_C;
+  if (!changed)
+    return;
+  mem.cuda_gamma_offset   = std::move(goff);
+  mem.cuda_gamma_len      = std::move(glen);
+  mem.cuda_fun_cut        = std::move(gcut);
+  mem.cuda_fun_NeI        = std::move(gNeI);
+  mem.cuda_fun_Nee        = std::move(gNee);
+  mem.cuda_fun_C          = std::move(gC);
+  mem.cuda_gamma_pool     = std::move(gpool);
+  mem.cuda_static_version = jeei_cuda_pack_counter.fetch_add(1);
+  mem.cuda_static_ready   = true;
+}
+/** D2H the device-resident Uat/dUat/d2Uat batch into mw_allUat (host mirrors are
+ *  attached references into it). Throws if the resident workspace was reassigned. */
+template<typename T>
+void jeei_sync_host_state(JeeIOrbitalSoAMultiWalkerMem<T>& mem, int nw, int Nep)
+{
+  if (!mem.device_state_dirty)
+    return;
+  auto* ws = static_cast<jeei_cuda::DenseWorkspace*>(mem.resident_ws);
+  if (!ws || !ws->sameOwner(&mem))
+    throw std::runtime_error("JeeI CUDA: resident state lost (workspace reassigned mid-block)");
+  ws->downloadState(nw, Nep, mem.mw_allUat.data());
+  mem.device_state_dirty = false;
+}
+} // namespace
+#endif
+
+template<typename FT>
+JeeIOrbitalSoA<FT>::JeeIOrbitalSoA(const std::string& obj_name,
+                                  const ParticleSet& ions,
+                                  ParticleSet& elecs,
+                                  bool use_offload)
+    : WaveFunctionComponent(obj_name),
+      use_offload_(use_offload),
+      // Host-visible ee/eI tables: dense dual-table offload packs distances on the host
+      // into OffloadPinned buffers, then evaluates under PRAGMA_OFFLOAD. DTModes::ALL_OFF
+      // (device-resident multi-walker DTs) is the next stage once AA/AB temp+full device
+      // pointers are consumed end-to-end like TwoBodyJastrow.
+      ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
+      ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
+      Ions(ions)
+{
+  if (my_name_.empty())
+    throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
+  // Offload flag means multi-walker accelerated path (OMPTarget and/or CUDA dense).
+  // CUDA path only needs gamma_offload_ tables (PolynomialFunctor3D always has them).
+  if (use_offload_ && !FT::isOMPoffload())
+  {
+#if !defined(ENABLE_CUDA)
+    throw std::runtime_error("JeeIOrbitalSoA offload requested but functor does not support OpenMP offload");
+#endif
+  }
+  init(elecs);
+}
+
+template<typename FT>
+JeeIOrbitalSoA<FT>::~JeeIOrbitalSoA() = default;
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::createResource(ResourceCollection& collection) const
+{
+  collection.addResource(std::make_unique<JeeIOrbitalSoAMultiWalkerMem<RealType>>());
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::acquireResource(ResourceCollection& collection,
+                                         const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const
+{
+  auto& wfc_leader          = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  wfc_leader.mw_mem_handle_ = collection.lendResource<JeeIOrbitalSoAMultiWalkerMem<RealType>>();
+  const size_t nw           = wfc_list.size();
+  const size_t N_padded     = wfc_leader.Nelec_padded;
+  const size_t N            = wfc_leader.Nelec;
+  auto& mw_allUat           = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
+  mw_allUat.resize(N_padded * (OHMMS_DIM + 2) * nw);
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+
+    Vector<valT> Uat_view(mw_allUat.data() + iw * N_padded, N);
+    Uat_view = wfc.Uat;
+    wfc.Uat.free();
+    wfc.Uat.attachReference(mw_allUat.data() + iw * N_padded, N);
+
+    gContainer_type dUat_view(mw_allUat.data() + nw * N_padded + iw * N_padded * OHMMS_DIM, N, N_padded);
+    dUat_view = wfc.dUat;
+    wfc.dUat.free();
+    wfc.dUat.attachReference(N, N_padded, mw_allUat.data() + nw * N_padded + iw * N_padded * OHMMS_DIM);
+
+    Vector<valT> d2Uat_view(mw_allUat.data() + nw * N_padded * (OHMMS_DIM + 1) + iw * N_padded, N);
+    d2Uat_view = wfc.d2Uat;
+    wfc.d2Uat.free();
+    wfc.d2Uat.attachReference(mw_allUat.data() + nw * N_padded * (OHMMS_DIM + 1) + iw * N_padded, N);
+  }
+  wfc_leader.mw_mem_handle_.getResource().mw_cur_allu.resize(N_padded * 3 * nw);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::releaseResource(ResourceCollection& collection,
+                                         const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const
+{
+  auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  const size_t nw  = wfc_list.size();
+  const size_t N_padded = wfc_leader.Nelec_padded;
+  const size_t N        = wfc_leader.Nelec;
+  auto& mw_allUat  = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+
+    Vector<valT> Uat_view(mw_allUat.data() + iw * N_padded, N);
+    wfc.Uat.free();
+    wfc.Uat.resize(N);
+    wfc.Uat = Uat_view;
+
+    gContainer_type dUat_view(mw_allUat.data() + nw * N_padded + iw * N_padded * OHMMS_DIM, N, N_padded);
+    wfc.dUat.free();
+    wfc.dUat.resize(N);
+    wfc.dUat = dUat_view;
+
+    Vector<valT> d2Uat_view(mw_allUat.data() + nw * N_padded * (OHMMS_DIM + 1) + iw * N_padded, N);
+    wfc.d2Uat.free();
+    wfc.d2Uat.resize(N);
+    wfc.d2Uat = d2Uat_view;
+  }
+  collection.takebackResource(wfc_leader.mw_mem_handle_);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_evaluateLog(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                        const RefVectorWithLeader<ParticleSet>& p_list,
+                                        const RefVector<ParticleSet::ParticleGradient>& G_list,
+                                        const RefVector<ParticleSet::ParticleLaplacian>& L_list) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+  const std::vector<bool> recompute_all(nw, true);
+  mw_recompute(wfc_list, p_list, recompute_all);
+
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& wfc      = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    wfc.log_value_ = wfc.computeGL(G_list[iw], L_list[iw]);
+  }
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                      const RefVectorWithLeader<ParticleSet>& p_list,
+                                      const std::vector<bool>& recompute) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+
+#if defined(ENABLE_CUDA)
+  // Cut2: CUDA dense multi-walker recompute (all walkers that need full rebuild)
+  if (use_offload_)
+  {
+    auto& leader  = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    const int Ne  = leader.Nelec;
+    const int Nep = static_cast<int>(leader.Nelec_padded);
+    const int Ni  = leader.Nion;
+    const int Nip = getAlignedSize<valT>(Ni);
+    const int eG  = leader.eGroups;
+    const int iG  = leader.iGroups;
+    const int nfun = iG * eG * eG;
+
+    bool any = false;
+    for (int iw = 0; iw < nw; ++iw)
+      if (recompute[iw])
+        any = true;
+
+    if (any)
+    {
+      JeeIOrbitalSoAMultiWalkerMem<RealType> local_mem;
+      auto* mem_ptr = &local_mem;
+      if (leader.mw_mem_handle_)
+        mem_ptr = &leader.mw_mem_handle_.getResource();
+      auto& mem = *mem_ptr;
+
+      mem.mw_ei_full_r.resize(static_cast<size_t>(nw) * Ne * Nip);
+      mem.mw_ei_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nip);
+      mem.mw_ee_full_r.resize(static_cast<size_t>(nw) * Ne * Nep);
+      mem.mw_ee_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nep);
+      mem.mw_Uat_batch.resize(static_cast<size_t>(nw) * Nep);
+      mem.mw_dUat_batch.resize(static_cast<size_t>(nw) * OHMMS_DIM * Nep);
+      mem.mw_d2Uat_batch.resize(static_cast<size_t>(nw) * Nep);
+      mem.e_grp.resize(Ne);
+      mem.i_grp.resize(Ni);
+      mem.ion_cutoff.resize(Ni);
+
+      auto& P0 = p_list[0];
+      for (int e = 0; e < Ne; ++e)
+        mem.e_grp[e] = P0.GroupID[e];
+      for (int i = 0; i < Ni; ++i)
+      {
+        mem.i_grp[i]      = leader.Ions.GroupID[i];
+        mem.ion_cutoff[i] = leader.Ion_cutoff[i];
+      }
+
+      // Rebuild the static pack off the hot path: parameters may have changed since
+      // the last block (optimizer updates); the version bump forces a device re-upload.
+      refresh_cuda_static_pack(leader.F, iG, eG, mem, /*force=*/true);
+
+      // Zero ee batch buffers (only the lower triangle gets packed)
+      std::fill(mem.mw_ee_full_r.begin(), mem.mw_ee_full_r.end(), valT(0));
+      std::fill(mem.mw_ee_full_dr.begin(), mem.mw_ee_full_dr.end(), valT(0));
+
+      // Pack ALL walkers, not only those flagged for recompute: the launch uploads the
+      // whole buffer and marks the device e-I tables resident for every walker, so a
+      // skipped walker's rows must reflect its current host distance tables (previous
+      // accepts were patched on device only, never into this host pack buffer).
+      for (int iw = 0; iw < nw; ++iw)
+      {
+        auto& P                = p_list[iw];
+        const auto& ee_table   = P.getDistTableAA(leader.ee_Table_ID_);
+        const auto& eI_table   = P.getDistTableAB(leader.ei_Table_ID_);
+        const auto& ee_full_r  = ee_table.getDistances();
+        const auto& ee_full_dr = ee_table.getDisplacements();
+        const auto& ei_full_r  = eI_table.getDistances();
+        const auto& ei_full_dr = eI_table.getDisplacements();
+
+        valT* ei_r  = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
+        valT* ei_dr = mem.mw_ei_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nip;
+        for (int kel = 0; kel < Ne; ++kel)
+          for (int a = 0; a < Ni; ++a)
+          {
+            ei_r[kel * Nip + a] = ei_full_r[kel][a];
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              ei_dr[idim * Ne * Nip + kel * Nip + a] = ei_full_dr[kel].data(idim)[a];
+          }
+
+        // AA lower triangle only (getDistRow(jel) length = jel)
+        valT* ee_r  = mem.mw_ee_full_r.data() + static_cast<size_t>(iw) * Ne * Nep;
+        valT* ee_dr = mem.mw_ee_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nep;
+        for (int jel = 0; jel < Ne; ++jel)
+          for (int kel = 0; kel < jel; ++kel)
+          {
+            ee_r[jel * Nep + kel] = ee_full_r[jel][kel];
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              ee_dr[idim * Ne * Nep + jel * Nep + kel] = ee_full_dr[jel].data(idim)[kel];
+          }
+      }
+
+      jeei_cuda::launch_dense_recompute(&mem, mem.cuda_static_version, nw, Ne, Nep, Ni, Nip, eG, iG, nfun,
+                                        mem.mw_ee_full_r.data(),
+                                        mem.mw_ee_full_dr.data(), mem.mw_ei_full_r.data(), mem.mw_ei_full_dr.data(),
+                                        mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
+                                        mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
+                                        mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(), mem.cuda_fun_NeI.data(),
+                                        mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), mem.mw_Uat_batch.data(),
+                                        mem.mw_dUat_batch.data(), mem.mw_d2Uat_batch.data());
+
+      for (int iw = 0; iw < nw; ++iw)
+      {
+        auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+        // All walkers copy back: the kernel recomputes every walker from current
+        // host tables, and the result IS the resident device state from here on.
+        for (int e = 0; e < Ne; ++e)
+        {
+          wfc.Uat[e]   = mem.mw_Uat_batch[static_cast<size_t>(iw) * Nep + e];
+          wfc.d2Uat[e] = mem.mw_d2Uat_batch[static_cast<size_t>(iw) * Nep + e];
+          for (int idim = 0; idim < OHMMS_DIM; ++idim)
+            wfc.dUat.data(idim)[e] =
+                mem.mw_dUat_batch[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + e];
+        }
+        // Compact lists needed for host accept bookkeeping and NLPP ratios
+        wfc.build_compact_list(p_list[iw]);
+      }
+
+      // Device-resident coordinates enable on-device temp rows (open BC only; the
+      // packed host path stays authoritative for periodic cells until the vesin
+      // neighbor path lands).
+      mem.device_coords = (p_list[0].getLattice().getSuperCellEnum() == SUPERCELL_OPEN);
+      if (mem.device_coords)
+      {
+        mem.mw_epos.resize(static_cast<size_t>(nw) * Ne * 3);
+        mem.mw_ipos.resize(static_cast<size_t>(Ni) * 3);
+        for (int iw = 0; iw < nw; ++iw)
+        {
+          auto& P = p_list[iw];
+          for (int e = 0; e < Ne; ++e)
+            for (int d = 0; d < 3; ++d)
+              mem.mw_epos[(static_cast<size_t>(iw) * Ne + e) * 3 + d] = P.R[e][d];
+        }
+        for (int i = 0; i < Ni; ++i)
+          for (int d = 0; d < 3; ++d)
+            mem.mw_ipos[static_cast<size_t>(i) * 3 + d] = leader.Ions.R[i][d];
+        jeei_cuda::default_workspace().uploadCoords(nw, Ne, Ni, mem.mw_epos.data(), mem.mw_ipos.data());
+      }
+
+      mem.cuda_full_dirty    = false; // device tables just uploaded
+      mem.device_state_dirty = false;
+      mem.resident_ws        = &jeei_cuda::default_workspace();
+      if (leader.mw_mem_handle_)
+        mem.mw_allUat.updateTo();
+      return;
+    }
+  }
+#endif
+
+  // Host fallback (dense recompute when use_offload_); serial — crowds own walker parallelism
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& jeei = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    if (recompute[iw])
+      jeei.recompute(p_list[iw]);
+    else
+      jeei.build_compact_list(p_list[iw]);
+  }
+
+  if (use_offload_)
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (wfc_leader.mw_mem_handle_)
+    {
+      auto& mem           = wfc_leader.mw_mem_handle_.getResource();
+      mem.mw_allUat.updateTo();
+      mem.cuda_full_dirty = true;
+    }
+#if defined(ENABLE_CUDA)
+    jeei_cuda::default_workspace().invalidateFull();
+#endif
+  }
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_ratioGrad_offload(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                              const RefVectorWithLeader<ParticleSet>& p_list,
+                                              int iat,
+                                              std::vector<PsiValue>& ratios,
+                                              std::vector<GradType>* grad_new,
+                                              bool need_grad) const
+{
+  auto& leader  = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  const int nw  = wfc_list.size();
+  const int Ne  = leader.Nelec;
+  const int Nep = static_cast<int>(leader.Nelec_padded);
+  const int Ni  = leader.Nion;
+  const int Nip = getAlignedSize<valT>(Ni);
+  const int eG  = leader.eGroups;
+  const int iG  = leader.iGroups;
+  const int nfun = iG * eG * eG;
+
+  JeeIOrbitalSoAMultiWalkerMem<RealType> local_mem;
+  JeeIOrbitalSoAMultiWalkerMem<RealType>* mem_ptr = &local_mem;
+  if (leader.mw_mem_handle_)
+    mem_ptr = &leader.mw_mem_handle_.getResource();
+  auto& mem = *mem_ptr;
+
+  mem.mw_vgl.resize(nw, OHMMS_DIM + 2);
+  mem.mw_ee_temp.resize(static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nep);
+  mem.mw_ei_temp.resize(static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nip);
+  mem.mw_ei_full_r.resize(static_cast<size_t>(nw) * Ne * Nip);
+  mem.mw_ei_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nip);
+  mem.mw_Uk.resize(static_cast<size_t>(nw) * Nep);
+  mem.mw_dUk.resize(static_cast<size_t>(nw) * OHMMS_DIM * Nep);
+  mem.mw_d2Uk.resize(static_cast<size_t>(nw) * Nep);
+  mem.e_grp.resize(Ne);
+  mem.i_grp.resize(Ni);
+  mem.ion_cutoff.resize(Ni);
+
+  auto& P0 = p_list[0];
+  for (int e = 0; e < Ne; ++e)
+    mem.e_grp[e] = P0.GroupID[e];
+  for (int i = 0; i < Ni; ++i)
+  {
+    mem.i_grp[i]      = leader.Ions.GroupID[i];
+    mem.ion_cutoff[i] = leader.Ion_cutoff[i];
+  }
+  mem.e_grp.updateTo();
+  mem.i_grp.updateTo();
+  mem.ion_cutoff.updateTo();
+
+  std::vector<const valT*> gamma_host(nfun, nullptr);
+  std::vector<valT> fun_cut(nfun, valT(0));
+  std::vector<int> fun_NeI(nfun, 0), fun_Nee(nfun, 0), fun_C(nfun, 0);
+  for (int ig = 0; ig < iG; ++ig)
+    for (int jg = 0; jg < eG; ++jg)
+      for (int kg = 0; kg < eG; ++kg)
+      {
+        const int fid = (ig * eG + jg) * eG + kg;
+        FT* f         = leader.F(ig, jg, kg);
+        if (!f)
+          continue;
+        gamma_host[fid] = f->gammaOffloadData();
+        fun_cut[fid]    = static_cast<valT>(f->cutoff_radius);
+        fun_NeI[fid]    = f->N_eI;
+        fun_Nee[fid]    = f->N_ee;
+        fun_C[fid]      = f->C;
+      }
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    auto& P                = p_list[iw];
+    const auto& ee_table   = P.getDistTableAA(leader.ee_Table_ID_);
+    const auto& eI_table   = P.getDistTableAB(leader.ei_Table_ID_);
+    const auto& ee_r       = ee_table.getTempDists();
+    const auto& ee_dr      = ee_table.getTempDispls();
+    const auto& ei_r       = eI_table.getTempDists();
+    const auto& ei_dr      = eI_table.getTempDispls();
+    const auto& ei_full_r  = eI_table.getDistances();
+    const auto& ei_full_dr = eI_table.getDisplacements();
+
+    valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
+    valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
+    for (int k = 0; k < Ne; ++k)
+      ee_base[k] = ee_r[k];
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+      for (int k = 0; k < Ne; ++k)
+        ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
+    for (int a = 0; a < Ni; ++a)
+      ei_base[a] = ei_r[a];
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+      for (int a = 0; a < Ni; ++a)
+        ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+
+    valT* full_r  = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
+    valT* full_dr = mem.mw_ei_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nip;
+    for (int kel = 0; kel < Ne; ++kel)
+      for (int a = 0; a < Ni; ++a)
+      {
+        full_r[kel * Nip + a] = ei_full_r[kel][a];
+        for (int idim = 0; idim < OHMMS_DIM; ++idim)
+          full_dr[idim * Ne * Nip + kel * Nip + a] = ei_full_dr[kel].data(idim)[a];
+      }
+  }
+  mem.mw_ee_temp.updateTo();
+  mem.mw_ei_temp.updateTo();
+  mem.mw_ei_full_r.updateTo();
+  mem.mw_ei_full_dr.updateTo();
+
+  size_t gpool_len = 0;
+  for (int f = 0; f < nfun; ++f)
+    if (gamma_host[f] != nullptr)
+      gpool_len += static_cast<size_t>(leader.F(f / (eG * eG), (f / eG) % eG, f % eG)->gammaOffloadSize());
+  if (gpool_len == 0)
+    gpool_len = 1;
+  const size_t tb_bytes = sizeof(valT) * (gpool_len + nfun) + sizeof(int) * nfun * 4;
+  mem.transfer_buffer.resize(tb_bytes);
+  auto* tb       = mem.transfer_buffer.data();
+  auto* pool_ptr = reinterpret_cast<valT*>(tb);
+  auto* off_ptr  = reinterpret_cast<int*>(tb + sizeof(valT) * gpool_len);
+  auto* cut_ptr  = reinterpret_cast<valT*>(tb + sizeof(valT) * gpool_len + sizeof(int) * nfun);
+  auto* nei_ptr  = reinterpret_cast<int*>(tb + sizeof(valT) * (gpool_len + nfun) + sizeof(int) * nfun);
+  auto* nee_ptr  = nei_ptr + nfun;
+  auto* c_ptr    = nee_ptr + nfun;
+  {
+    size_t at = 0;
+    for (int f = 0; f < nfun; ++f)
+    {
+      cut_ptr[f] = fun_cut[f];
+      nei_ptr[f] = fun_NeI[f];
+      nee_ptr[f] = fun_Nee[f];
+      c_ptr[f]   = fun_C[f];
+      if (gamma_host[f] == nullptr)
+      {
+        off_ptr[f] = -1;
+        continue;
+      }
+      const int len = leader.F(f / (eG * eG), (f / eG) % eG, f % eG)->gammaOffloadSize();
+      off_ptr[f]    = static_cast<int>(at);
+      std::copy_n(gamma_host[f], len, pool_ptr + at);
+      at += len;
+    }
+  }
+
+  auto* ee_ptr      = mem.mw_ee_temp.data();
+  auto* ei_ptr      = mem.mw_ei_temp.data();
+  auto* full_r_ptr  = mem.mw_ei_full_r.data();
+  auto* full_dr_ptr = mem.mw_ei_full_dr.data();
+  auto* vgl_ptr     = mem.mw_vgl.data();
+  auto* Uk_ptr      = mem.mw_Uk.data();
+  auto* dUk_ptr     = mem.mw_dUk.data();
+  auto* d2Uk_ptr    = mem.mw_d2Uk.data();
+  auto* egrp_ptr    = mem.e_grp.data();
+  auto* igrp_ptr    = mem.i_grp.data();
+  auto* cuti_ptr    = mem.ion_cutoff.data();
+  auto* tb_ptr      = mem.transfer_buffer.data();
+  const size_t tb_sz  = mem.transfer_buffer.size();
+  const size_t ee_sz  = mem.mw_ee_temp.size();
+  const size_t ei_sz  = mem.mw_ei_temp.size();
+  const size_t fr_sz  = mem.mw_ei_full_r.size();
+  const size_t fd_sz  = mem.mw_ei_full_dr.size();
+  Vector<int, OffloadPinnedAllocator<int>> rgdbg(static_cast<size_t>(nw) * 2);
+  std::fill(rgdbg.begin(), rgdbg.end(), -1);
+  rgdbg.updateTo();
+  auto* rgdbg_ptr     = rgdbg.data();
+  const size_t vgl_sz = static_cast<size_t>(nw) * (OHMMS_DIM + 2);
+  const size_t Uk_sz  = mem.mw_Uk.size();
+  const size_t dUk_sz = mem.mw_dUk.size();
+  const size_t d2_sz  = mem.mw_d2Uk.size();
+
+  PRAGMA_OFFLOAD("omp target teams distribute \
+      map(to: ee_ptr[:ee_sz], ei_ptr[:ei_sz], full_r_ptr[:fr_sz], full_dr_ptr[:fd_sz]) \
+      map(to: egrp_ptr[:Ne], igrp_ptr[:Ni], cuti_ptr[:Ni]) \
+      map(always, to: tb_ptr[:tb_sz]) \
+      map(always, from: vgl_ptr[:vgl_sz], Uk_ptr[:Uk_sz], dUk_ptr[:dUk_sz], d2Uk_ptr[:d2_sz]) \
+      map(always, from: rgdbg_ptr[:nw * 2])")
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    // gamma comes from a flat pool with integer offsets; host pointers packed into a
+    // mapped buffer are not dereferenceable on the device on every build and fail by
+    // silently summing nothing
+    const valT* gpool_k = reinterpret_cast<const valT*>(tb_ptr);
+    const int* goff_k   = reinterpret_cast<const int*>(tb_ptr + sizeof(valT) * gpool_len);
+    const valT* fcut    = reinterpret_cast<const valT*>(tb_ptr + sizeof(valT) * gpool_len + sizeof(int) * nfun);
+    const int* fNeI     = reinterpret_cast<const int*>(tb_ptr + sizeof(valT) * (gpool_len + nfun) + sizeof(int) * nfun);
+    const int* fNee     = fNeI + nfun;
+    const int* fC       = fNee + nfun;
+
+    const valT* ee_base = ee_ptr + iw * (OHMMS_DIM + 1) * Nep;
+    const valT* ei_base = ei_ptr + iw * (OHMMS_DIM + 1) * Nip;
+    const valT* fr      = full_r_ptr + iw * Ne * Nip;
+    const valT* fdr     = full_dr_ptr + iw * OHMMS_DIM * Ne * Nip;
+
+    valT Uj, d2Uj;
+    valT dUj[3];
+    jeei_offload::dense_ratio_grad_one_walker<valT>(iat, Ne, Nep, Ni, Nip, eG, iG, egrp_ptr, igrp_ptr, cuti_ptr,
+                                                    ee_base, ee_base + Nep, ei_base, ei_base + Nip, fr, fdr,
+                                                    gpool_k, goff_k, fcut, fNeI, fNee, fC, Uj, dUj, d2Uj,
+                                                    Uk_ptr + iw * Nep, dUk_ptr + iw * OHMMS_DIM * Nep,
+                                                    d2Uk_ptr + iw * Nep);
+
+    // count what this walker visited, so a zero Uj can be attributed rather than guessed
+    {
+      int ions_pass = 0, trips = 0;
+      for (int a = 0; a < Ni; a++)
+      {
+        if (ei_base[a] >= cuti_ptr[a])
+          continue;
+        ions_pass++;
+        for (int k = 0; k < Ne; k++)
+          if (k != iat && fr[static_cast<size_t>(k) * Nip + a] < cuti_ptr[a])
+            trips++;
+      }
+      rgdbg_ptr[iw * 2 + 0] = ions_pass;
+      rgdbg_ptr[iw * 2 + 1] = trips;
+    }
+    valT* vgl = vgl_ptr + iw * (OHMMS_DIM + 2);
+    vgl[0]    = Uj;
+    vgl[1]    = dUj[0];
+    vgl[2]    = dUj[1];
+    vgl[3]    = dUj[2];
+    vgl[4]    = d2Uj;
+  }
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    auto& wfc       = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    wfc.UpdateMode  = need_grad ? ORB_PBYP_PARTIAL : ORB_PBYP_RATIO;
+    wfc.cur_Uat     = mem.mw_vgl[iw][0];
+    wfc.cur_dUat[0] = mem.mw_vgl[iw][1];
+    wfc.cur_dUat[1] = mem.mw_vgl[iw][2];
+    wfc.cur_dUat[2] = mem.mw_vgl[iw][3];
+    wfc.cur_d2Uat   = mem.mw_vgl[iw][4];
+    for (int k = 0; k < Ne; ++k)
+    {
+      wfc.newUk[k]   = mem.mw_Uk[static_cast<size_t>(iw) * Nep + k];
+      wfc.newd2Uk[k] = mem.mw_d2Uk[static_cast<size_t>(iw) * Nep + k];
+    }
+    for (int idim = 0; idim < OHMMS_DIM; ++idim)
+      for (int k = 0; k < Ne; ++k)
+        wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
+
+    wfc.DiffVal = wfc.Uat[iat] - wfc.cur_Uat;
+    ratios[iw]  = std::exp(static_cast<PsiValue>(wfc.DiffVal));
+    if (need_grad && grad_new)
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        (*grad_new)[iw][idim] += wfc.cur_dUat[idim];
+  }
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_ratioGrad_cuda(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                           const RefVectorWithLeader<ParticleSet>& p_list,
+                                           int iat,
+                                           std::vector<PsiValue>& ratios,
+                                           std::vector<GradType>* grad_new,
+                                           bool need_grad) const
+{
+#if !defined(ENABLE_CUDA)
+  (void)wfc_list;
+  (void)p_list;
+  (void)iat;
+  (void)ratios;
+  (void)grad_new;
+  (void)need_grad;
+  throw std::runtime_error("mw_ratioGrad_cuda called without ENABLE_CUDA");
+#else
+  // Reuse host packing from mw_ratioGrad_offload memory layout, then launch CUDA.
+  // Full precision (double) only — matches typical QMCPACK full-precision CUDA builds.
+  static_assert(sizeof(valT) == sizeof(double), "JeeI CUDA path requires double RealType");
+  auto& leader  = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  const int nw  = wfc_list.size();
+  const int Ne  = leader.Nelec;
+  const int Nep = static_cast<int>(leader.Nelec_padded);
+  const int Ni  = leader.Nion;
+  const int Nip = getAlignedSize<valT>(Ni);
+  const int eG  = leader.eGroups;
+  const int iG  = leader.iGroups;
+  const int nfun = iG * eG * eG;
+
+  JeeIOrbitalSoAMultiWalkerMem<RealType> local_mem;
+  auto* mem_ptr = &local_mem;
+  if (leader.mw_mem_handle_)
+    mem_ptr = &leader.mw_mem_handle_.getResource();
+  auto& mem = *mem_ptr;
+
+  const size_t ee_temp_sz = static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nep;
+  const size_t ei_temp_sz = static_cast<size_t>(nw) * (OHMMS_DIM + 1) * Nip;
+  const bool temps_fresh  = mem.mw_ee_temp.size() != ee_temp_sz || mem.mw_ei_temp.size() != ei_temp_sz;
+  mem.mw_vgl.resize(nw, OHMMS_DIM + 3);
+  mem.mw_ee_temp.resize(ee_temp_sz);
+  mem.mw_ei_temp.resize(ei_temp_sz);
+  mem.mw_ei_full_r.resize(static_cast<size_t>(nw) * Ne * Nip);
+  mem.mw_ei_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nip);
+  mem.mw_Uk.resize(static_cast<size_t>(nw) * Nep);
+  mem.mw_dUk.resize(static_cast<size_t>(nw) * OHMMS_DIM * Nep);
+  mem.mw_d2Uk.resize(static_cast<size_t>(nw) * Nep);
+  mem.e_grp.resize(Ne);
+  mem.i_grp.resize(Ni);
+  mem.ion_cutoff.resize(Ni);
+  // Zero fresh temp buffers once: packing writes only [0, Ne)/[0, Ni) lanes, so pad
+  // lanes stay deterministic zeros for the whole buffer lifetime.
+  if (temps_fresh)
+  {
+    std::fill(mem.mw_ee_temp.begin(), mem.mw_ee_temp.end(), valT(0));
+    std::fill(mem.mw_ei_temp.begin(), mem.mw_ei_temp.end(), valT(0));
+  }
+
+  auto& P0 = p_list[0];
+  for (int e = 0; e < Ne; ++e)
+    mem.e_grp[e] = P0.GroupID[e];
+  for (int i = 0; i < Ni; ++i)
+  {
+    mem.i_grp[i]      = leader.Ions.GroupID[i];
+    mem.ion_cutoff[i] = leader.Ion_cutoff[i];
+  }
+
+  // Hot path: build the static pack only once per resource; recompute (once per block)
+  // refreshes it with force=true when parameters may have changed.
+  refresh_cuda_static_pack(leader.F, iG, eG, mem, /*force=*/false);
+
+  // Resident mode (persistent resource): the device owns geometry AND Uat state
+  // between host syncs; accepts run on device. Without a resource, fall back to the
+  // legacy per-call flow with host-side accept math.
+  const bool resident_mode = static_cast<bool>(leader.mw_mem_handle_);
+  auto& ws                 = jeei_cuda::default_workspace();
+  const bool need_full     = mem.cuda_full_dirty || !ws.ownsFull(&mem);
+  if (resident_mode && need_full && mem.device_state_dirty)
+  {
+    // State lives on some workspace; recover it to the host before re-seeding.
+    auto* rws = static_cast<jeei_cuda::DenseWorkspace*>(mem.resident_ws);
+    if (!rws || !rws->sameOwner(&mem))
+      throw std::runtime_error("JeeI CUDA: resident state lost (workspace reassigned mid-block)");
+    rws->downloadState(nw, Nep, mem.mw_allUat.data());
+    mem.device_state_dirty = false;
+  }
+  // Device temp rows: resident coordinates + open BC (uploaded at recompute)
+  const bool dev_temps = resident_mode && mem.device_coords && ws.hasCoords(&mem);
+  if (resident_mode && need_full)
+  {
+    mem.mw_ee_full_r.resize(static_cast<size_t>(nw) * Ne * Nep);
+    mem.mw_ee_full_dr.resize(static_cast<size_t>(nw) * OHMMS_DIM * Ne * Nep);
+    std::fill(mem.mw_ee_full_r.begin(), mem.mw_ee_full_r.end(), valT(0));
+    std::fill(mem.mw_ee_full_dr.begin(), mem.mw_ee_full_dr.end(), valT(0));
+  }
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    auto& P              = p_list[iw];
+    const auto& ee_table = P.getDistTableAA(leader.ee_Table_ID_);
+    const auto& eI_table = P.getDistTableAB(leader.ei_Table_ID_);
+    const auto& ee_r     = ee_table.getTempDists();
+    const auto& ee_dr    = ee_table.getTempDispls();
+    const auto& ei_r     = eI_table.getTempDists();
+    const auto& ei_dr    = eI_table.getTempDispls();
+
+    if (!dev_temps)
+    {
+      valT* ee_base = mem.mw_ee_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nep;
+      valT* ei_base = mem.mw_ei_temp.data() + static_cast<size_t>(iw) * (OHMMS_DIM + 1) * Nip;
+      for (int k = 0; k < Ne; ++k)
+        ee_base[k] = ee_r[k];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int k = 0; k < Ne; ++k)
+          ee_base[(idim + 1) * Nep + k] = ee_dr.data(idim)[k];
+      for (int a = 0; a < Ni; ++a)
+        ei_base[a] = ei_r[a];
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int a = 0; a < Ni; ++a)
+          ei_base[(idim + 1) * Nip + a] = ei_dr.data(idim)[a];
+    }
+
+    if (need_full)
+    {
+      const auto& ei_full_r  = eI_table.getDistances();
+      const auto& ei_full_dr = eI_table.getDisplacements();
+      valT* full_r           = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
+      valT* full_dr          = mem.mw_ei_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nip;
+      for (int kel = 0; kel < Ne; ++kel)
+        for (int a = 0; a < Ni; ++a)
+        {
+          full_r[kel * Nip + a] = ei_full_r[kel][a];
+          for (int idim = 0; idim < OHMMS_DIM; ++idim)
+            full_dr[idim * Ne * Nip + kel * Nip + a] = ei_full_dr[kel].data(idim)[a];
+        }
+      if (resident_mode)
+      {
+        // ee lower triangle for the device-side accept old-side pass
+        const auto& ee_full_r  = ee_table.getDistances();
+        const auto& ee_full_dr = ee_table.getDisplacements();
+        valT* er               = mem.mw_ee_full_r.data() + static_cast<size_t>(iw) * Ne * Nep;
+        valT* ed               = mem.mw_ee_full_dr.data() + static_cast<size_t>(iw) * OHMMS_DIM * Ne * Nep;
+        for (int jl = 0; jl < Ne; ++jl)
+          for (int kel = 0; kel < jl; ++kel)
+          {
+            er[jl * Nep + kel] = ee_full_r[jl][kel];
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              ed[idim * Ne * Nep + jl * Nep + kel] = ee_full_dr[jl].data(idim)[kel];
+          }
+      }
+    }
+  }
+
+  if (resident_mode && need_full)
+  {
+    auto& pws = jeei_cuda::prepare_dense_workspace(&mem, mem.cuda_static_version, nw, Ne, Nep, Ni, Nip, nfun,
+                                                   mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
+                                                   mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
+                                                   mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(),
+                                                   mem.cuda_fun_NeI.data(), mem.cuda_fun_Nee.data(),
+                                                   mem.cuda_fun_C.data());
+    pws.uploadFullGeometry(nw, Ne, Nep, Nip, mem.mw_ee_full_r.data(), mem.mw_ee_full_dr.data(),
+                           mem.mw_ei_full_r.data(), mem.mw_ei_full_dr.data(), mem.mw_allUat.data());
+    if (mem.device_coords)
+    {
+      mem.mw_epos.resize(static_cast<size_t>(nw) * Ne * 3);
+      mem.mw_ipos.resize(static_cast<size_t>(Ni) * 3);
+      for (int iw = 0; iw < nw; ++iw)
+        for (int e = 0; e < Ne; ++e)
+          for (int d = 0; d < 3; ++d)
+            mem.mw_epos[(static_cast<size_t>(iw) * Ne + e) * 3 + d] = p_list[iw].R[e][d];
+      for (int i = 0; i < Ni; ++i)
+        for (int d = 0; d < 3; ++d)
+          mem.mw_ipos[static_cast<size_t>(i) * 3 + d] = leader.Ions.R[i][d];
+      pws.uploadCoords(nw, Ne, Ni, mem.mw_epos.data(), mem.mw_ipos.data());
+    }
+    mem.resident_ws = &pws;
+  }
+
+  if (dev_temps)
+  {
+    // The proposed position is the only per-move upload; temp rows generate on device.
+    mem.mw_prop.resize(static_cast<size_t>(nw) * 3);
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      const auto& ap = p_list[iw].getActivePos();
+      for (int d = 0; d < 3; ++d)
+        mem.mw_prop[static_cast<size_t>(iw) * 3 + d] = ap[d];
+    }
+    ws.launchTempRows(&mem, iat, nw, Ne, Nep, Ni, Nip, mem.mw_prop.data());
+  }
+  mem.last_move_dev_temps = dev_temps;
+
+  jeei_cuda::launch_dense_ratio_grad(&mem, mem.cuda_static_version, iat, nw, Ne, Nep, Ni, Nip, eG, iG, nfun,
+                                     mem.mw_ee_temp.data(),
+                                     mem.mw_ei_temp.data(), mem.mw_ei_full_r.data(), mem.mw_ei_full_dr.data(),
+                                     mem.e_grp.data(), mem.i_grp.data(), mem.ion_cutoff.data(),
+                                     mem.cuda_gamma_pool.data(), mem.cuda_gamma_offset.data(),
+                                     mem.cuda_gamma_len.data(), mem.cuda_fun_cut.data(), mem.cuda_fun_NeI.data(),
+                                     mem.cuda_fun_Nee.data(), mem.cuda_fun_C.data(), need_full && !resident_mode,
+                                     /*copy_uk_host=*/!resident_mode, /*temps_on_device=*/dev_temps,
+                                     mem.mw_vgl.data(),
+                                     mem.mw_Uk.data(), mem.mw_dUk.data(), mem.mw_d2Uk.data());
+  mem.cuda_full_dirty = false;
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    auto& wfc       = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    wfc.UpdateMode  = need_grad ? ORB_PBYP_PARTIAL : ORB_PBYP_RATIO;
+    wfc.cur_Uat     = mem.mw_vgl[iw][0];
+    wfc.cur_dUat[0] = mem.mw_vgl[iw][1];
+    wfc.cur_dUat[1] = mem.mw_vgl[iw][2];
+    wfc.cur_dUat[2] = mem.mw_vgl[iw][3];
+    wfc.cur_d2Uat   = mem.mw_vgl[iw][4];
+    if (!resident_mode)
+    {
+      // Legacy host accept consumes these; the resident flow keeps them on device.
+      for (int k = 0; k < Ne; ++k)
+      {
+        wfc.newUk[k]   = mem.mw_Uk[static_cast<size_t>(iw) * Nep + k];
+        wfc.newd2Uk[k] = mem.mw_d2Uk[static_cast<size_t>(iw) * Nep + k];
+      }
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        for (int k = 0; k < Ne; ++k)
+          wfc.newdUk.data(idim)[k] = mem.mw_dUk[static_cast<size_t>(iw) * OHMMS_DIM * Nep + idim * Nep + k];
+    }
+
+    // Resident mode: the acceptance ratio must see partner updates from earlier
+    // accepts in this sweep, which live only on device -- vgl slot 5 carries the
+    // device-resident Uat[iat]. Legacy mode keeps the host mirror.
+    const valT uat_old = resident_mode ? static_cast<valT>(mem.mw_vgl[iw][5]) : wfc.Uat[iat];
+    wfc.DiffVal        = uat_old - wfc.cur_Uat;
+    ratios[iw]         = std::exp(static_cast<PsiValue>(wfc.DiffVal));
+    if (need_grad && grad_new)
+      for (int idim = 0; idim < OHMMS_DIM; ++idim)
+        (*grad_new)[iw][idim] += wfc.cur_dUat[idim];
+  }
+#endif
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                      const RefVectorWithLeader<ParticleSet>& p_list,
+                                      int iat,
+                                      std::vector<PsiValue>& ratios) const
+{
+  assert(this == &wfc_list.getLeader());
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    mw_ratioGrad_cuda(wfc_list, p_list, iat, ratios, nullptr, false);
+    return;
+  }
+#endif
+#if defined(ENABLE_OFFLOAD)
+  if (use_offload_)
+  {
+    mw_ratioGrad_offload(wfc_list, p_list, iat, ratios, nullptr, false);
+    return;
+  }
+#endif
+  // Host multi-walker: serial per-move loop; walker parallelism comes from crowds,
+  // and a parallel region per move costs more than these evaluations.
+  const int nw = wfc_list.size();
+  for (int iw = 0; iw < nw; iw++)
+    ratios[iw] = wfc_list[iw].ratio(p_list[iw], iat);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     int iat,
+                                     std::vector<GradType>& grad_now) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+    {
+      auto& mem = leader.mw_mem_handle_.getResource();
+      auto& ws  = jeei_cuda::default_workspace();
+      if (mem.device_state_dirty)
+      {
+        if (ws.ownsFull(&mem))
+        {
+          // dUat lives on device between syncs; gather just the moved electron's row
+          std::vector<double> g3(static_cast<size_t>(3) * nw);
+          ws.gatherGrad(&mem, iat, nw, static_cast<int>(leader.Nelec_padded), g3.data());
+          for (int iw = 0; iw < nw; ++iw)
+            for (int idim = 0; idim < OHMMS_DIM; ++idim)
+              grad_now[iw][idim] = g3[static_cast<size_t>(iw) * 3 + idim];
+          return;
+        }
+        jeei_sync_host_state(mem, nw, static_cast<int>(leader.Nelec_padded));
+      }
+    }
+  }
+#endif
+  for (int iw = 0; iw < nw; iw++)
+    grad_now[iw] = wfc_list[iw].evalGrad(p_list[iw], iat);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                      const RefVectorWithLeader<ParticleSet>& p_list,
+                                      int iat,
+                                      std::vector<PsiValue>& ratios,
+                                      std::vector<GradType>& grad_new) const
+{
+  assert(this == &wfc_list.getLeader());
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    mw_ratioGrad_cuda(wfc_list, p_list, iat, ratios, &grad_new, true);
+    return;
+  }
+#endif
+#if defined(ENABLE_OFFLOAD)
+  if (use_offload_)
+  {
+    mw_ratioGrad_offload(wfc_list, p_list, iat, ratios, &grad_new, true);
+    return;
+  }
+#endif
+  // Host multi-walker: serial per-move loop; walker parallelism comes from crowds,
+  // and a parallel region per move costs more than these evaluations.
+  const int nw = wfc_list.size();
+  for (int iw = 0; iw < nw; iw++)
+    ratios[iw] = wfc_list[iw].ratioGrad(p_list[iw], iat, grad_new[iw]);
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                              const RefVectorWithLeader<ParticleSet>& p_list,
+                                              int iat,
+                                              const std::vector<bool>& isAccepted,
+                                              bool safe_to_delay) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (wfc_leader.mw_mem_handle_)
+    {
+      auto& mem = wfc_leader.mw_mem_handle_.getResource();
+      auto& ws  = jeei_cuda::default_workspace();
+      if (ws.ownsFull(&mem))
+      {
+        // Device-side accept: old-side dense pass + delta apply + row patch all run
+        // on device from resident buffers; the host does only compact-list and
+        // log-value bookkeeping. Host Uat mirrors go stale until the next sync.
+        const int Ne  = wfc_leader.Nelec;
+        const int Nep = static_cast<int>(wfc_leader.Nelec_padded);
+        const int Ni  = wfc_leader.Nion;
+        const int Nip = getAlignedSize<valT>(Ni);
+        std::vector<int> flags(nw, 0);
+        bool any = false;
+        for (int iw = 0; iw < nw; ++iw)
+          if (isAccepted[iw])
+          {
+            flags[iw] = 1;
+            any       = true;
+          }
+        if (any)
+        {
+          ws.launchAccept(&mem, iat, nw, Ne, Nep, Ni, Nip, wfc_leader.eGroups,
+                          wfc_leader.iGroups * wfc_leader.eGroups * wfc_leader.eGroups, flags.data(),
+                          mem.last_move_dev_temps);
+          for (int iw = 0; iw < nw; ++iw)
+          {
+            if (!isAccepted[iw])
+              continue;
+            auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+            auto& P   = p_list[iw];
+            wfc.log_value_ += wfc.DiffVal;
+            const auto& eI_table = P.getDistTableAB(wfc_leader.ei_Table_ID_);
+            wfc.ions_nearby_old.clear();
+            const auto& dist_old = eI_table.getDistRow(iat);
+            for (int jat = 0; jat < Ni; ++jat)
+              if (dist_old[jat] < wfc.Ion_cutoff[jat])
+                wfc.ions_nearby_old.push_back(jat);
+            wfc.ions_nearby_new.clear();
+            const auto& dist_new = eI_table.getTempDists();
+            for (int jat = 0; jat < Ni; ++jat)
+              if (dist_new[jat] < wfc.Ion_cutoff[jat])
+                wfc.ions_nearby_new.push_back(jat);
+            wfc.updateCompactListAfterAccept(P, iat);
+          }
+          mem.device_state_dirty = true;
+          mem.resident_ws        = &ws;
+        }
+        return;
+      }
+      // Resident mode never reaches here on a healthy flow: the preceding ratioGrad
+      // on this thread established ownership, and the host newUk mirrors were not
+      // filled -- a silent host accept would be wrong. Fail loudly instead.
+      throw std::runtime_error("JeeI CUDA: accept without resident workspace ownership");
+    }
+  }
+#endif
+
+  for (int iw = 0; iw < nw; iw++)
+  {
+    if (!isAccepted[iw])
+      continue;
+    wfc_list[iw].acceptMove(p_list[iw], iat, safe_to_delay);
+  }
+
+  if (use_offload_)
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (wfc_leader.mw_mem_handle_)
+    {
+      auto& mem = wfc_leader.mw_mem_handle_.getResource();
+      mem.mw_allUat.updateTo();
+      mem.cuda_full_dirty = true;
+    }
+  }
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                       const RefVectorWithLeader<ParticleSet>& p_list,
+                                       const RefVector<ParticleSet::ParticleGradient>& G_list,
+                                       const RefVector<ParticleSet::ParticleLaplacian>& L_list,
+                                       bool fromscratch) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+  if (fromscratch)
+  {
+    const std::vector<bool> recompute_all(nw, true);
+    mw_recompute(wfc_list, p_list, recompute_all);
+  }
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+      jeei_sync_host_state(leader.mw_mem_handle_.getResource(), nw, static_cast<int>(leader.Nelec_padded));
+  }
+#endif
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& wfc      = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    wfc.log_value_ = wfc.computeGL(G_list[iw], L_list[iw]);
+  }
+}
+
+template<typename FT>
+void JeeIOrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                           const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                           std::vector<std::vector<ValueType>>& ratios) const
+{
+  assert(this == &wfc_list.getLeader());
+  const int nw = wfc_list.size();
+#if defined(ENABLE_CUDA)
+  if (use_offload_)
+  {
+    auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    if (leader.mw_mem_handle_)
+      jeei_sync_host_state(leader.mw_mem_handle_.getResource(), nw, static_cast<int>(leader.Nelec_padded));
+  }
+#endif
+  if (use_offload_ && mw_evaluateRatios_offload(wfc_list, vp_list, ratios))
+    return;
+
+  for (int iw = 0; iw < nw; iw++)
+    wfc_list[iw].evaluateRatios(vp_list[iw], ratios[iw]);
+}
+
+/** Quadrature ratios for every walker's knots in one launch.
+ *
+ * The path above syncs device state and then walks the knots on the host, one walker at
+ * a time. On CO2/Cu(110) that is 207.56 s of thread-summed J3::NLratio, 44 percent of
+ * NonLocalECP, spent on 13,975,174,235 triplets that do not depend on each other.
+ *
+ * Membership comes from the dense electron-ion table that mw_ratioGrad_offload already
+ * keeps device resident, compared against the ion cutoff in place, so there is no
+ * flattened copy of elecs_inside to build or keep current.
+ *
+ * Returns false when anything needed is absent, leaving the caller on the host path.
+ */
+template<typename FT>
+bool JeeIOrbitalSoA<FT>::mw_evaluateRatios_offload(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                                   const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                                   std::vector<std::vector<ValueType>>& ratios) const
+{
+  // one binary runs both arms of the A/B; the host loop is the reference the device
+  // path has to reproduce, so it has to stay reachable without a rebuild
+  static const bool disabled = [] {
+    const char* c = std::getenv("QMCPACK_DISABLE_J3_OFFLOAD");
+    return c && *c == '1';
+  }();
+  if (disabled)
+    return false;
+
+  auto& leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+  if (!leader.mw_mem_handle_)
+    return false;
+  auto& mem = leader.mw_mem_handle_.getResource();
+
+  const int nw = wfc_list.size();
+  if (nw == 0)
+    return false;
+
+  auto& vp_leader         = vp_list.getLeader();
+  const auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
+  const size_t nVPs       = mw_refPctls.size();
+  if (nVPs == 0)
+    return false;
+
+  const valT* vp_ei = nullptr;
+  const valT* vp_ee = nullptr;
+  size_t st_ei = 0, st_ee = 0;
+  try
+  {
+    const auto& dt_ei = vp_leader.getDistTableAB(leader.ei_Table_ID_);
+    const auto& dt_ee = vp_leader.getDistTableAB(leader.ee_Table_ID_);
+    vp_ei             = dt_ei.getMultiWalkerDataPtr();
+    vp_ee             = dt_ee.getMultiWalkerDataPtr();
+    st_ei             = dt_ei.getPerTargetPctlStrideSize();
+    st_ee             = dt_ee.getPerTargetPctlStrideSize();
+  }
+  catch (...)
+  {
+    return false;
+  }
+  if (vp_ei == nullptr || vp_ee == nullptr)
+    return false;
+
+  const int Ne   = leader.Nelec;
+  const int Ni   = leader.Nion;
+  const int Nip  = getAlignedSize<valT>(Ni);
+  const int eG   = leader.eGroups;
+  const int iG   = leader.iGroups;
+  const int nfun = iG * eG * eG;
+
+  std::vector<const valT*> gamma_host(nfun, nullptr);
+  std::vector<valT> fun_cut(nfun, valT(0));
+  std::vector<int> fun_NeI(nfun, 0), fun_Nee(nfun, 0), fun_C(nfun, 0);
+  std::vector<int> gamma_len(nfun, 0);
+  for (int ig = 0; ig < iG; ++ig)
+    for (int jg = 0; jg < eG; ++jg)
+      for (int kg = 0; kg < eG; ++kg)
+      {
+        const int fid = (ig * eG + jg) * eG + kg;
+        FT* f         = leader.F(ig, jg, kg);
+        if (!f)
+          continue;
+        gamma_host[fid] = f->gammaOffloadData();
+        gamma_len[fid]  = f->gammaOffloadSize();
+        fun_cut[fid]    = static_cast<valT>(f->cutoff_radius);
+        fun_NeI[fid]    = f->N_eI;
+        fun_Nee[fid]    = f->N_ee;
+        fun_C[fid]      = f->C;
+      }
+
+  // Flat gamma pool with integer offsets. An array of host pointers into OffloadPinned
+  // storage is only dereferenceable inside a target region when the allocator returns
+  // device-accessible host addresses; where it does not, every triplet reads garbage and
+  // the sum is zero while the run still completes with a wrong energy.
+  // Pack and upload the functor tables once. This is entered about 126000 times per run,
+  // and a forced transfer on each call is what a 208.65 s J3::NLratio against the host's
+  // 60.34 s is made of; the polynomial itself is under a second of device time. Same
+  // approach as refresh_cuda_static_pack and its cuda_static_version stamp.
+  auto& gpool = mem.vp_gpool;
+  auto& goff  = mem.vp_goff;
+  auto& gcut  = mem.vp_gcut;
+  auto& gnei  = mem.vp_gnei;
+  auto& gnee  = mem.vp_gnee;
+  auto& gcn   = mem.vp_gcn;
+  if (!mem.vp_pack_ready)
+  {
+    goff.resize(nfun);
+    gcut.resize(nfun);
+    gnei.resize(nfun);
+    gnee.resize(nfun);
+    gcn.resize(nfun);
+    size_t total = 0;
+    for (int f = 0; f < nfun; ++f)
+      if (gamma_host[f] != nullptr)
+        total += gamma_len[f];
+    gpool.resize(total == 0 ? 1 : total);
+    std::fill(goff.begin(), goff.end(), -1);
+    std::fill(gcut.begin(), gcut.end(), valT(0));
+    std::fill(gnei.begin(), gnei.end(), 0);
+    std::fill(gnee.begin(), gnee.end(), 0);
+    std::fill(gcn.begin(), gcn.end(), 0);
+    size_t at = 0;
+    for (int f = 0; f < nfun; ++f)
+    {
+      if (gamma_host[f] == nullptr)
+        continue;
+      goff[f] = static_cast<int>(at);
+      std::copy_n(gamma_host[f], gamma_len[f], gpool.data() + at);
+      at += gamma_len[f];
+      gcut[f] = fun_cut[f];
+      gnei[f] = fun_NeI[f];
+      gnee[f] = fun_Nee[f];
+      gcn[f]  = fun_C[f];
+    }
+    gpool.updateTo();
+    goff.updateTo();
+    gcut.updateTo();
+    gnei.updateTo();
+    gnee.updateTo();
+    gcn.updateTo();
+    mem.vp_pack_ready = true;
+  }
+
+  // Same reasoning as the dense table below: these are filled by mw_ratioGrad_offload,
+  // and borrowing them without filling them here maps a null host pointer, which aborts
+  // the launch with "Failure to copy data from host to device. Pointers: host = 0x0".
+  const auto& P0 = vp_list[0].getRefPS();
+  mem.e_grp.resize(Ne);
+  for (int kel = 0; kel < Ne; ++kel)
+    mem.e_grp[kel] = P0.GroupID[kel];
+  mem.i_grp.resize(Ni);
+  mem.ion_cutoff.resize(Ni);
+  for (int iat = 0; iat < Ni; ++iat)
+  {
+    mem.i_grp[iat]      = leader.Ions.GroupID[iat];
+    mem.ion_cutoff[iat] = leader.Ion_cutoff[iat];
+  }
+  mem.e_grp.updateTo();
+  mem.i_grp.updateTo();
+  mem.ion_cutoff.updateTo();
+
+  // The dense electron-ion table is filled by mw_ratioGrad_offload, and a size check
+  // only says it was allocated once, not that it holds this step's distances. Reading
+  // it on that basis returned zero for every triplet, which turns the ratio into
+  // exp(Uat[refPtcl]) and is identical for every knot of an electron: the eeI golden
+  // master caught exactly that. It is filled here from each walker's own table so the
+  // result cannot depend on what ran before.
+  mem.mw_ei_full_r.resize(static_cast<size_t>(nw) * Ne * Nip);
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    const auto& wfc_w  = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    const auto& P_w    = vp_list[iw].getRefPS();
+    const auto& ei_tbl = P_w.getDistTableAB(wfc_w.ei_Table_ID_);
+    valT* dst          = mem.mw_ei_full_r.data() + static_cast<size_t>(iw) * Ne * Nip;
+    for (int kel = 0; kel < Ne; ++kel)
+    {
+      const auto& row = ei_tbl.getDistRow(kel);
+      for (int iat = 0; iat < Ni; ++iat)
+        dst[static_cast<size_t>(kel) * Nip + iat] = row[iat];
+    }
+  }
+  mem.mw_ei_full_r.updateTo();
+
+  mem.mw_vals.resize(nVPs);
+  Vector<int, OffloadPinnedAllocator<int>> vp_iw(nVPs), vp_jg(nVPs), vp_ref(nVPs);
+  {
+    const auto& refPS = vp_leader.getRefPS();
+    size_t ivp        = 0;
+    for (int iw = 0; iw < nw; ++iw)
+      for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+      {
+        vp_iw[ivp]  = iw;
+        vp_ref[ivp] = mw_refPctls[ivp];
+        vp_jg[ivp]  = refPS.getGroupID(mw_refPctls[ivp]);
+      }
+    vp_iw.updateTo();
+    vp_ref.updateTo();
+    vp_jg.updateTo();
+  }
+
+  auto* vals_ptr  = mem.mw_vals.data();
+  auto* egrp_ptr  = mem.e_grp.data();
+  auto* igrp_ptr  = mem.i_grp.data();
+  auto* cuti_ptr  = mem.ion_cutoff.data();
+  auto* full_r    = mem.mw_ei_full_r.data();
+  auto* gpool_ptr = gpool.data();
+  auto* goff_ptr  = goff.data();
+  auto* gcut_ptr  = gcut.data();
+  auto* gnei_ptr  = gnei.data();
+  auto* gnee_ptr  = gnee.data();
+  auto* gcn_ptr   = gcn.data();
+  auto* iw_ptr    = vp_iw.data();
+  auto* jg_ptr    = vp_jg.data();
+  auto* ref_ptr   = vp_ref.data();
+  Vector<int, OffloadPinnedAllocator<int>> dbg(nVPs * 2);
+  std::fill(dbg.begin(), dbg.end(), -1);
+  dbg.updateTo();
+  auto* dbg_ptr = dbg.data();
+  const size_t fr_sz = mem.mw_ei_full_r.size();
+  const size_t gp_sz = gpool.size();
+
+  PRAGMA_OFFLOAD("omp target teams distribute \
+      map(to: iw_ptr[:nVPs], jg_ptr[:nVPs], ref_ptr[:nVPs]) \
+      map(to: egrp_ptr[:Ne], igrp_ptr[:Ni], cuti_ptr[:Ni], full_r[:fr_sz]) \
+      map(to: gpool_ptr[:gp_sz], goff_ptr[:nfun], gcut_ptr[:nfun], gnei_ptr[:nfun], gnee_ptr[:nfun], gcn_ptr[:nfun]) \
+      map(to: vp_ei[:nVPs * st_ei], vp_ee[:nVPs * st_ee]) \
+      map(always, from: vals_ptr[:nVPs], dbg_ptr[:nVPs * 2])")
+  for (size_t ivp = 0; ivp < nVPs; ++ivp)
+  {
+    // vp_ei and vp_ee are mapped, not passed through is_device_ptr: getMultiWalkerDataPtr
+    // on these virtual-particle tables returns host memory, because they carry
+    // NEED_VP_FULL_TABLE_ON_HOST, and treating that as a device address makes every
+    // triplet read garbage and the sum come out exactly zero.
+    // count what the loop actually visits, so a zero sum can be attributed
+    {
+      int ions_pass = 0, trips = 0;
+      const valT* ei_row_dbg = vp_ei + ivp * st_ei;
+      const valT* fr_dbg     = full_r + static_cast<size_t>(iw_ptr[ivp]) * Ne * Nip;
+      for (int iat = 0; iat < Ni; iat++)
+      {
+        if (ei_row_dbg[iat] >= cuti_ptr[iat])
+          continue;
+        ions_pass++;
+        for (int kel = 0; kel < Ne; kel++)
+          if (kel != ref_ptr[ivp] && fr_dbg[static_cast<size_t>(kel) * Nip + iat] < cuti_ptr[iat])
+            trips++;
+      }
+      dbg_ptr[ivp * 2 + 0] = ions_pass;
+      dbg_ptr[ivp * 2 + 1] = trips;
+    }
+    const valT* fr = full_r + static_cast<size_t>(iw_ptr[ivp]) * Ne * Nip;
+    // The ion loop runs across the team rather than on one thread. Left serial it is a
+    // single thread walking Nion * Nelec per knot, which measured 227.29 s against the
+    // host's 53.93 s on CO2/Cu(110) even with the arithmetic correct: the triplets are
+    // independent and nothing was exploiting that.
+    const int jel_k        = ref_ptr[ivp];
+    const int jg_k         = jg_ptr[ivp];
+    const valT* ei_row     = vp_ei + ivp * st_ei;
+    const valT* ee_row     = vp_ee + ivp * st_ee;
+    valT sum               = 0;
+    // Both loops collapse into the team. Parallelising the ion loop alone gives Nion
+    // threads, 33 on CO2/Cu(110), which is under one warp and leaves each of them walking
+    // all Nelec serially; collapsed, the Nion * Nelec pairs spread across the team. The
+    // filters move inside, so each pair tests both cutoffs independently.
+    PRAGMA_OFFLOAD("omp parallel for collapse(2) reduction(+: sum)")
+    for (int iat = 0; iat < Ni; iat++)
+      for (int kel = 0; kel < Ne; kel++)
+      {
+        const valT r_jI = ei_row[iat];
+        if (r_jI >= cuti_ptr[iat] || kel == jel_k)
+          continue;
+        const valT r_kI = fr[static_cast<size_t>(kel) * Nip + iat];
+        if (r_kI >= cuti_ptr[iat])
+          continue;
+        const int fid = (igrp_ptr[iat] * eG + jg_k) * eG + egrp_ptr[kel];
+        if (goff_ptr[fid] < 0)
+          continue;
+        sum += jeei_offload::poly3d_value_one<valT>(ee_row[kel], r_jI, r_kI, gcut_ptr[fid], gnei_ptr[fid],
+                                                   gnee_ptr[fid], gcn_ptr[fid], gpool_ptr + goff_ptr[fid]);
+      }
+    vals_ptr[ivp] = sum;
+  }
+
+  // Print the device sum beside the host sum for the same knot, rather than inferring
+  // the difference from a failing golden number.
+  if (const char* d = std::getenv("QMCPACK_DEBUG_J3_RATIOS"); d && *d == '1')
+  {
+    int nnull = 0;
+    for (int f = 0; f < nfun; ++f)
+      if (gamma_host[f] == nullptr)
+        nnull++;
+    valT minr = 1e30, mincut = 1e30;
+    for (int iat = 0; iat < Ni; ++iat)
+      mincut = std::min(mincut, mem.ion_cutoff[iat]);
+    for (int iat = 0; iat < Ni; ++iat)
+      minr = std::min(minr, vp_ei[iat]);
+    std::cerr << "J3DBG setup Ne=" << Ne << " Ni=" << Ni << " Nip=" << Nip << " eG=" << eG << " iG=" << iG
+              << " nfun=" << nfun << " gamma_null=" << nnull << " min_ion_cut=" << mincut
+              << " vp_ei[0..Ni) min=" << minr << " st_ei=" << st_ei << " st_ee=" << st_ee
+              << " full_r_size=" << mem.mw_ei_full_r.size() << std::endl;
+    size_t dvp = 0;
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      auto& wfc_w = const_cast<JeeIOrbitalSoA<FT>&>(wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw));
+      const VirtualParticleSet& vp = vp_list[iw];
+      std::vector<ValueType> host_ratios(vp.getTotalNum());
+      wfc_w.evaluateRatios(vp, host_ratios);
+      for (size_t k = 0; k < vp.getTotalNum(); ++k, ++dvp)
+      {
+        const valT host_val = std::real(std::log(wfc_w.Uat[mw_refPctls[dvp]] == valT(0)
+                                                     ? ValueType(1)
+                                                     : ValueType(1))); // placeholder, unused
+        (void)host_val;
+        dbg.updateFrom();
+    std::cerr << "J3DBG iw=" << iw << " k=" << k << " ref=" << mw_refPctls[dvp]
+                  << " jg=" << vp_jg[dvp] << " dev_val=" << mem.mw_vals[dvp]
+                  << " dev_ratio=" << std::exp(wfc_w.Uat[mw_refPctls[dvp]] - mem.mw_vals[dvp])
+                  << " ions_pass=" << dbg[dvp * 2] << " trips=" << dbg[dvp * 2 + 1] << " host_ratio=" << host_ratios[k] << " Uat=" << wfc_w.Uat[mw_refPctls[dvp]] << std::endl;
+      }
+    }
+  }
+
+  size_t ivp = 0;
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    const auto& wfc = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    for (size_t k = 0; k < vp_list[iw].getTotalNum(); ++k, ++ivp)
+      ratios[iw][k] = std::exp(wfc.Uat[mw_refPctls[ivp]] - mem.mw_vals[ivp]);
+  }
+  return true;
+}
+
+template class JeeIOrbitalSoA<PolynomialFunctor3D>;
+
+} // namespace qmcplusplus
