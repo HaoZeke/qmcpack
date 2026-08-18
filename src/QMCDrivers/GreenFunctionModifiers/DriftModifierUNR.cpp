@@ -22,9 +22,7 @@ void DriftModifierUNR::getDrift(RealType tau, const GradType& qf, PosType& drift
   // convert the complex WF gradient to real
   convertToReal(qf, drift);
   RealType vsq = dot(drift, drift);
-  RealType sc  = vsq < std::numeric_limits<RealType>::epsilon()
-      ? tau
-      : ((-1.0 + std::sqrt(1.0 + 2.0 * a_ * tau * vsq)) / (a_ * vsq));
+  RealType sc  = driftScalingUNR(tau, a_, vsq);
   //Apply the umrigar scaling to drift.
   drift *= sc;
 }
@@ -34,9 +32,7 @@ void DriftModifierUNR::getDrift(RealType tau, const ComplexType& qf, ParticleSet
   // convert the complex WF gradient to real
   convertToReal(qf, drift);
   RealType vsq = drift * drift;
-  RealType sc  = vsq < std::numeric_limits<RealType>::epsilon()
-      ? tau
-      : ((-1.0 + std::sqrt(1.0 + 2.0 * a_ * tau * vsq)) / (a_ * vsq));
+  RealType sc  = driftScalingUNR(tau, a_, vsq);
   //Apply the umrigar scaling to drift.
   drift *= sc;
 }
