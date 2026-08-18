@@ -46,8 +46,25 @@
 
 class Communicate;
 
+#include "config.h"
+
 namespace qmcplusplus
 {
+/** One walker's position contribution to the log Green function, callable from a
+ *  target region.
+ *
+ *  The contribution is a scalar function of the displacement and the tau
+ *  parameter, so the same definition serves the host acceptance path and a
+ *  device side one, rather than a host copy and a device copy that can drift.
+ */
+PRAGMA_OFFLOAD("omp begin declare target")
+template<typename T, typename PosT>
+inline T logGreensFunctionPos(T oneover2tau, const PosT& pos)
+{
+  return -oneover2tau * dot(pos, pos);
+}
+PRAGMA_OFFLOAD("omp end declare target")
+
 //forward declarations: Do not include headers if not needed
 class TraceManager;
 class EstimatorManagerNew;
@@ -286,7 +303,7 @@ public:
     assert(coords.positions.size() == log_gb.size());
     std::transform(coords.positions.begin(), coords.positions.end(), log_gb.begin(),
                    [halfovertau = taus.oneover2tau](const QMCTraits::PosType& pos) {
-                     return -halfovertau * dot(pos, pos);
+                     return logGreensFunctionPos(halfovertau, pos);
                    });
     if constexpr (CT == CoordsType::POS_SPIN)
       std::transform(coords.spins.begin(), coords.spins.end(), log_gb.begin(), log_gb.begin(),
