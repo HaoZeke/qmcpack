@@ -13,10 +13,30 @@
 #ifndef QMCPLUSPLUS_DRIFTMODIFIER_UNR_H
 #define QMCPLUSPLUS_DRIFTMODIFIER_UNR_H
 
+#include <cmath>
+#include <limits>
+
 #include "QMCDrivers/GreenFunctionModifiers/DriftModifierBase.h"
+#include "config.h"
 
 namespace qmcplusplus
 {
+/** Umrigar drift scaling, callable from a target region.
+ *
+ *  The scaling depends only on tau, the parameter a and the squared drift, so it
+ *  is plain arithmetic on scalars. getDrift is virtual and a virtual call cannot
+ *  cross into a target region, which is what keeps the DMC acceptance test on
+ *  the host; the arithmetic itself has no such restriction and is shared here so
+ *  both sides compute the same value.
+ */
+PRAGMA_OFFLOAD("omp begin declare target")
+template<typename T>
+inline T driftScalingUNR(T tau, T a, T vsq)
+{
+  return vsq < std::numeric_limits<T>::epsilon() ? tau : ((T(-1) + std::sqrt(T(1) + T(2) * a * tau * vsq)) / (a * vsq));
+}
+PRAGMA_OFFLOAD("omp end declare target")
+
 class DriftModifierUNR : public DriftModifierBase
 {
 public:
