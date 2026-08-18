@@ -18,6 +18,8 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include "QMCHamiltonian.h"
+#include "NonLocalECPotential.h"
+#include "NonLocalTOperator.h"
 #include "Particle/DistanceTable.h"
 #include "QMCWaveFunctions/TrialWaveFunction.h"
 #include "QMCWaveFunctions/Fermion/MultiSlaterDetTableMethod.h"
@@ -955,6 +957,58 @@ std::vector<int> QMCHamiltonian::mw_makeNonLocalMoves(const RefVectorWithLeader<
                                                       NonLocalTOperator& move_op)
 {
   std::vector<int> num_accepts(ham_list.size(), 0);
+  if (ham_list.size() == 0)
+    return num_accepts;
+
+  // Route the electron sweep through the walker-batched implementation when exactly one
+  // operator wants non-local moves, which is the ordinary case: a single NonLocalECP.
+  // Anything else, including several such operators, keeps the serial path, because the
+  // batched sweep advances one operator's electron loop and cannot interleave two.
+  // QMCPACK_SERIAL_TMOVE_SWEEP=1 forces the serial path so one binary runs both arms.
+  // The walker-batched sweep is opt-in, not the default. It reproduces the serial
+  // trajectory where it runs, but on CO2/Cu(110) with nonlocalmoves=v1 it aborts inside
+  // mw_evaluateOne with bad_optional_access: the ResourceCollectionTeamLock there acquires
+  // against vp_list.getLeader(), and the gathered list's leader and contents do not line up
+  // in every configuration. Naming the first participating walker as leader was not enough
+  // to fix it. Until that is understood the serial sweep is what runs.
+  static const bool batched_opt_in = [] {
+    const char* c = std::getenv("QMCPACK_BATCHED_TMOVE_SWEEP");
+    return c && *c == '1';
+  }();
+  const bool forced_serial = !batched_opt_in;
+
+  auto& H_leader = ham_list.getLeader();
+  int nlpp_index = -1;
+  int nlpp_count = 0;
+  for (int i = 0; i < H_leader.H.size(); ++i)
+    if (dynamic_cast<NonLocalECPotential*>(H_leader.H[i].get()) != nullptr)
+    {
+      nlpp_index = i;
+      nlpp_count++;
+    }
+
+  if (!forced_serial && nlpp_count == 1)
+  {
+    RefVectorWithLeader<OperatorBase> o_list(*ham_list.getLeader().H[nlpp_index]);
+    o_list.reserve(ham_list.size());
+    // One NonLocalTOperator per walker. The caller passes a single operator by reference,
+    // and txy_by_elec_ and txy_scan_ are its internal state. That is safe serially, where
+    // each walker groups, sweeps its electrons, and the next overwrites; the batched sweep
+    // inverts those loops, so every walker would group first and then read a table holding
+    // only the last walker's moves. Copies carry the same tau, alpha, gamma and move kind
+    // and give each walker its own grouped table.
+    std::vector<NonLocalTOperator> per_walker_ops(ham_list.size(), move_op);
+    RefVector<NonLocalTOperator> move_op_list;
+    move_op_list.reserve(ham_list.size());
+    for (int iw = 0; iw < ham_list.size(); ++iw)
+    {
+      o_list.push_back(*ham_list[iw].H[nlpp_index]);
+      move_op_list.push_back(per_walker_ops[iw]);
+    }
+    NonLocalECPotential::mw_makeNonLocalMovesPbyP(o_list, wf_list, p_list, move_op_list, num_accepts);
+    return num_accepts;
+  }
+
   for (int iw = 0; iw < ham_list.size(); ++iw)
     num_accepts[iw] = ham_list[iw].makeNonLocalMoves(wf_list[iw], p_list[iw], move_op);
   return num_accepts;

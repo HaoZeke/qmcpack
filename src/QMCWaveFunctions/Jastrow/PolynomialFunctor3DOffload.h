@@ -181,7 +181,8 @@ inline RT dense_vp_value_one(const int jel,
                              const RT* restrict vp_ei_r,
                              const RT* restrict vp_ee_r,
                              const RT* restrict ei_r_full,
-                             const RT** gamma_ptrs,
+                             const RT* restrict gamma_pool,
+                             const int* restrict gamma_off,
                              const RT* restrict fun_cutoff,
                              const int* restrict fun_NeI,
                              const int* restrict fun_Nee,
@@ -201,13 +202,79 @@ inline RT dense_vp_value_one(const int jel,
       const RT r_kI = ei_r_full[kel * Ni_pad + iat];
       if (r_kI >= ion_cut[iat])
         continue;
-      const int kg      = e_grp[kel];
-      const int fid     = (ig * eGroups + jg) * eGroups + kg;
-      const RT* gamma   = gamma_ptrs[fid];
-      if (gamma == nullptr)
+      const int kg  = e_grp[kel];
+      const int fid = (ig * eGroups + jg) * eGroups + kg;
+      // One flat pool addressed by integer offsets. The alternative, an array of
+      // pointers into OffloadPinned storage, is only dereferenceable inside a target
+      // region when the allocator hands back device-accessible host addresses; where it
+      // does not, every triplet reads garbage and the sum comes out zero while the run
+      // still completes, which is how this was found.
+      if (gamma_off[fid] < 0)
         continue;
+      const RT* gamma = gamma_pool + gamma_off[fid];
       sum += poly3d_value_one<RT>(vp_ee_r[kel], r_jI, r_kI, fun_cutoff[fid], fun_NeI[fid], fun_Nee[fid], fun_C[fid],
                                   gamma);
+    }
+  }
+  return sum;
+}
+
+/** Same sum as dense_vp_value_one, but membership comes from a flattened elecs_inside.
+ *
+ * computeU reads membership from elecs_inside, which is member state rebuilt on a full
+ * evaluation and patched on accepted moves. Re-deriving it from the live electron-ion
+ * table gives a different answer whenever the two have drifted, and the golden numbers
+ * encode the elecs_inside answer. This consumes the same state the host path does.
+ *
+ * memb_off has one entry per (walker, kg, ion) slot plus a trailing total; memb_elec and
+ * memb_dist are indexed by it.
+ */
+template<typename RT>
+inline RT sparse_vp_value_one(const int jel,
+                              const int jg,
+                              const int Nion,
+                              const int eGroups,
+                              const int* restrict i_grp,
+                              const RT* restrict ion_cut,
+                              const RT* restrict vp_ei_r,
+                              const RT* restrict vp_ee_r,
+                              const size_t memb_base,
+                              const size_t* restrict memb_off,
+                              const int* restrict memb_elec,
+                              const RT* restrict memb_dist,
+                              const RT* restrict gamma_pool,
+                              const int* restrict gamma_off,
+                              const RT* restrict fun_cutoff,
+                              const int* restrict fun_NeI,
+                              const int* restrict fun_Nee,
+                              const int* restrict fun_C)
+{
+  RT sum = RT(0);
+  for (int iat = 0; iat < Nion; iat++)
+  {
+    const RT r_jI = vp_ei_r[iat];
+    if (r_jI >= ion_cut[iat])
+      continue;
+    const int ig = i_grp[iat];
+    for (int kg = 0; kg < eGroups; kg++)
+    {
+      const int fid   = (ig * eGroups + jg) * eGroups + kg;
+      // integer offset into a flat pool: a host pointer is not dereferenceable on the
+      // device on every build, and it fails silently by summing nothing
+      if (gamma_off[fid] < 0)
+        continue;
+      const RT* gamma = gamma_pool + gamma_off[fid];
+      const size_t slot  = memb_base + static_cast<size_t>(kg) * Nion + iat;
+      const size_t begin = memb_off[slot];
+      const size_t end   = memb_off[slot + 1];
+      for (size_t idx = begin; idx < end; idx++)
+      {
+        const int kel = memb_elec[idx];
+        if (kel == jel)
+          continue;
+        sum += poly3d_value_one<RT>(vp_ee_r[kel], r_jI, memb_dist[idx], fun_cutoff[fid], fun_NeI[fid], fun_Nee[fid],
+                                    fun_C[fid], gamma);
+      }
     }
   }
   return sum;
@@ -219,7 +286,7 @@ inline RT dense_vp_value_one(const int jel,
  *    ei_r_j [Ni_pad], ei_dr_j[3][Ni_pad]  -- temp row for jel
  *    ei_r_full [Nelec * Ni_pad], ei_dr_full [3 * Nelec * Ni_pad] row-major kel-major
  *  Functor tables size nfun = iGroups * eGroups * eGroups:
- *    gamma_ptrs[nfun], cutoffs[nfun], N_eI[nfun], N_ee[nfun], C[nfun]  (null gamma => skip)
+ *    gamma_pool with gamma_off[nfun], cutoffs[nfun], N_eI[nfun], N_ee[nfun], C[nfun]  (null gamma => skip)
  *  Outputs:
  *    Uj, dUj[3], d2Uj
  *    Uk[Nelec], dUk[3*Nelec_pad], d2Uk[Nelec]  (partner contributions)
@@ -241,7 +308,8 @@ inline void dense_ratio_grad_one_walker(const int jel,
                                         const RT* restrict ei_dr_j, // [3][Ni_pad]
                                         const RT* restrict ei_r_full,  // [kel * Ni_pad + iat]
                                         const RT* restrict ei_dr_full, // [idim * Nelec * Ni_pad + kel * Ni_pad + iat]
-                                        const RT** gamma_ptrs,
+                                        const RT* restrict gamma_pool,
+                                        const int* restrict gamma_off,
                                         const RT* restrict fun_cutoff,
                                         const int* restrict fun_NeI,
                                         const int* restrict fun_Nee,
@@ -291,9 +359,11 @@ inline void dense_ratio_grad_one_walker(const int jel,
         continue;
       const int kg  = e_grp[kel];
       const int fid = (ig * eGroups + jg) * eGroups + kg;
-      const RT* gamma = gamma_ptrs[fid];
-      if (gamma == nullptr)
+      // integer offset into a flat pool: a host pointer is not dereferenceable on the
+      // device on every build, and it fails silently by summing nothing
+      if (gamma_off[fid] < 0)
         continue;
+      const RT* gamma = gamma_pool + gamma_off[fid];
 
       const RT r_jk = ee_r[kel];
       const RT jkx  = ee_dr[0 * Ne_pad + kel];

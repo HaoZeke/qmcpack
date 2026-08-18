@@ -102,6 +102,24 @@ public:
    */
   int makeNonLocalMovesPbyP(TrialWaveFunction& psi, ParticleSet& P, NonLocalTOperator& move_op) override;
 
+  /** T-move sweep for a crowd of walkers, electron by electron with the walkers batched.
+   *
+   * The per-walker entry point above is called once per walker by the driver, and inside
+   * it computes Txy one electron and one nearby ion at a time. On CO2/Cu(110) that is
+   * about 126000 device launches per run, and the launch cost rather than the arithmetic
+   * is what a 146.44 s J3::NLratio against the host's 60.85 s is made of.
+   *
+   * The electron loop cannot be batched: electron iat+1 sees the configuration left by
+   * iat's accepted or rejected hop, which is the ordering the 2010 algorithm specifies.
+   * Walkers are independent of each other, so the loops inverse: electron outer, walkers
+   * batched inner, the same shape mw_evaluateImpl already uses with jobid outer.
+   */
+  static void mw_makeNonLocalMovesPbyP(const RefVectorWithLeader<OperatorBase>& o_list,
+                                       const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                       const RefVectorWithLeader<ParticleSet>& p_list,
+                                       const RefVector<NonLocalTOperator>& move_op_list,
+                                       std::vector<int>& accepted_per_walker);
+
   Return_t evaluateValueAndDerivatives(TrialWaveFunction& psi,
                                        ParticleSet& P,
                                        const OptVariables& optvars,

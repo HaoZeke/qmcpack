@@ -567,7 +567,7 @@ void check_log_ke_ratios(WaveFunctionComponent& j3, ParticleSet& elec)
   elec.rejectMove(0);
   CHECK(std::real(rg) == Approx(ratio_grad0_val));
   for (int d = 0; d < 3; ++d)
-    CHECK(g[d] == Approx(ratio_grad0_g[d]));
+    CHECK(ValueApprox(g[d]) == QMCTraits::ValueType(ratio_grad0_g[d]));
 }
 } // namespace jeei_golden
 
@@ -644,7 +644,7 @@ TEST_CASE("JeeIOrbitalSoA golden master multi-walker OpenMP", "[wavefunction][go
   {
     CHECK(std::real(ratios[iw]) == Approx(jeei_golden::ratio_grad0_val));
     for (int d = 0; d < 3; ++d)
-      CHECK(grads[iw][d] == Approx(jeei_golden::ratio_grad0_g[d]));
+      CHECK(ValueApprox(grads[iw][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
   }
 
   elec.rejectMove(0);
@@ -717,7 +717,7 @@ TEST_CASE("JeeIOrbitalSoA golden master use_offload path", "[wavefunction][golde
   j3_off.mw_ratioGrad(wfc_list, p_list, 0, ratios, grads);
   CHECK(std::real(ratios[0]) == Approx(jeei_golden::ratio_grad0_val));
   for (int d = 0; d < 3; ++d)
-    CHECK(grads[0][d] == Approx(jeei_golden::ratio_grad0_g[d]));
+    CHECK(ValueApprox(grads[0][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
   elec_o.rejectMove(0);
 
   (void)host; // host built to ensure XML still valid for builder path
@@ -844,7 +844,7 @@ TEST_CASE("JeeIOrbitalSoA golden master multi-walker offload recompute+accept", 
   {
     CHECK(std::real(ratios[iw]) == Approx(jeei_golden::ratio_grad0_val));
     for (int d = 0; d < 3; ++d)
-      CHECK(grads[iw][d] == Approx(jeei_golden::ratio_grad0_g[d]));
+      CHECK(ValueApprox(grads[iw][d]) == QMCTraits::ValueType(jeei_golden::ratio_grad0_g[d]));
   }
 
   std::vector<bool> accepted(2, true);
@@ -1066,7 +1066,7 @@ TEST_CASE("JeeIOrbitalSoA host vs offload dense agreement", "[wavefunction]")
 
   CHECK(std::real(ratios[0]) == Approx(std::real(r_h)));
   for (int d = 0; d < OHMMS_DIM; ++d)
-    CHECK(grads[0][d] == Approx(g_h[d]));
+    CHECK(ValueApprox(grads[0][d]) == g_h[d]);
 
   elec_h.rejectMove(0);
   elec_d.rejectMove(0);
@@ -1254,7 +1254,7 @@ TEST_CASE("JeeIOrbitalSoA mw_ratioGrad multi-walker speedup", "[wavefunction][be
   {
     CHECK(std::real(ratios_mw[iw]) == Approx(std::real(ratios_serial[iw])));
     for (int d = 0; d < OHMMS_DIM; ++d)
-      CHECK(grads_mw[iw][d] == Approx(grads_serial[iw][d]));
+      CHECK(ValueApprox(grads_mw[iw][d]) == grads_serial[iw][d]);
   }
 
   // --- recompute microbench (reject moves first so tables are clean) ---
@@ -1392,8 +1392,8 @@ TEST_CASE("JeeIOrbitalSoA recompute dense agreement", "[wavefunction][recompute]
   for (int e = 0; e < 4; ++e)
   {
     for (int d = 0; d < 3; ++d)
-      CHECK(elec_d.G[e][d] == Approx(elec_h.G[e][d]));
-    CHECK(elec_d.L[e] == Approx(elec_h.L[e]));
+      CHECK(ValueApprox(elec_d.G[e][d]) == elec_h.G[e][d]);
+    CHECK(ValueApprox(elec_d.L[e]) == elec_h.L[e]);
   }
 }
 
@@ -1546,7 +1546,10 @@ TEST_CASE("JeeIOrbitalSoA large-system CUDA mw_ratioGrad speedup", "[wavefunctio
   {
     CHECK(std::real(ratios_mw[iw]) == Approx(std::real(ratios_serial[iw])));
     for (int d = 0; d < OHMMS_DIM; ++d)
-      CHECK(grads_mw[iw][d] == Approx(grads_serial[iw][d]).margin(1e-8));
+    {
+      CHECK(std::real(grads_mw[iw][d]) == Approx(std::real(grads_serial[iw][d])).margin(1e-8));
+      CHECK(std::imag(grads_mw[iw][d]) == Approx(std::imag(grads_serial[iw][d])).margin(1e-8));
+    }
   }
 
   // Cut2: recompute timing (reject moves so full tables are consistent)

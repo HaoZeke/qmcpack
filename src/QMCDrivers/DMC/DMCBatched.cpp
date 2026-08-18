@@ -308,11 +308,15 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
     moved_nonlocal_walker_elecs.reserve(num_walkers);
     moved_nonlocal_walker_twfs.reserve(num_walkers);
 
+    // One sweep for the whole crowd: the electron loop stays serial inside, the walkers
+    // are batched. Previously this called makeNonLocalMoves once per walker, which took a
+    // device launch per electron per walker.
+    walker_non_local_moves_accepted =
+        QMCHamiltonian::mw_makeNonLocalMoves(walker_hamiltonians, walker_twfs, walker_elecs,
+                                             step_context.non_local_ops);
+
     for (int iw = 0; iw < walkers.size(); ++iw)
     {
-      walker_non_local_moves_accepted[iw] =
-          walker_hamiltonians[iw].makeNonLocalMoves(walker_twfs[iw], walker_elecs[iw], step_context.non_local_ops);
-
       if (walker_non_local_moves_accepted[iw] > 0)
       {
         crowd.incNonlocalAccept(walker_non_local_moves_accepted[iw]);
