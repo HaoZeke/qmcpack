@@ -134,7 +134,30 @@ std::unique_ptr<WaveFunctionComponent> eeI_JastrowBuilder::buildComponent(xmlNod
     if (ftype == "polynomial")
     {
       using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
-      auto J3      = std::make_unique<J3Type>(jname, *sourcePtcl, targetPtcl);
+      // Offload/GPU dense path when functor supports it and:
+      //  - OMPTarget coords (ENABLE_OFFLOAD), or
+      //  - CUDA build (ENABLE_CUDA): uses JeeIDenseCUDA kernels on the device.
+      bool use_offload = false;
+      if (J3Type::FuncType::isOMPoffload())
+      {
+#if defined(ENABLE_CUDA)
+        use_offload = true;
+        app_summary() << "  eeI Jastrow \"" << jname << "\" using CUDA dense dual-table path.\n";
+#elif defined(ENABLE_OFFLOAD)
+        if (targetPtcl.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD)
+        {
+          use_offload = true;
+          app_summary() << "  eeI Jastrow \"" << jname << "\" using OpenMP-offload dense dual-table path.\n";
+        }
+#else
+        if (targetPtcl.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD)
+        {
+          use_offload = true;
+          app_summary() << "  eeI Jastrow \"" << jname << "\" using host dense dual-table path (coords offload).\n";
+        }
+#endif
+      }
+      auto J3 = std::make_unique<J3Type>(jname, *sourcePtcl, targetPtcl, use_offload);
       putkids(kids, *J3);
       return J3;
     }
