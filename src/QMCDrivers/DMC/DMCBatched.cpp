@@ -37,6 +37,39 @@
 
 namespace qmcplusplus
 {
+/** The Metropolis test for one electron, on the device.
+ *
+ *  Reads the ratio and the two Green function exponents, applies the same three predicates
+ *  the host form applies and compares against the pre-drawn variate, writing the acceptance
+ *  mask where the accept paths can read it. Nothing here comes back to the host, which is
+ *  the point: the mask is the last value the per-electron step made host visible.
+ *
+ *  The arithmetic mirrors the host expression exactly, including the epsilon floor on prob,
+ *  so with the same inputs it produces the same decision.
+ */
+template<typename RT, typename PsiV>
+inline void dmcAcceptanceOnDevice(size_t nw,
+                                  const PsiV* ratios,
+                                  const RT* log_gf,
+                                  const RT* log_gb,
+                                  const char* are_valid,
+                                  const RT* variates,
+                                  char* accepted)
+{
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                  map(always, to: ratios[0:nw], log_gf[0:nw], log_gb[0:nw], are_valid[0:nw], \
+                                  variates[0:nw]) \
+                  map(always, from: accepted[0:nw])")
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    const RT prob = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
+    accepted[iw]  = (are_valid[iw] != 0 && ratios[iw] != PsiV(0) && prob >= std::numeric_limits<RT>::epsilon() &&
+                    variates[iw] < prob)
+        ? 1
+        : 0;
+  }
+}
+
 using std::placeholders::_1;
 using WP       = WalkerProperties::Indexes;
 using PsiValue = TrialWaveFunction::PsiValue;
