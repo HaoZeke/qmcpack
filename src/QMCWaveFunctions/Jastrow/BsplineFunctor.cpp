@@ -249,10 +249,12 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
       mw_max_index_ptr[ig]     = 0;
     }
 
-  int nw_accepted = 0;
+  // Packing the accepted walkers here is what makes the kernel's loop bound depend on a
+  // count only the host can form. Filling the list with every walker and marking the
+  // rejected ones with a negative index keeps the bound at nw, so the branch moves to the
+  // device and the same kernel serves a device-formed decision.
   for (int iw = 0; iw < nw; iw++)
-    if (isAccepted[iw])
-      accepted_indices[nw_accepted++] = iw;
+    accepted_indices[iw] = isAccepted[iw] ? iw : -1;
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
@@ -261,7 +263,7 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(to: mw_vgl[:(DIM+2)*nw]) \
                     map(always, from: mw_allUat[:nw * n_padded * (DIM + 2)])")
-  for (int iw = 0; iw < nw_accepted; iw++)
+  for (int iw = 0; iw < nw; iw++)
   {
     REAL** mw_coefs        = reinterpret_cast<REAL**>(transfer_buffer_ptr);
     REAL* mw_DeltaRInv     = reinterpret_cast<REAL*>(transfer_buffer_ptr + sizeof(REAL*) * num_groups);
@@ -269,6 +271,8 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
     int* mw_max_index = reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
     int* accepted_indices = mw_max_index + num_groups;
     const int ip          = accepted_indices[iw];
+    if (ip < 0)
+      continue; // rejected walker, the branch is taken here rather than by the loop bound
 
     const REAL* dist_new   = mw_dist + ip * dist_stride;
     const REAL* dipl_x_new = dist_new + n_padded;
