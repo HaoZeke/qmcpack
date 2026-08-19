@@ -107,6 +107,46 @@ public:
     coords_leader.is_nw_new_pos_prepared = true;
   }
 
+  /** form the proposed positions on the device from device-resident drifts and displacements
+   *
+   *  mw_copyActivePos takes positions the host computed from its own copy of R and uploads
+   *  them, one transfer per electron. The coordinates are already resident in RSoA, so the
+   *  proposal can be formed where they are: new = R[iat] + drift + delta, read from device
+   *  memory and written to the device buffer the distance tables consume.
+   *
+   *  drifts and deltas are [nw][DIM] flat, matching what DriftModifierUNR::getDriftsDevice
+   *  writes. The host copy of the proposal is not produced here; a caller that needs it
+   *  keeps using mw_copyActivePos.
+   */
+  void mw_makeActivePosOnDevice(const RefVectorWithLeader<DynamicCoordinates>& coords_list,
+                                size_t iat,
+                                const RealType* drifts,
+                                const RealType* deltas) const
+  {
+    assert(this == &coords_list.getLeader());
+    auto& coords_leader = coords_list.getCastedLeader<RealSpacePositionsOMPTarget>();
+    auto& mw_mem        = coords_leader.mw_mem_handle_.getResource();
+    auto& mw_new_pos    = mw_mem.mw_new_pos;
+    auto& mw_rsoa_ptrs  = mw_mem.mw_rsoa_ptrs;
+    const auto nw       = coords_list.size();
+    mw_new_pos.resize(nw);
+
+    const int dim              = QMCTraits::DIM;
+    const size_t rsoa_stride   = RSoA.capacity();
+    const size_t mw_pos_stride = mw_new_pos.capacity();
+    auto* mw_pos_ptr           = mw_new_pos.data();
+    auto* mw_rosa_ptr          = mw_rsoa_ptrs.data();
+
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                    map(always, to: drifts[0:nw * dim], deltas[0:nw * dim])")
+    for (size_t iw = 0; iw < nw; iw++)
+      for (int id = 0; id < dim; id++)
+        mw_pos_ptr[iw + mw_pos_stride * id] =
+            mw_rosa_ptr[iw][iat + rsoa_stride * id] + drifts[iw * dim + id] + deltas[iw * dim + id];
+
+    coords_leader.is_nw_new_pos_prepared = true;
+  }
+
   void mw_acceptParticlePos(const RefVectorWithLeader<DynamicCoordinates>& coords_list,
                             size_t iat,
                             const std::vector<PosType>& new_positions,
