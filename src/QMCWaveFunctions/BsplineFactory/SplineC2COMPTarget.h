@@ -232,6 +232,22 @@ public:
                                               std::vector<ValueType>& ratios,
                                               std::vector<GradType>& grads) const override;
 
+  /** as above, reducing the ratio and gradients on the device as well
+   *
+   *  The kernel leaves per-team partials in rg_private and the host sums them; this does the
+   *  same sum in a target region so the values exist on the device. Only this entry point
+   *  pays for it, so callers of the form above are unaffected.
+   */
+  void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSet>& spo_list,
+                                            const RefVectorWithLeader<ParticleSet>& P_list,
+                                            int iat,
+                                            const std::vector<const ValueType*>& invRow_ptr_list,
+                                            OffloadMWVGLArray& phi_vgl_v,
+                                            std::vector<ValueType>& ratios,
+                                            std::vector<GradType>& grads,
+                                            OffloadValueVector& ratios_device,
+                                            OffloadValueVector& grads_device) const override;
+
   void assign_vgh(const PointType& r,
                   ValueVector& psi,
                   GradVector& dpsi,

@@ -26,6 +26,10 @@ struct SplineOMPTargetMultiWalkerMem : public Resource
   Matrix<TT, OffloadPinnedAllocator<TT>> mw_ratios_private;
   ///team private ratios and grads for reduction, numVP x numTeams
   Matrix<TT, OffloadPinnedAllocator<TT>> rg_private;
+  /// ratio and gradients reduced on the device, filled only by the device entry point so
+  /// callers that do not ask for them pay nothing: [nw] and [nw][3] flat
+  Vector<TT, OffloadPinnedAllocator<TT>> ratios_device;
+  Vector<TT, OffloadPinnedAllocator<TT>> grads_device;
   ///offload scratch space, dynamically resized to the maximal need
   Vector<ST, OffloadPinnedAllocator<ST>> mw_offload_scratch;
   ///result scratch space, dynamically resized to the maximal need
