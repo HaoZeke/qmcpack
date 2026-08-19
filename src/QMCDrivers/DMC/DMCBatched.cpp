@@ -121,6 +121,15 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   //This generates an entire steps worth of deltas.
   makeGaussRandomWithEngine(walker_deltas, step_context.get_random_gen());
 
+  // The acceptance variates for the whole step, drawn here for the same reason the
+  // displacements are: a device side acceptance test cannot call a host generator, and an
+  // array can be uploaded once instead. Drawn for every walker and particle rather than
+  // only where the earlier tests pass, so the count does not depend on the data.
+  Vector<RealType, OffloadPinnedAllocator<RealType>> accept_rands(num_walkers * num_particles);
+  for (size_t i = 0; i < accept_rands.size(); i++)
+    accept_rands[i] = step_context.get_random_gen()();
+  accept_rands.updateTo();
+
   std::vector<PsiValue> ratios(num_walkers, PsiValue(0.0));
   std::vector<RealType> log_gf(num_walkers, 0.0);
   std::vector<RealType> log_gb(num_walkers, 0.0);
@@ -227,7 +236,7 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         for (int iw = 0; iw < num_walkers; ++iw)
           if (are_valid[iw] && !rejects[iw] && prob[iw] >= std::numeric_limits<RealType>::epsilon() &&
-              step_context.get_random_gen()() < prob[iw])
+              accept_rands[iat * num_walkers + iw] < prob[iw])
           {
             crowd.incAccept();
             isAccepted.push_back(true);
