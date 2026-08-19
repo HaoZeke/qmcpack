@@ -55,6 +55,33 @@ public:
 
   bool parseXML(xmlNodePtr cur) final;
 
+  /** the drifts for one electron across the walkers, written to device memory
+   *
+   *  getDrift is virtual and cannot be called from a target region; the scaling it applies
+   *  is shared through driftScalingUNR so this computes the same values. grads is [nw][DIM]
+   *  flat as the SPOSet device entry point reports them, and drifts is written in the same
+   *  layout, so a device side move can read it without the host forming the drift.
+   */
+  template<typename VT>
+  void getDriftsDevice(RealType tau, size_t nw, int dim, const VT* grads, RealType* drifts) const
+  {
+    const RealType a = a_;
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                    map(always, to: grads[0:nw * dim]) map(always, from: drifts[0:nw * dim])")
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      RealType vsq(0);
+      for (int idim = 0; idim < dim; idim++)
+      {
+        const RealType g = std::real(grads[iw * dim + idim]);
+        vsq += g * g;
+      }
+      const RealType sc = driftScalingUNR(tau, a, vsq);
+      for (int idim = 0; idim < dim; idim++)
+        drifts[iw * dim + idim] = std::real(grads[iw * dim + idim]) * sc;
+    }
+  }
+
   DriftModifierUNR(RealType a = 1.0) : a_(a) {}
 
 private:
