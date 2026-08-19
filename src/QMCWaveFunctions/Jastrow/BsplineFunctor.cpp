@@ -214,7 +214,8 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
                                         const REAL* mw_dist, // [nw][DIM+1][n_padded]
                                         REAL* mw_allUat,     // [nw][DIM+2][n_padded]
                                         REAL* mw_cur_allu,   // [nw][3][n_padded]
-                                        Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer)
+                                        Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer,
+                                        const char* accept_mask)
 {
   constexpr unsigned DIM = OHMMS_DIM;
   static_assert(DIM == 3, "only support 3D due to explicit x,y,z coded.");
@@ -253,8 +254,11 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
   // count only the host can form. Filling the list with every walker and marking the
   // rejected ones with a negative index keeps the bound at nw, so the branch moves to the
   // device and the same kernel serves a device-formed decision.
-  for (int iw = 0; iw < nw; iw++)
-    accepted_indices[iw] = isAccepted[iw] ? iw : -1;
+  // Without a device mask the list is marked from the host decision; with one the kernel
+  // reads the mask and the host decision is not needed at all.
+  if (!accept_mask)
+    for (int iw = 0; iw < nw; iw++)
+      accepted_indices[iw] = isAccepted[iw] ? iw : -1;
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
@@ -262,7 +266,8 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(to: mw_vgl[:(DIM+2)*nw]) \
-                    map(always, from: mw_allUat[:nw * n_padded * (DIM + 2)])")
+                    map(always, from: mw_allUat[:nw * n_padded * (DIM + 2)]) \
+                    map(to: accept_mask[:accept_mask ? nw : 0])")
   for (int iw = 0; iw < nw; iw++)
   {
     REAL** mw_coefs        = reinterpret_cast<REAL**>(transfer_buffer_ptr);
@@ -270,7 +275,7 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
     REAL* mw_cutoff_radius = mw_DeltaRInv + num_groups;
     int* mw_max_index = reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
     int* accepted_indices = mw_max_index + num_groups;
-    const int ip          = accepted_indices[iw];
+    const int ip = accept_mask ? (accept_mask[iw] != 0 ? iw : -1) : accepted_indices[iw];
     if (ip < 0)
       continue; // rejected walker, the branch is taken here rather than by the loop bound
 
