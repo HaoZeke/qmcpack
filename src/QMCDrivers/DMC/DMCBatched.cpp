@@ -159,6 +159,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   // array can be uploaded once instead. Drawn for every walker and particle rather than
   // only where the earlier tests pass, so the count does not depend on the data.
   Vector<RealType, OffloadPinnedAllocator<RealType>> accept_rands(num_walkers * num_particles);
+  Vector<char, OffloadPinnedAllocator<char>> dev_valid, dev_accepted;
+  size_t device_accept_mismatches = 0;
   for (size_t i = 0; i < accept_rands.size(); i++)
     accept_rands[i] = step_context.get_random_gen()();
   accept_rands.updateTo();
@@ -265,6 +267,28 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         for (int iw = 0; iw < num_walkers; ++iw)
           prob[iw] = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
 
+        // Cross-check the device form against the host one before it replaces it: the kernel
+        // has to reproduce this decision exactly for every walker, and a disagreement is a
+        // bug in the kernel's arithmetic rather than something to average away.
+        if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_ACCEPT"); d && *d == '1')
+        {
+          dev_valid.resize(num_walkers);
+          dev_accepted.resize(num_walkers);
+          for (int iw = 0; iw < num_walkers; ++iw)
+            dev_valid[iw] = (are_valid[iw] && !rejects[iw]) ? 1 : 0;
+          dmcAcceptanceOnDevice<RealType, PsiValue>(num_walkers, ratios.data(), log_gf.data(), log_gb.data(),
+                                                    dev_valid.data(), accept_rands.data() + iat * num_walkers,
+                                                    dev_accepted.data());
+          for (int iw = 0; iw < num_walkers; ++iw)
+          {
+            const bool host_accept = are_valid[iw] && !rejects[iw] &&
+                prob[iw] >= std::numeric_limits<RealType>::epsilon() &&
+                accept_rands[iat * num_walkers + iw] < prob[iw];
+            if (host_accept != (dev_accepted[iw] != 0))
+              device_accept_mismatches++;
+          }
+        }
+
         isAccepted.clear();
 
         for (int iw = 0; iw < num_walkers; ++iw)
@@ -290,6 +314,10 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
     twf_dispatcher.flex_completeUpdates(walker_twfs);
     ps_dispatcher.flex_donePbyP(walker_elecs);
   }
+
+  if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_ACCEPT"); d && *d == '1')
+    std::cerr << "DEVACCEPT mismatches=" << device_accept_mismatches << " over " << num_particles << " electrons and "
+              << num_walkers << " walkers" << std::endl;
 
   { // collect GL for KE.
     ScopedTimer buffer_local(timers.buffer_timer);
