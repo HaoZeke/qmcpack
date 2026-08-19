@@ -376,7 +376,8 @@ struct BsplineFunctor : public OptimizableFunctorBase
                            const REAL* mw_dist, // [nw][DIM+1][n_padded]
                            REAL* mw_allUat,     // [nw][DIM+2][n_padded]
                            REAL* mw_cur_allu,   // [nw][3][n_padded]
-                           Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer);
+                           Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer,
+                            const char* accept_mask = nullptr);
 
   inline bool evaluateDerivatives(Real r, std::vector<TinyVector<Real, 3>>& derivs) override
   {
