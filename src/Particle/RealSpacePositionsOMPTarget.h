@@ -210,6 +210,44 @@ public:
     }
   }
 
+  /** accept or reject from a device-resident mask
+   *
+   *  The host form takes std::vector<bool> and marks the index list from it, which needs the
+   *  decision on the host. This reads the mask on the device instead, so a decision computed
+   *  there drives the position update without coming back.
+   *
+   *  The host mirror is not updated here: a caller on this path is not reading positions from
+   *  the host until the block boundary. Use the host form when it must stay in step.
+   */
+  void mw_acceptParticlePosFromDeviceMask(const RefVectorWithLeader<DynamicCoordinates>& coords_list,
+                                          size_t iat,
+                                          const char* accept_mask) const
+  {
+    assert(this == &coords_list.getLeader());
+    auto& coords_leader = coords_list.getCastedLeader<RealSpacePositionsOMPTarget>();
+    auto& mw_mem        = coords_leader.mw_mem_handle_.getResource();
+    auto& mw_new_pos    = mw_mem.mw_new_pos;
+    auto& mw_rsoa_ptrs  = mw_mem.mw_rsoa_ptrs;
+    const auto nw       = coords_list.size();
+
+    const int dim              = QMCTraits::DIM;
+    const size_t rsoa_stride   = RSoA.capacity();
+    const size_t mw_pos_stride = mw_new_pos.capacity();
+    auto* mw_pos_ptr           = mw_new_pos.data();
+    auto* mw_rosa_ptr          = mw_rsoa_ptrs.data();
+
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                    map(always, to: accept_mask[0:nw])")
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      if (accept_mask[iw] == 0)
+        continue;
+      RealType* RSoA_dev_ptr = mw_rosa_ptr[iw];
+      for (int id = 0; id < dim; id++)
+        RSoA_dev_ptr[iat + rsoa_stride * id] = mw_pos_ptr[iw + mw_pos_stride * id];
+    }
+  }
+
   const PosVectorSoa& getAllParticlePos() const override { return RSoA_hostview; }
   PosType getOneParticlePos(size_t iat) const override { return RSoA_hostview[iat]; }
 
