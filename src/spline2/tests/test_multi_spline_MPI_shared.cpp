@@ -495,9 +495,16 @@ struct test_shared_offload : public test_splines_base<T, 5>
 
     if (distributed_ranks > 1)
     {
+      const size_t alignment = getAlignment<T>();
+      REQUIRE(num_splines == alignment + 2);
+      REQUIRE(block_starts.size() == 3);
+      REQUIRE(block_starts[0] == 0);
+      REQUIRE(block_starts[1] == alignment);
+      REQUIRE(block_starts[2] == alignment + 2);
+      REQUIRE(bs.getBlock(0).z_stride == alignment);
+      REQUIRE(bs.getBlock(1).z_stride == alignment);
+      REQUIRE(bs.num_splines_padded() == 2 * alignment);
       const size_t boundary = block_starts[1];
-      REQUIRE(boundary > 0);
-      REQUIRE(boundary < num_splines);
       CHECK(v_host[boundary - 1] == Approx(v_host[0] * T(boundary)));
       CHECK(v_host[boundary] == Approx(v_host[0] * T(boundary + 1)));
     }
@@ -652,11 +659,12 @@ TEST_CASE("MultiBsplineMPIShared distributed offload float", "[spline2]")
 
 TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2][shared-offload]")
 {
+  const size_t two_block_splines = getAlignment<double>() + 2;
   test_shared_offload<double>().test(13, 1);
   test_shared_offload<double>().test(13, 2);
   // shared and distributed together: two blocks, each shared across two ranks
-  test_shared_offload<double>().test(13, 2, 2);
-  test_shared_offload<double>().test(13, 1, 2);
+  test_shared_offload<double>().test(two_block_splines, 2, 2);
+  test_shared_offload<double>().test(two_block_splines, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2][shared-offload]")
