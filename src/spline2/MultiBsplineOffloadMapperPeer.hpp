@@ -61,8 +61,17 @@ class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>
   Communicate& comm_;
   /// device allocation per block; block ib lives on the device of rank ib % size
   std::vector<void*> device_ptrs_;
+  /// whether every rank can open allocations from every owner in this node-local group
+  const bool use_peer_mapping_;
 
 public:
+  /** Return whether CUDA IPC can connect every rank's selected device.
+   *
+   * The check covers node locality, device visibility, and peer access. A false
+   * result selects the ordinary per-rank mapper.
+   */
+  static bool canShareDeviceMemory(Communicate& comm);
+
   MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm);
 
   ~MultiBsplineOffloadMapperPeer() override;

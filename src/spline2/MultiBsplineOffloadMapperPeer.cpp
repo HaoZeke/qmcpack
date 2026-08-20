@@ -14,6 +14,8 @@
 #include "config.h"
 
 #if defined(ENABLE_CUDA)
+#include <array>
+#include <cstring>
 #include "Platforms/CUDA/CUDAruntime.hpp"
 #include <omp.h>
 #endif
@@ -22,17 +24,91 @@ namespace qmcplusplus
 {
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
-    : Base(host_bsplines), comm_(comm)
+    : Base(host_bsplines), comm_(comm), use_peer_mapping_(comm.size() > 1 && canShareDeviceMemory(comm))
 {
-  // the coefficient mappings here come from omp_target_associate_ptr against memory
-  // this object may not own, so the base destructor must not try to delete them
-  Base::owns_coefs_mapping_ = false;
+  // IPC coefficient mappings refer to allocations owned by one rank in the group.
+  // The peer destructor closes or frees them; the base destructor owns fallback maps.
+  Base::owns_coefs_mapping_ = !use_peer_mapping_;
 }
 
 #if defined(ENABLE_CUDA)
 template<typename T>
+bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
+{
+  constexpr int bus_id_size = 64;
+
+  int current_device;
+  int device_count;
+  cudaErrorCheck(cudaGetDevice(&current_device), "cudaGetDevice failed in MultiBsplineOffloadMapperPeer!");
+  cudaErrorCheck(cudaGetDeviceCount(&device_count), "cudaGetDeviceCount failed in MultiBsplineOffloadMapperPeer!");
+
+  std::array<char, MPI_MAX_PROCESSOR_NAME> local_node{};
+  int local_node_length = 0;
+  MPI_Get_processor_name(local_node.data(), &local_node_length);
+
+  int local_access = 1;
+  for (int owner = 0; owner < comm.size(); ++owner)
+  {
+    std::array<char, MPI_MAX_PROCESSOR_NAME> owner_node{};
+    std::array<char, bus_id_size> owner_bus_id{};
+    if (comm.rank() == owner)
+    {
+      owner_node = local_node;
+      cudaErrorCheck(cudaDeviceGetPCIBusId(owner_bus_id.data(), owner_bus_id.size(), current_device),
+                     "cudaDeviceGetPCIBusId failed in MultiBsplineOffloadMapperPeer!");
+    }
+
+    MPI_Bcast(owner_node.data(), owner_node.size(), MPI_CHAR, owner, comm.getMPI());
+    MPI_Bcast(owner_bus_id.data(), owner_bus_id.size(), MPI_CHAR, owner, comm.getMPI());
+
+    if (std::strncmp(local_node.data(), owner_node.data(), local_node.size()) != 0)
+    {
+      local_access = 0;
+      continue;
+    }
+
+    int owner_device = -1;
+    for (int device = 0; device < device_count; ++device)
+    {
+      std::array<char, bus_id_size> visible_bus_id{};
+      cudaErrorCheck(cudaDeviceGetPCIBusId(visible_bus_id.data(), visible_bus_id.size(), device),
+                     "cudaDeviceGetPCIBusId failed in MultiBsplineOffloadMapperPeer!");
+      if (std::strncmp(owner_bus_id.data(), visible_bus_id.data(), owner_bus_id.size()) == 0)
+      {
+        owner_device = device;
+        break;
+      }
+    }
+
+    if (owner_device < 0)
+    {
+      local_access = 0;
+      continue;
+    }
+
+    if (owner_device != current_device)
+    {
+      int can_access = 0;
+      cudaErrorCheck(cudaDeviceCanAccessPeer(&can_access, current_device, owner_device),
+                     "cudaDeviceCanAccessPeer failed in MultiBsplineOffloadMapperPeer!");
+      local_access &= can_access;
+    }
+  }
+
+  int group_access = 0;
+  MPI_Allreduce(&local_access, &group_access, 1, MPI_INT, MPI_MIN, comm.getMPI());
+  return group_access != 0;
+}
+
+template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 {
+  if (!use_peer_mapping_)
+  {
+    Base::mapToDevice();
+    return;
+  }
+
   const int dev     = omp_get_default_device();
   const int nranks  = comm_.size();
   const int my_rank = comm_.rank();
@@ -81,8 +157,7 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
       const auto err = cudaIpcOpenMemHandle(&dptr, handle, cudaIpcMemLazyEnablePeerAccess);
       if (err != cudaSuccess)
         throw UniformCommunicateError(
-            std::string("MultiBsplineOffloadMapperPeer: cudaIpcOpenMemHandle failed with '") +
-            cudaGetErrorString(err) +
+            std::string("MultiBsplineOffloadMapperPeer: cudaIpcOpenMemHandle failed with '") + cudaGetErrorString(err) +
             "'. Every rank sharing the coefficients must be able to address every device in the "
             "group, so request all the devices on the node rather than binding one per task.");
     }
@@ -97,6 +172,12 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
 {
+  if (!use_peer_mapping_)
+  {
+    Base::updateToDevice();
+    return;
+  }
+
   // each block has one physical copy, so its owner writes it and the rest wait rather
   // than pushing identical bytes at memory they do not own
   const int nranks = comm_.size();
@@ -109,11 +190,26 @@ void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
                      "cudaMemcpy failed in MultiBsplineOffloadMapperPeer!");
     }
   comm_.barrier();
+
+  // Each rank owns its descriptor mapping. Store the IPC allocation address in that
+  // descriptor so production kernels can dereference spline_m->coefs directly.
+  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ++ib)
+  {
+    auto* spline_m     = &Base::host_bsplines_.getBlock(ib);
+    auto* device_coefs = static_cast<T*>(device_ptrs_[ib]);
+    if (!device_coefs)
+      continue;
+    PRAGMA_OFFLOAD("omp target is_device_ptr(device_coefs) map(always, to: spline_m[:1])")
+    { spline_m->coefs = device_coefs; }
+  }
 }
 
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
 {
+  if (!use_peer_mapping_)
+    return;
+
   const int dev = omp_get_default_device();
   for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
   {
@@ -134,16 +230,16 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
 #else // no device runtime that can share memory between processes
 
 template<typename T>
+bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
+{ return false; }
+
+template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
-{
-  Base::mapToDevice();
-}
+{ Base::mapToDevice(); }
 
 template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
-{
-  Base::updateToDevice();
-}
+{ Base::updateToDevice(); }
 
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer() = default;

@@ -97,16 +97,14 @@ public:
    * rather than a host one. The fixup is required because the offload kernels in
    * SplineC2COMPTarget dereference spline_m->coefs inside the target region.
    */
-  void finalize() override
-  {
-    for (size_t ib = 0; ib < Base::getNumBlocks(); ib++)
-    {
-      auto* spline_m = &Base::getBlock(ib);
-      auto* coefs    = spline_m->coefs;
-      PRAGMA_OFFLOAD("omp target map(always, to: spline_m[:1], coefs[:spline_m->coefs_size])")
-      { spline_m->coefs = coefs; }
-    }
-  }
+  void finalize() override { mapper_->updateToDevice(); }
+
+  /** Evaluate mapped spline values through the mapper owned by this object.
+   *
+   * This keeps construction, finalization, and evaluation on the same mapping.
+   */
+  void mw_evaluate_v(int num_pos, T* pos_arr, T* spline_v, size_t walker_stride)
+  { mapper_->mw_evaluate_v(num_pos, pos_arr, spline_v, walker_stride); }
 
   ~MultiBsplineMPISharedOffload() override = default;
 };

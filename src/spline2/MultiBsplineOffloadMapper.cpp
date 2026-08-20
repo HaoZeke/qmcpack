@@ -78,9 +78,8 @@ void MultiBsplineOffloadMapper<T>::mw_evaluate_v(int num_pos, T* pos_arr, T* spl
     const int NumTeams            = (num_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
     // Ye: need to extract sizes and pointers before entering target region
-    const auto* spline_ptr   = &host_block;
-    const auto* spline_coefs = block_coefs_[ib];
-    const auto block_offset  = block_offsets[ib];
+    const auto* spline_ptr  = &host_block;
+    const auto block_offset = block_offsets[ib];
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams * num_pos)")
     for (int iw = 0; iw < num_pos; iw++)
@@ -97,7 +96,7 @@ void MultiBsplineOffloadMapper<T>::mw_evaluate_v(int num_pos, T* pos_arr, T* spl
 
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
-          spline2offload::evaluate_v_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, first + index, a, b, c,
+          spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
                                              spline_v_iw + block_offset + first + index);
       }
   }
@@ -122,9 +121,8 @@ void MultiBsplineOffloadMapper<T>::mw_evaluate_vgh(int num_pos,
     const int NumTeams            = (num_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
     // Ye: need to extract sizes and pointers before entering target region
-    const auto* spline_ptr   = &host_block;
-    const auto* spline_coefs = block_coefs_[ib];
-    const auto block_offset  = block_offsets[ib];
+    const auto* spline_ptr  = &host_block;
+    const auto block_offset = block_offsets[ib];
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams * num_pos)")
     for (int iw = 0; iw < num_pos; iw++)
@@ -141,8 +139,8 @@ void MultiBsplineOffloadMapper<T>::mw_evaluate_vgh(int num_pos,
 
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, first + index, a, b, c, da, db, dc,
-                                               d2a, d2b, d2c, spline_vgh_iw + block_offset + first + index,
+          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
+                                               db, dc, d2a, d2b, d2c, spline_vgh_iw + block_offset + first + index,
                                                field_stride);
       }
   }
