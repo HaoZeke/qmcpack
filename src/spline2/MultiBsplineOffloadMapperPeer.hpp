@@ -32,6 +32,15 @@ bool localPeerTopologyAllowsSharing(const std::string& local_node,
                                     const std::vector<std::string>& owner_nodes,
                                     const std::vector<std::string>& owner_bus_ids,
                                     const std::vector<int>& owner_peer_access);
+
+struct CollectiveFailure
+{
+  bool any_failed;
+  int first_failed_rank;
+};
+
+/** Report the same failure decision and source rank to every communicator member. */
+CollectiveFailure collectiveFailure(Communicate& comm, bool local_failed);
 } // namespace detail
 
 /** Map ONE device copy of the coefficients and let every device in the group read it.

@@ -41,6 +41,15 @@ TEST_CASE("MultiBspline peer topology policy", "[spline2][shared-offload]")
       detail::localPeerTopologyAllowsSharing(local_node, local_gpu, owner_gpus, owner_nodes, owner_gpus, {1, 0}));
 }
 
+TEST_CASE("MultiBspline peer failures are collective", "[spline2][shared-offload][peer-collective]")
+{
+  auto& comm              = *OHMMS::Controller;
+  const auto failure      = detail::collectiveFailure(comm, comm.rank() == 1);
+  const bool has_rank_one = comm.size() > 1;
+  CHECK(failure.any_failed == has_rank_one);
+  CHECK(failure.first_failed_rank == (has_rank_one ? 1 : -1));
+}
+
 /** Supports testing many sizes of splines for benchmarking
  *  modified from einspline/tests/test_3d.cpp
  */
