@@ -494,9 +494,8 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
           spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, symGGt,
-                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
-                                               spline_padded_size * SoAFields3D::LAPL);
+                                               db, dc, d2a, d2b, d2c, symGGt, offload_scratch_iw_ptr + first + index,
+                                               spline_padded_size, spline_padded_size * SoAFields3D::LAPL);
       }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
@@ -513,9 +512,9 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
         const auto* restrict pos_iw_ptr       = reinterpret_cast<ST*>(buffer_H2D_ptr + buffer_H2D_stride * iw);
         const auto* restrict invRow_iw_ptr =
             *reinterpret_cast<ValueType**>(buffer_H2D_ptr + buffer_H2D_stride * iw + sizeof(ST) * 4);
-        const ST G[9]      = {prim_lattice_G_ptr[0], prim_lattice_G_ptr[1], prim_lattice_G_ptr[2],
-                              prim_lattice_G_ptr[3], prim_lattice_G_ptr[4], prim_lattice_G_ptr[5],
-                              prim_lattice_G_ptr[6], prim_lattice_G_ptr[7], prim_lattice_G_ptr[8]};
+        const ST G[9] = {prim_lattice_G_ptr[0], prim_lattice_G_ptr[1], prim_lattice_G_ptr[2],
+                         prim_lattice_G_ptr[3], prim_lattice_G_ptr[4], prim_lattice_G_ptr[5],
+                         prim_lattice_G_ptr[6], prim_lattice_G_ptr[7], prim_lattice_G_ptr[8]};
 
         const ST* restrict val = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::VAL;
         const ST* restrict g0  = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::GRAD0;
