@@ -67,11 +67,12 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
     distributed_ranks = 1;
 #endif
 #if !defined(HAVE_MPI)
-    if (shared_ranks > 1)
-      app_warning() << "Sharing the memory of spline coefficients requires an MPI build. "
-                       "Overriding shared_ranks to 1."
+    if (distributed_ranks > 1 || shared_ranks > 1)
+      app_warning() << "Distributing or sharing spline coefficients requires an MPI build. "
+                       "Overriding distributed_ranks and shared_ranks to 1."
                     << std::endl;
-    shared_ranks = 1;
+    distributed_ranks = 1;
+    shared_ranks      = 1;
 #endif
   }
 
