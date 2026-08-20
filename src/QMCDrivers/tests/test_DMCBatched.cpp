@@ -14,6 +14,7 @@
 #include "Message/Communicate.h"
 #include "QMCDrivers/DMC/DMCDriverInput.h"
 #include "QMCDrivers/DMC/DMCBatched.h"
+#include "QMCDrivers/DMC/DMCDeviceAcceptance.h"
 #include "QMCDrivers/tests/ValidQMCInputSections.h"
 #include "QMCDrivers/tests/SetupDMCTest.h"
 #include "EstimatorInputDelegates.h"
@@ -24,6 +25,47 @@
 
 namespace qmcplusplus
 {
+TEST_CASE("DMC device acceptance predicate", "[drivers][dmc]")
+{
+  using RealType = QMCTraits::RealType;
+  using PsiValue = QMCTraits::ValueType;
+
+  constexpr size_t num_walkers = 6;
+  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> ratios(num_walkers);
+  Vector<RealType, OffloadPinnedAllocator<RealType>> log_gf(num_walkers);
+  Vector<RealType, OffloadPinnedAllocator<RealType>> log_gb(num_walkers);
+  Vector<RealType, OffloadPinnedAllocator<RealType>> variates(num_walkers);
+  Vector<char, OffloadPinnedAllocator<char>> are_valid(num_walkers);
+  Vector<char, OffloadPinnedAllocator<char>> accepted(num_walkers);
+
+  const RealType epsilon = std::numeric_limits<RealType>::epsilon();
+  ratios    = {PsiValue(2), PsiValue(2), PsiValue(0), PsiValue(std::sqrt(epsilon / 2)), PsiValue(0.5), PsiValue(0.5)};
+  log_gf    = RealType(0);
+  log_gb    = RealType(0);
+  variates  = {RealType(0.5), RealType(0),    RealType(0),
+               RealType(0),   RealType(0.25), std::nextafter(RealType(0.25), RealType(0))};
+  are_valid = {1, 0, 1, 1, 1, 1};
+  accepted  = char(-1);
+
+  ratios.updateTo();
+  log_gf.updateTo();
+  log_gb.updateTo();
+  variates.updateTo();
+  are_valid.updateTo();
+  accepted.updateTo();
+
+  computeDMCDeviceAcceptance(num_walkers, ratios.device_data(), log_gf.device_data(), log_gb.device_data(),
+                             are_valid.device_data(), variates.device_data(), accepted.device_data());
+  accepted.updateFrom();
+
+  CHECK(accepted[0] == 1);
+  CHECK(accepted[1] == 0);
+  CHECK(accepted[2] == 0);
+  CHECK(accepted[3] == 0);
+  CHECK(accepted[4] == 0);
+  CHECK(accepted[5] == 1);
+}
+
 namespace testing
 {
 class DMCBatchedTest

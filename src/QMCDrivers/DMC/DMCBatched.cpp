@@ -12,8 +12,10 @@
 #include <functional>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 
 #include "DMCBatched.h"
+#include "DMCDeviceAcceptance.h"
 #include "QMCDrivers/GreenFunctionModifiers/DriftModifierBase.h"
 #include "Concurrency/ParallelExecutor.hpp"
 #include "Concurrency/Info.hpp"
@@ -138,6 +140,26 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   std::vector<RealType> rr_proposed(num_walkers, 0.0);
   std::vector<RealType> rr_accepted(num_walkers, 0.0);
 
+  const bool check_device_acceptance = [] {
+    const char* setting = std::getenv("QMCPACK_CHECK_DEVICE_ACCEPT");
+    return setting != nullptr && *setting == '1';
+  }();
+  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratios;
+  Vector<RealType, OffloadPinnedAllocator<RealType>> device_log_gf;
+  Vector<RealType, OffloadPinnedAllocator<RealType>> device_log_gb;
+  Vector<RealType, OffloadPinnedAllocator<RealType>> device_variates;
+  Vector<char, OffloadPinnedAllocator<char>> device_valid;
+  Vector<char, OffloadPinnedAllocator<char>> device_accepted;
+  if (check_device_acceptance)
+  {
+    device_ratios.resize(num_walkers);
+    device_log_gf.resize(num_walkers);
+    device_log_gb.resize(num_walkers);
+    device_variates.resize(num_walkers);
+    device_valid.resize(num_walkers);
+    device_accepted.resize(num_walkers);
+  }
+
   {
     ScopedTimer pbyp_local_timer(timers.movepbyp_timer);
     for (int ig = 0; ig < pset_leader.groups(); ++ig)
@@ -219,8 +241,13 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         isAccepted.clear();
 
         for (int iw = 0; iw < num_walkers; ++iw)
-          if (are_valid[iw] && !rejects[iw] && prob[iw] >= std::numeric_limits<RealType>::epsilon() &&
-              step_context.get_random_gen()() < prob[iw])
+        {
+          const bool eligible = are_valid[iw] && !rejects[iw] && prob[iw] >= std::numeric_limits<RealType>::epsilon();
+          const RealType variate = eligible ? step_context.get_random_gen()() : RealType(0);
+          if (check_device_acceptance)
+            device_variates[iw] = variate;
+
+          if (eligible && variate < prob[iw])
           {
             crowd.incAccept();
             isAccepted.push_back(true);
@@ -231,6 +258,32 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
             crowd.incReject();
             isAccepted.push_back(false);
           }
+        }
+
+        if (check_device_acceptance)
+        {
+          for (int iw = 0; iw < num_walkers; ++iw)
+          {
+            device_ratios[iw] = ratios[iw];
+            device_log_gf[iw] = log_gf[iw];
+            device_log_gb[iw] = log_gb[iw];
+            device_valid[iw]  = are_valid[iw] && !rejects[iw] ? 1 : 0;
+          }
+          device_ratios.updateTo();
+          device_log_gf.updateTo();
+          device_log_gb.updateTo();
+          device_variates.updateTo();
+          device_valid.updateTo();
+
+          computeDMCDeviceAcceptance(num_walkers, device_ratios.device_data(), device_log_gf.device_data(),
+                                     device_log_gb.device_data(), device_valid.device_data(),
+                                     device_variates.device_data(), device_accepted.device_data());
+          device_accepted.updateFrom();
+
+          for (int iw = 0; iw < num_walkers; ++iw)
+            if (isAccepted[iw] != (device_accepted[iw] != 0))
+              throw std::runtime_error("DMC device acceptance disagrees with the host predicate");
+        }
 
         twf_dispatcher.flex_accept_rejectMove(walker_twfs, walker_elecs, iat, isAccepted, true);
 
