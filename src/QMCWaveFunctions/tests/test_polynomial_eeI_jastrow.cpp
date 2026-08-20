@@ -42,6 +42,25 @@ TEST_CASE("PolynomialFunctor3D functor zero", "[wavefunction]")
   REQUIRE(u == 0.0);
 }
 
+TEST_CASE("JeeI functor pack uses ion-group extent", "[wavefunction]")
+{
+  PolynomialFunctor3D functor("test_functor");
+  functor.cutoff_radius = 4.0;
+  functor.resize(2, 2);
+  functor.Parameters = {0.001, -0.002, 0.003, -0.004, 0.005, -0.006, 0.007, -0.008};
+  functor.reset_gamma();
+
+  Array<PolynomialFunctor3D*, 3> functors;
+  functors.resize(2, 1, 1);
+  functors          = nullptr;
+  functors(0, 0, 0) = &functor;
+
+  JeeIMultiWalkerMem<RealType> mem;
+  mem.packFunctors(functors, 1, 2);
+
+  CHECK(mem.fn_have.size() == 2);
+}
+
 void create_J3_ion_reference_values(TinyVector<ParticleSet::ParticleGradient, 3>& igr_egrad,
                                     TinyVector<ParticleSet::ParticleLaplacian, 3>& igr_lapl,
                                     int ionid)
