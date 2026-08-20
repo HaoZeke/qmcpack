@@ -836,7 +836,6 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
   ResourceCollectionTeamLock<ParticleSet> pset_lock(pset_res, p_list);
   ResourceCollection nl_ecp_res("test_nl_ecp_res");
   nl_ecp.createResource(nl_ecp_res);
-  ResourceCollectionTeamLock<OperatorBase> nl_ecp_lock(nl_ecp_res, o_list);
 
   ParticleSet::mw_update(p_list);
 
@@ -855,17 +854,30 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
   REQUIRE(host_pairs[0].size() == 11);
   REQUIRE(host_pairs[1].size() == 10);
 
-  REQUIRE(testing::TestNonLocalECPotential::buildNeighborJobsOnDevice(o_list, p_list, 0));
-  for (size_t iw = 0; iw < o_list.size(); ++iw)
-  {
-    const auto& jobs =
-        testing::TestNonLocalECPotential::getNeighborJobs(o_list.getCastedElement<NonLocalECPotential>(iw), 0);
-    REQUIRE(jobs.size() == host_pairs[iw].size());
-    for (size_t job_id = 0; job_id < jobs.size(); ++job_id)
+  const auto check_device_jobs = [&]() {
+    REQUIRE(testing::TestNonLocalECPotential::buildNeighborJobsOnDevice(o_list, p_list, 0));
+    for (size_t iw = 0; iw < o_list.size(); ++iw)
     {
-      CHECK(jobs[job_id].ion_id == host_pairs[iw][job_id].first);
-      CHECK(jobs[job_id].electron_id == host_pairs[iw][job_id].second);
+      const auto& jobs =
+          testing::TestNonLocalECPotential::getNeighborJobs(o_list.getCastedElement<NonLocalECPotential>(iw), 0);
+      REQUIRE(jobs.size() == host_pairs[iw].size());
+      for (size_t job_id = 0; job_id < jobs.size(); ++job_id)
+      {
+        CHECK(jobs[job_id].ion_id == host_pairs[iw][job_id].first);
+        CHECK(jobs[job_id].electron_id == host_pairs[iw][job_id].second);
+      }
     }
+  };
+
+  {
+    ResourceCollectionTeamLock<OperatorBase> nl_ecp_lock(nl_ecp_res, o_list);
+    check_device_jobs();
+  }
+
+  ResourceCollection copied_nl_ecp_res(nl_ecp_res);
+  {
+    ResourceCollectionTeamLock<OperatorBase> copied_nl_ecp_lock(copied_nl_ecp_res, o_list);
+    check_device_jobs();
   }
 }
 #endif
