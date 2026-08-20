@@ -108,14 +108,29 @@ public:
     }
   }
 
-  /** Publish local stores and acquire stores made by every rank in the shared window. */
+  /** Collectively publish local stores and acquire stores made by every sharing rank.
+   *
+   * Every rank in the sharing communicator must call this method.
+   */
   void finalize() override
   {
-    if (MPI_Win_sync(win) != MPI_SUCCESS)
-      throw UniformCommunicateError("MultiBsplineMPIShared::finalize writer MPI_Win_sync failed!");
+    const int local_writer_failure = MPI_Win_sync(win) != MPI_SUCCESS;
+    int group_writer_failure       = 0;
+    if (MPI_Allreduce(&local_writer_failure, &group_writer_failure, 1, MPI_INT, MPI_MAX, comm_->getMPI()) !=
+        MPI_SUCCESS)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize writer failure reduction failed!");
+    if (group_writer_failure != 0)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize writer MPI_Win_sync failed on a sharing rank!");
+
     comm_->barrier();
-    if (MPI_Win_sync(win) != MPI_SUCCESS)
-      throw UniformCommunicateError("MultiBsplineMPIShared::finalize reader MPI_Win_sync failed!");
+
+    const int local_reader_failure = MPI_Win_sync(win) != MPI_SUCCESS;
+    int group_reader_failure       = 0;
+    if (MPI_Allreduce(&local_reader_failure, &group_reader_failure, 1, MPI_INT, MPI_MAX, comm_->getMPI()) !=
+        MPI_SUCCESS)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize reader failure reduction failed!");
+    if (group_reader_failure != 0)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize reader MPI_Win_sync failed on a sharing rank!");
   }
 
   ~MultiBsplineMPIShared() override;
