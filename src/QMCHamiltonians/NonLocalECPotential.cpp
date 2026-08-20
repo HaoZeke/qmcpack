@@ -54,11 +54,11 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
    * runs on the device and only the survivors come back.
    */
   Vector<Real, OffloadPinnedAllocator<Real>> rmax_per_ion;
-  Vector<int, OffloadPinnedAllocator<int>> job_counts;    // [nw]
-  Vector<int, OffloadPinnedAllocator<int>> job_ion;       // [nw][job_stride]
+  Vector<int, OffloadPinnedAllocator<int>> job_counts; // [nw]
+  Vector<int, OffloadPinnedAllocator<int>> job_ion;    // [nw][job_stride]
   Vector<int, OffloadPinnedAllocator<int>> job_elec;
   Vector<Real, OffloadPinnedAllocator<Real>> job_dist;
-  Vector<Real, OffloadPinnedAllocator<Real>> job_displ;   // 3 per job
+  Vector<Real, OffloadPinnedAllocator<Real>> job_displ; // 3 per job
   /// a crowds worth of per particle nonlocal ecp potential values
   Matrix<Real> ve_samples;
   Matrix<Real> vi_samples;
