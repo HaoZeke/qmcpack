@@ -74,32 +74,38 @@ bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
 {
   constexpr int bus_id_size = 64;
 
-  int current_device;
-  int device_count;
-  cudaErrorCheck(cudaGetDevice(&current_device), "cudaGetDevice failed in MultiBsplineOffloadMapperPeer!");
-  cudaErrorCheck(cudaGetDeviceCount(&device_count), "cudaGetDeviceCount failed in MultiBsplineOffloadMapperPeer!");
+  int current_device      = -1;
+  int device_count        = 0;
+  bool local_query_failed = cudaGetDevice(&current_device) != cudaSuccess;
+  local_query_failed |= cudaGetDeviceCount(&device_count) != cudaSuccess;
 
   std::array<char, MPI_MAX_PROCESSOR_NAME> local_node{};
   int local_node_length = 0;
-  MPI_Get_processor_name(local_node.data(), &local_node_length);
+  local_query_failed |= MPI_Get_processor_name(local_node.data(), &local_node_length) != MPI_SUCCESS;
 
   std::array<char, bus_id_size> selected_bus_id_buffer{};
-  cudaErrorCheck(cudaDeviceGetPCIBusId(selected_bus_id_buffer.data(), selected_bus_id_buffer.size(), current_device),
-                 "cudaDeviceGetPCIBusId failed in MultiBsplineOffloadMapperPeer!");
+  if (!local_query_failed)
+    local_query_failed |= cudaDeviceGetPCIBusId(selected_bus_id_buffer.data(), selected_bus_id_buffer.size(),
+                                                current_device) != cudaSuccess;
   const std::string selected_bus_id(selected_bus_id_buffer.data());
 
   std::vector<std::string> visible_bus_ids;
   visible_bus_ids.reserve(device_count);
-  for (int device = 0; device < device_count; ++device)
+  for (int device = 0; device < device_count && !local_query_failed; ++device)
   {
     std::array<char, bus_id_size> visible_bus_id{};
-    cudaErrorCheck(cudaDeviceGetPCIBusId(visible_bus_id.data(), visible_bus_id.size(), device),
-                   "cudaDeviceGetPCIBusId failed in MultiBsplineOffloadMapperPeer!");
-    visible_bus_ids.emplace_back(visible_bus_id.data());
+    if (cudaDeviceGetPCIBusId(visible_bus_id.data(), visible_bus_id.size(), device) != cudaSuccess)
+      local_query_failed = true;
+    else
+      visible_bus_ids.emplace_back(visible_bus_id.data());
   }
+
+  if (detail::collectiveFailure(comm, local_query_failed).any_failed)
+    return false;
 
   std::vector<std::string> owner_nodes(comm.size());
   std::vector<std::string> owner_bus_ids(comm.size());
+  bool local_broadcast_failed = false;
   for (int owner = 0; owner < comm.size(); ++owner)
   {
     std::array<char, MPI_MAX_PROCESSOR_NAME> owner_node{};
@@ -110,14 +116,20 @@ bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
       owner_bus_id = selected_bus_id_buffer;
     }
 
-    MPI_Bcast(owner_node.data(), owner_node.size(), MPI_CHAR, owner, comm.getMPI());
-    MPI_Bcast(owner_bus_id.data(), owner_bus_id.size(), MPI_CHAR, owner, comm.getMPI());
+    local_broadcast_failed |=
+        MPI_Bcast(owner_node.data(), owner_node.size(), MPI_CHAR, owner, comm.getMPI()) != MPI_SUCCESS;
+    local_broadcast_failed |=
+        MPI_Bcast(owner_bus_id.data(), owner_bus_id.size(), MPI_CHAR, owner, comm.getMPI()) != MPI_SUCCESS;
     owner_nodes[owner]   = owner_node.data();
     owner_bus_ids[owner] = owner_bus_id.data();
   }
 
+  if (detail::collectiveFailure(comm, local_broadcast_failed).any_failed)
+    return false;
+
   std::vector<int> owner_peer_access(comm.size(), 0);
   const std::string local_node_name(local_node.data(), local_node_length);
+  bool local_peer_query_failed = false;
   for (int owner = 0; owner < comm.size(); ++owner)
   {
     if (owner_nodes[owner] != local_node_name)
@@ -129,16 +141,20 @@ bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
 
     const int owner_device = static_cast<int>(std::distance(visible_bus_ids.begin(), visible));
     if (owner_device != current_device)
-      cudaErrorCheck(cudaDeviceCanAccessPeer(&owner_peer_access[owner], current_device, owner_device),
-                     "cudaDeviceCanAccessPeer failed in MultiBsplineOffloadMapperPeer!");
+      local_peer_query_failed |=
+          cudaDeviceCanAccessPeer(&owner_peer_access[owner], current_device, owner_device) != cudaSuccess;
     else
       owner_peer_access[owner] = 1;
   }
 
+  if (detail::collectiveFailure(comm, local_peer_query_failed).any_failed)
+    return false;
+
   const int local_access = detail::localPeerTopologyAllowsSharing(local_node_name, selected_bus_id, visible_bus_ids,
                                                                   owner_nodes, owner_bus_ids, owner_peer_access);
   int group_access       = 0;
-  MPI_Allreduce(&local_access, &group_access, 1, MPI_INT, MPI_MIN, comm.getMPI());
+  if (MPI_Allreduce(&local_access, &group_access, 1, MPI_INT, MPI_MIN, comm.getMPI()) != MPI_SUCCESS)
+    throw UniformCommunicateError("MultiBsplineOffloadMapperPeer topology reduction failed!");
   return group_access != 0;
 }
 
