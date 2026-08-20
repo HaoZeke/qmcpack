@@ -137,6 +137,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
   std::vector<RealType> rr_proposed(num_walkers, 0.0);
   std::vector<RealType> rr_accepted(num_walkers, 0.0);
+  // One displacement measure per walker, with stable capacity across the particle sweep.
+  std::vector<RealType> rr(num_walkers, 0.0);
 
   {
     ScopedTimer pbyp_local_timer(timers.movepbyp_timer);
@@ -163,7 +165,6 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         // only DMC does this
         // TODO: rr needs a real name
-        std::vector<RealType> rr(num_walkers, 0.0);
         assert(rr.size() == deltas.positions.size());
         std::transform(deltas.positions.begin(), deltas.positions.end(), rr.begin(),
                        [t = taus.tauovermass](auto& delta_r) { return t * dot(delta_r, delta_r); });
@@ -491,8 +492,8 @@ void DMCBatched::run()
           ? qmcdriver_input_.get_recalculate_properties_period()
           : (qmcdriver_input_.get_max_blocks() + 1) * steps_per_block_;
       dmc_state.is_recomputing_block          = qmcdriver_input_.get_blocks_between_recompute()
-                   ? (1 + block) % qmcdriver_input_.get_blocks_between_recompute() == 0
-                   : false;
+          ? (1 + block) % qmcdriver_input_.get_blocks_between_recompute() == 0
+          : false;
 
       for (UPtr<Crowd>& crowd : crowds_)
         crowd->startBlock(steps_per_block_);
