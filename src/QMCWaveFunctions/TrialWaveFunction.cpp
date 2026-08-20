@@ -750,21 +750,33 @@ void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWa
   const size_t nw = wf_list.size();
   ratios.resize(nw);
   grads.resize(nw);
-  auto* ratios_ptr = ratios.device_data();
-  auto* grads_ptr  = grads.device_data();
-
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(ratios_ptr, grads_ptr)")
-  for (size_t iw = 0; iw < nw; ++iw)
-  {
-    ratios_ptr[iw] = PsiValue(1);
-    grads_ptr[iw]  = GradType(0);
-  }
-
   auto& wf_leader = wf_list.getLeader();
   ScopedTimer local_timer(wf_leader.TWF_timers_[VGL_TIMER]);
+
+  if (wf_leader.Z.empty())
+  {
+    auto* ratios_ptr = ratios.device_data();
+    auto* grads_ptr  = grads.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(ratios_ptr, grads_ptr)")
+    for (size_t iw = 0; iw < nw; ++iw)
+    {
+      ratios_ptr[iw] = PsiValue(1);
+      grads_ptr[iw]  = GradType(0);
+    }
+    return;
+  }
+
+  {
+    ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER]);
+    const auto wfc_list(wf_leader.extractWFCRefList(wf_list, 0));
+    wf_leader.Z[0]->mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grads);
+  }
+
+  auto* ratios_ptr = ratios.device_data();
+  auto* grads_ptr  = grads.device_data();
   OffloadRatioVector component_ratios;
   OffloadGradVector component_grads;
-  for (int i = 0; i < wf_leader.Z.size(); ++i)
+  for (int i = 1; i < wf_leader.Z.size(); ++i)
   {
     ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER + TIMER_SKIP * i]);
     const auto wfc_list(wf_leader.extractWFCRefList(wf_list, i));
