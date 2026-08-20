@@ -386,17 +386,14 @@ public:
     // the batched ratio path reads the virtual-particle tables through
     // getMultiWalkerDataPtr, which only the offload tables provide
     const char* off = std::getenv("QMCPACK_DISABLE_J3_OFFLOAD");
-    use_offload_    = elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD &&
-        !(off && *off == '1');
+    use_offload_ = elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD && !(off && *off == '1');
     init(elecs);
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
 
   void createResource(ResourceCollection& collection) const override
-  {
-    collection.addResource(std::make_unique<JeeIMultiWalkerMem<valT>>());
-  }
+  { collection.addResource(std::make_unique<JeeIMultiWalkerMem<valT>>()); }
 
   void acquireResource(ResourceCollection& collection,
                        const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override
@@ -682,8 +679,8 @@ public:
     const size_t nVPs       = mw_refPctls.size();
     const int nw            = wfc_list.size();
 
-    const auto& dt_ei = vp_leader.getDistTableAB(wfc_leader.ei_Table_ID_);
-    const auto& dt_ee = vp_leader.getDistTableAB(wfc_leader.ee_Table_ID_);
+    const auto& dt_ei     = vp_leader.getDistTableAB(wfc_leader.ei_Table_ID_);
+    const auto& dt_ee     = vp_leader.getDistTableAB(wfc_leader.ee_Table_ID_);
     const RealType* mw_ei = nullptr;
     const RealType* mw_ee = nullptr;
     try
@@ -1027,7 +1024,7 @@ public:
         ions_nearby.push_back(iat);
 
     size_t tally_triplets = 0;
-    valT Uj = valT(0);
+    valT Uj               = valT(0);
     for (int kg = 0; kg < eGroups; ++kg)
     {
       int kel_counter = 0;
