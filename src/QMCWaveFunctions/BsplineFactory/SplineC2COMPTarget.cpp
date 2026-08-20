@@ -552,16 +552,9 @@ void SplineC2COMPTarget<ST>::evaluateVGL(const ParticleSet& P,
         for (int index = 0; index < last - first; index++)
         {
           const size_t output_index = block_offset + first + index;
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_ptr + output_index,
-                                               spline_padded_size);
-          offload_scratch_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-              SymTrace(offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                       offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                       offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                       offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                       offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                       offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+          spline2offload::evaluate_vgl_impl_v2(
+              spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt,
+              offload_scratch_ptr + output_index, spline_padded_size, spline_padded_size * SoAFields3D::LAPL);
         }
       }
     }
@@ -666,16 +659,10 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
           {
             // the coefficient index is local to the block; the output index is global
             const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
-                                                 spline_padded_size);
-            offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-                SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+            spline2offload::evaluate_vgl_impl_v2(
+                spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt,
+                offload_scratch_iw_ptr + output_index, spline_padded_size,
+                spline_padded_size * SoAFields3D::LAPL);
           }
         }
     }
@@ -888,16 +875,10 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
             {
               // coefficients are indexed within the block, results at the global offset
               const size_t output_index = block_offset + first + index;
-              spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                                   da, db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
-                                                   spline_padded_size);
-              offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-                  SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+              spline2offload::evaluate_vgl_impl_v2(
+                  spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt,
+                  offload_scratch_iw_ptr + output_index, spline_padded_size,
+                  spline_padded_size * SoAFields3D::LAPL);
             }
           }
         }

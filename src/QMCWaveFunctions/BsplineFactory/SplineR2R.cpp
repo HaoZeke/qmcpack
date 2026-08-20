@@ -488,14 +488,15 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
         ST a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
         spline2::computeLocationAndFractional(spline_ptr, pos_iw_ptr[1], pos_iw_ptr[2], pos_iw_ptr[3], ix, iy, iz, a, b,
                                               c, da, db, dc, d2a, d2b, d2c);
+        const ST symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
+                              GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
 
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
-        {
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + first + index,
-                                               spline_padded_size);
-        }
+          spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
+                                               db, dc, d2a, d2b, d2c, symGGt,
+                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
+                                               spline_padded_size * SoAFields3D::LAPL);
       }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
@@ -515,19 +516,11 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
         const ST G[9]      = {prim_lattice_G_ptr[0], prim_lattice_G_ptr[1], prim_lattice_G_ptr[2],
                               prim_lattice_G_ptr[3], prim_lattice_G_ptr[4], prim_lattice_G_ptr[5],
                               prim_lattice_G_ptr[6], prim_lattice_G_ptr[7], prim_lattice_G_ptr[8]};
-        const ST symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
-                              GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
 
         const ST* restrict val = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::VAL;
         const ST* restrict g0  = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::GRAD0;
         const ST* restrict g1  = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::GRAD1;
         const ST* restrict g2  = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::GRAD2;
-        const ST* restrict h00 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS00;
-        const ST* restrict h01 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS01;
-        const ST* restrict h02 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS02;
-        const ST* restrict h11 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS11;
-        const ST* restrict h12 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS12;
-        const ST* restrict h22 = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::HESS22;
 
         ST* restrict lcart = offload_scratch_iw_ptr + spline_padded_size * SoAFields3D::LAPL;
 
@@ -541,8 +534,6 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
         PRAGMA_OFFLOAD("omp parallel for reduction(+: ratio, grad_x, grad_y, grad_z)")
         for (int index = first; index < reduce_last; index++)
         {
-          lcart[index] = SymTrace(h00[index], h01[index], h02[index], h11[index], h12[index], h22[index], symGGt);
-
           out_phi[index]    = pos_iw_ptr[0] * val[index];
           out_dphi_x[index] = pos_iw_ptr[0] * (G[0] * g0[index] + G[1] * g1[index] + G[2] * g2[index]);
           out_dphi_y[index] = pos_iw_ptr[0] * (G[3] * g0[index] + G[4] * g1[index] + G[5] * g2[index]);
