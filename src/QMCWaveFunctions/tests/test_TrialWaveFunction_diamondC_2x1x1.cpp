@@ -241,6 +241,9 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
   TrialWaveFunction psi(runtime_options);
   psi.addComponent(std::move(slater_det));
 
+  if (offload_switches.spo && offload_switches.jas && std::is_same_v<SPO_precision, float_tag>)
+    checkResidentProposalState(psi, elec_);
+
   const char* jas_input = R"XML(<tmp>
 <jastrow name="J2" type="Two-Body" function="Bspline" print="yes" gpu="no">
    <correlation size="10" speciesA="u" speciesB="u">
@@ -302,9 +305,6 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
 #else
   CHECK(logpsi_clone == Approx(-5.932711221043984));
 #endif
-
-  if (offload_switches.spo && offload_switches.jas && std::is_same_v<SPO_precision, float_tag>)
-    checkResidentProposalState(*psi_clone, elec_clone);
 
   const int moved_elec_id = 0;
 
