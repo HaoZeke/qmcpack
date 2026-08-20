@@ -510,7 +510,7 @@ void SplineC2ROMPTarget<ST>::evaluateVGL(const ParticleSet& P,
 
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<TT>(OrbitalSetSize);
-  // for V(1)G(3)H(6) intermediate result
+  // SoAFields3D layout stores V/G/L for phase application.
   offload_scratch.resize(spline_padded_size * SoAFields3D::NUM_FIELDS);
   // for V(1)G(3)L(1) final result
   results_scratch.resize(sposet_padded_size * 5);
@@ -552,17 +552,9 @@ void SplineC2ROMPTarget<ST>::evaluateVGL(const ParticleSet& P,
       PRAGMA_OFFLOAD("omp parallel for")
       for (int index = 0; index < last - first; index++)
       {
-        spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da, db,
-                                             dc, d2a, d2b, d2c, offload_scratch_ptr + first + index,
-                                             spline_padded_size);
-        const int output_index = first + index;
-        offload_scratch_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-            SymTrace(offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                     offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                     offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                     offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                     offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                     offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+        spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da, db,
+                                             dc, d2a, d2b, d2c, symGGt, offload_scratch_ptr + first + index,
+                                             spline_padded_size, spline_padded_size * SoAFields3D::LAPL);
       }
       const size_t first_cplx = first / 2;
       const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
@@ -596,7 +588,7 @@ void SplineC2ROMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<TT>(OrbitalSetSize);
-  // for V(1)G(3)H(6) intermediate result
+  // SoAFields3D layout stores V/G/L for phase application.
   offload_scratch.resize(spline_padded_size * num_pos * SoAFields3D::NUM_FIELDS);
   // for V(1)G(3)L(1) final result
   results_scratch.resize(sposet_padded_size * num_pos * 5);
@@ -643,17 +635,10 @@ void SplineC2ROMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
         {
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + first + index,
-                                               spline_padded_size);
-          const int output_index = first + index;
-          offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-              SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+          spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
+                                               db, dc, d2a, d2b, d2c, symGGt,
+                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
+                                               spline_padded_size * SoAFields3D::LAPL);
         }
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
@@ -814,17 +799,10 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         PRAGMA_OFFLOAD("omp parallel for")
         for (int index = 0; index < last - first; index++)
         {
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + first + index,
-                                               spline_padded_size);
-          const int output_index = first + index;
-          offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-              SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                       offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+          spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
+                                               db, dc, d2a, d2b, d2c, symGGt,
+                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
+                                               spline_padded_size * SoAFields3D::LAPL);
         }
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
