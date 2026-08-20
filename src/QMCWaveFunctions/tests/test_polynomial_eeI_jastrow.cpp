@@ -162,6 +162,11 @@ TEST_CASE("JeeI functor pack clears empty schema", "[wavefunction]")
   CHECK(mem.N_ee[0] == 0);
   CHECK(mem.C[0] == 0);
   CHECK(mem.L[0] == Approx(0.0));
+
+  const auto* fn_have_dev = mem.fn_have.device_data();
+  int device_have         = -1;
+  PRAGMA_OFFLOAD("omp target map(from: device_have) is_device_ptr(fn_have_dev)") { device_have = fn_have_dev[0]; }
+  CHECK(device_have == 0);
 }
 
 void create_J3_ion_reference_values(TinyVector<ParticleSet::ParticleGradient, 3>& igr_egrad,
