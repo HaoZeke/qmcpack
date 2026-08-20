@@ -50,6 +50,15 @@ TEST_CASE("MultiBspline peer failures are collective", "[spline2][shared-offload
   CHECK(failure.first_failed_rank == (has_rank_one ? 1 : -1));
 }
 
+TEST_CASE("MultiBspline peer uploads require a payload", "[spline2][shared-offload]")
+{
+  const int payload = 0;
+  CHECK_FALSE(detail::peerBlockNeedsUpload(nullptr, 0));
+  CHECK_FALSE(detail::peerBlockNeedsUpload(&payload, 0));
+  CHECK_FALSE(detail::peerBlockNeedsUpload(nullptr, sizeof(payload)));
+  CHECK(detail::peerBlockNeedsUpload(&payload, sizeof(payload)));
+}
+
 /** Supports testing many sizes of splines for benchmarking
  *  modified from einspline/tests/test_3d.cpp
  */
