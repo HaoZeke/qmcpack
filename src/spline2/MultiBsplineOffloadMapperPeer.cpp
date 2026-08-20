@@ -17,6 +17,7 @@
 #include <array>
 #include <cstring>
 #include "Platforms/CUDA/CUDAruntime.hpp"
+#include "Platforms/Host/OutputManager.h"
 #include <omp.h>
 #endif
 
@@ -29,6 +30,11 @@ MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBsplin
   // IPC coefficient mappings refer to allocations owned by one rank in the group.
   // The peer destructor closes or frees them; the base destructor owns fallback maps.
   Base::owns_coefs_mapping_ = !use_peer_mapping_;
+#if defined(ENABLE_CUDA)
+  if (comm_.size() > 1 && !use_peer_mapping_ && comm_.rank() == 0)
+    app_warning() << "Device coefficient sharing requires one node and mutual peer access to every selected device. "
+                     "Using one device mapping per rank.\n";
+#endif
 }
 
 #if defined(ENABLE_CUDA)
@@ -218,13 +224,17 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
     if (device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
     {
       omp_target_disassociate_ptr(coefs, dev);
-      if (comm_.rank() == ib % comm_.size())
-        cudaFree(device_ptrs_[ib]);
-      else
+      if (comm_.rank() != ib % comm_.size())
         cudaIpcCloseMemHandle(device_ptrs_[ib]);
     }
     PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1])")
   }
+
+  // Importing ranks close every handle before an owner releases its allocation.
+  comm_.barrier();
+  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ++ib)
+    if (comm_.rank() == ib % comm_.size() && device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
+      cudaFree(device_ptrs_[ib]);
 }
 
 #else // no device runtime that can share memory between processes
