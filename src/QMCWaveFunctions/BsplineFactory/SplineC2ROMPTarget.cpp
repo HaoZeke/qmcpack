@@ -701,13 +701,11 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGL(const RefVectorWithLeader<SPOSet>& s
 }
 
 template<typename ST>
-void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPOSet>& spo_list,
-                                                            const RefVectorWithLeader<ParticleSet>& P_list,
-                                                            int iat,
-                                                            const std::vector<const ValueType*>& invRow_ptr_list,
-                                                            OffloadMWVGLArray& phi_vgl_v,
-                                                            std::vector<ValueType>& ratios,
-                                                            std::vector<GradType>& grads) const
+void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGradsKernel(const RefVectorWithLeader<SPOSet>& spo_list,
+                                                                  const RefVectorWithLeader<ParticleSet>& P_list,
+                                                                  int iat,
+                                                                  const std::vector<const ValueType*>& invRow_ptr_list,
+                                                                  OffloadMWVGLArray& phi_vgl_v) const
 {
   assert(this == &spo_list.getLeader());
   auto& phi_leader         = spo_list.getCastedLeader<SplineC2ROMPTarget<ST>>();
@@ -760,7 +758,7 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
   auto* prim_lattice_G_ptr         = prim_lattice_G_offload->data();
   auto* myKcart_ptr                = myKcart->data();
   auto* phi_vgl_ptr                = phi_vgl_v.data();
-  auto* rg_private_ptr             = rg_private.data();
+  auto* rg_private_ptr             = rg_private.device_data();
   const size_t buffer_H2D_stride   = buffer_H2D.cols();
   const auto requested_orb_size    = phi_vgl_v.size(2);
   const size_t phi_vgl_stride      = num_pos * requested_orb_size;
@@ -771,7 +769,7 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
     ScopedTimer offload(offload_timer_);
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
                     map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
-                    map(always, from: rg_private_ptr[0:rg_private.size()])")
+                    is_device_ptr(rg_private_ptr)")
     for (int iw = 0; iw < num_pos; iw++)
       for (int team_id = 0; team_id < NumTeams; team_id++)
       {
@@ -847,6 +845,27 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         rg_private_ptr[(iw * NumTeams + team_id) * 4 + 3] = grad_z;
       }
   }
+}
+
+template<typename ST>
+void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPOSet>& spo_list,
+                                                            const RefVectorWithLeader<ParticleSet>& P_list,
+                                                            int iat,
+                                                            const std::vector<const ValueType*>& invRow_ptr_list,
+                                                            OffloadMWVGLArray& phi_vgl_v,
+                                                            std::vector<ValueType>& ratios,
+                                                            std::vector<GradType>& grads) const
+{
+  mw_evaluateVGLandDetRatioGradsKernel(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v);
+
+  auto& phi_leader   = spo_list.getCastedLeader<SplineC2ROMPTarget<ST>>();
+  auto& rg_private   = phi_leader.mw_mem_handle_.getResource().rg_private;
+  const int num_pos  = spo_list.size();
+  const int NumTeams = static_cast<int>(rg_private.cols() / 4);
+  {
+    ScopedTimer offload(offload_timer_);
+    rg_private.updateFrom();
+  }
 
   for (int iw = 0; iw < num_pos; iw++)
   {
@@ -863,6 +882,47 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
       grad_z += rg_private[iw][team_id * 4 + 3];
     }
     grads[iw] = GradType{grad_x / ratio, grad_y / ratio, grad_z / ratio};
+  }
+}
+
+template<typename ST>
+void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSet>& spo_list,
+                                                                  const RefVectorWithLeader<ParticleSet>& P_list,
+                                                                  int iat,
+                                                                  const std::vector<const ValueType*>& invRow_ptr_list,
+                                                                  OffloadMWVGLArray& phi_vgl_v,
+                                                                  OffloadValueVector& ratios,
+                                                                  OffloadValueVector& grads) const
+{
+  const int num_pos = spo_list.size();
+  ratios.resize(num_pos);
+  grads.resize(num_pos * DIM);
+  mw_evaluateVGLandDetRatioGradsKernel(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v);
+
+  auto& phi_leader     = spo_list.getCastedLeader<SplineC2ROMPTarget<ST>>();
+  auto& rg_private     = phi_leader.mw_mem_handle_.getResource().rg_private;
+  const int NumTeams   = static_cast<int>(rg_private.cols() / 4);
+  auto* rg_private_ptr = rg_private.device_data();
+  auto* ratios_ptr     = ratios.device_data();
+  auto* grads_ptr      = grads.device_data();
+
+  ScopedTimer offload(offload_timer_);
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                  is_device_ptr(rg_private_ptr, ratios_ptr, grads_ptr)")
+  for (int iw = 0; iw < num_pos; ++iw)
+  {
+    ValueType ratio(0), grad_x(0), grad_y(0), grad_z(0);
+    for (int team_id = 0; team_id < NumTeams; ++team_id)
+    {
+      ratio += rg_private_ptr[(iw * NumTeams + team_id) * 4];
+      grad_x += rg_private_ptr[(iw * NumTeams + team_id) * 4 + 1];
+      grad_y += rg_private_ptr[(iw * NumTeams + team_id) * 4 + 2];
+      grad_z += rg_private_ptr[(iw * NumTeams + team_id) * 4 + 3];
+    }
+    ratios_ptr[iw]          = ratio;
+    grads_ptr[iw * DIM]     = grad_x / ratio;
+    grads_ptr[iw * DIM + 1] = grad_y / ratio;
+    grads_ptr[iw * DIM + 2] = grad_z / ratio;
   }
 }
 
