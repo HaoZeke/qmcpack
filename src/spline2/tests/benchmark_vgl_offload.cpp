@@ -11,7 +11,7 @@
  *  and separate device-resident output buffers. Numerical validation precedes timing.
  *
  *  Run with the orbital counts to sweep, for example:
- *    benchmark_vgl_offload 8 32 128 512
+ *    OMP_TARGET_OFFLOAD=mandatory benchmark_vgl_offload 32 128 512 513 1024
  */
 
 #include <algorithm>
@@ -20,12 +20,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <omp.h>
 #include <string>
 #include <vector>
 
 #include "Configuration.h"
 #include "OhmmsPETE/OhmmsVector.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
+#include "OMPTarget/OMPTargetMath.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "einspline/bspline_create.h"
 #include "spline2/MultiBspline.hpp"
@@ -38,10 +40,12 @@ namespace
 {
 using RealType = OHMMS_PRECISION;
 
-constexpr int grid_size = 20;
-constexpr int npos      = 512;
-constexpr int nrepeat   = 40;
-constexpr int ntrials   = 5;
+constexpr int grid_size           = 20;
+constexpr int npos                = 512;
+constexpr int nrepeat             = 40;
+constexpr int ntrials             = 5;
+constexpr size_t ChunkSizePerTeam = 512;
+constexpr RealType output_canary  = RealType(-12345.5);
 
 struct SplineSetup
 {
@@ -68,10 +72,22 @@ struct SplineSetup
     for (int i = 0; i < grid_size; ++i)
       for (int j = 0; j < grid_size; ++j)
         for (int k = 0; k < grid_size; ++k)
+        {
+          const double x = delta * i;
+          const double y = delta * j;
+          const double z = delta * k;
           data[(static_cast<size_t>(i) * grid_size + j) * grid_size + k] =
-              std::sin(tpi * delta * i) + std::sin(3 * tpi * delta * j) + std::sin(4 * tpi * delta * k);
+              std::sin(tpi * (x + y)) + 2.0 * std::cos(tpi * (y + z)) + 3.0 * std::sin(tpi * (z + x));
+        }
   }
 };
+
+bool is_target_device_active()
+{
+  int initial_device = 1;
+  PRAGMA_OFFLOAD("omp target map(from: initial_device)") { initial_device = omp_is_initial_device(); }
+  return initial_device == 0;
+}
 
 template<typename SplineType>
 void evaluate_vgh_trace(const SplineType* spline_ptr,
@@ -81,32 +97,37 @@ void evaluate_vgh_trace(const SplineType* spline_ptr,
                         RealType fraction)
 {
   const size_t position_stride = padded * SoAFields3D::NUM_FIELDS;
-  PRAGMA_OFFLOAD("omp target teams distribute")
+  const int NumTeams           = static_cast<int>((padded + ChunkSizePerTeam - 1) / ChunkSizePerTeam);
+  PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams * npos)")
   for (int ip = 0; ip < npos; ++ip)
-  {
-    int ix, iy, iz;
-    RealType a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
-    const RealType x = fraction + RealType(0.001) * ip;
-    const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
-    const RealType z = RealType(0.25) + RealType(0.003) * ip;
-    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
-                                          iz, a, b, c, da, db, dc, d2a, d2b, d2c);
-    const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
-                                GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
-    RealType* out            = output + position_stride * ip;
-
-    PRAGMA_OFFLOAD("omp parallel for")
-    for (size_t spline_index = 0; spline_index < padded; ++spline_index)
+    for (int team_id = 0; team_id < NumTeams; ++team_id)
     {
-      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index), a,
-                                           b, c, da, db, dc, d2a, d2b, d2c, out + spline_index, padded);
-      out[padded * SoAFields3D::LAPL + spline_index] =
-          SymTrace(out[padded * SoAFields3D::HESS00 + spline_index], out[padded * SoAFields3D::HESS01 + spline_index],
-                   out[padded * SoAFields3D::HESS02 + spline_index], out[padded * SoAFields3D::HESS11 + spline_index],
-                   out[padded * SoAFields3D::HESS12 + spline_index], out[padded * SoAFields3D::HESS22 + spline_index],
-                   symGGt);
+      const size_t first = ChunkSizePerTeam * team_id;
+      const size_t last  = omptarget::min(first + ChunkSizePerTeam, padded);
+      int ix, iy, iz;
+      RealType a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
+      const RealType x = fraction + RealType(0.001) * ip;
+      const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
+      const RealType z = RealType(0.25) + RealType(0.003) * ip;
+      spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
+                                            iz, a, b, c, da, db, dc, d2a, d2b, d2c);
+      const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
+                                  GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
+      RealType* out            = output + position_stride * ip;
+
+      PRAGMA_OFFLOAD("omp parallel for")
+      for (int index = 0; index < last - first; ++index)
+      {
+        const size_t spline_index = first + index;
+        spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index),
+                                             a, b, c, da, db, dc, d2a, d2b, d2c, out + spline_index, padded);
+        out[padded * SoAFields3D::LAPL + spline_index] =
+            SymTrace(out[padded * SoAFields3D::HESS00 + spline_index], out[padded * SoAFields3D::HESS01 + spline_index],
+                     out[padded * SoAFields3D::HESS02 + spline_index], out[padded * SoAFields3D::HESS11 + spline_index],
+                     out[padded * SoAFields3D::HESS12 + spline_index], out[padded * SoAFields3D::HESS22 + spline_index],
+                     symGGt);
+      }
     }
-  }
 }
 
 template<typename SplineType>
@@ -116,27 +137,34 @@ void evaluate_vgl(const SplineType* spline_ptr,
                   size_t padded,
                   RealType fraction)
 {
-  const size_t position_stride = padded * 5;
-  PRAGMA_OFFLOAD("omp target teams distribute")
+  const size_t position_stride = padded * SoAFields3D::NUM_FIELDS;
+  const int NumTeams           = static_cast<int>((padded + ChunkSizePerTeam - 1) / ChunkSizePerTeam);
+  PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams * npos)")
   for (int ip = 0; ip < npos; ++ip)
-  {
-    int ix, iy, iz;
-    RealType a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
-    const RealType x = fraction + RealType(0.001) * ip;
-    const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
-    const RealType z = RealType(0.25) + RealType(0.003) * ip;
-    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
-                                          iz, a, b, c, da, db, dc, d2a, d2b, d2c);
-    const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
-                                GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
-    RealType* out            = output + position_stride * ip;
+    for (int team_id = 0; team_id < NumTeams; ++team_id)
+    {
+      const size_t first = ChunkSizePerTeam * team_id;
+      const size_t last  = omptarget::min(first + ChunkSizePerTeam, padded);
+      int ix, iy, iz;
+      RealType a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
+      const RealType x = fraction + RealType(0.001) * ip;
+      const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
+      const RealType z = RealType(0.25) + RealType(0.003) * ip;
+      spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
+                                            iz, a, b, c, da, db, dc, d2a, d2b, d2c);
+      const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
+                                  GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
+      RealType* out            = output + position_stride * ip;
 
-    PRAGMA_OFFLOAD("omp parallel for")
-    for (size_t spline_index = 0; spline_index < padded; ++spline_index)
-      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index), a,
-                                           b, c, da, db, dc, d2a, d2b, d2c, symGGt, out + spline_index, padded,
-                                           padded * 4);
-  }
+      PRAGMA_OFFLOAD("omp parallel for")
+      for (int index = 0; index < last - first; ++index)
+      {
+        const size_t spline_index = first + index;
+        spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index),
+                                             a, b, c, da, db, dc, d2a, d2b, d2c, symGGt, out + spline_index, padded,
+                                             padded * SoAFields3D::LAPL);
+      }
+    }
 }
 
 template<typename Evaluator>
@@ -160,18 +188,25 @@ bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_ou
                       int requested,
                       size_t padded)
 {
-  const int vgh_fields[5]  = {SoAFields3D::VAL, SoAFields3D::GRAD0, SoAFields3D::GRAD1, SoAFields3D::GRAD2,
-                              SoAFields3D::LAPL};
-  const RealType tolerance = RealType(256) * std::numeric_limits<RealType>::epsilon();
-  const size_t vgh_stride  = padded * SoAFields3D::NUM_FIELDS;
-  const size_t vgl_stride  = padded * 5;
+  const int compared_fields[5] = {SoAFields3D::VAL, SoAFields3D::GRAD0, SoAFields3D::GRAD1, SoAFields3D::GRAD2,
+                                  SoAFields3D::LAPL};
+  const RealType tolerance     = RealType(256) * std::numeric_limits<RealType>::epsilon();
+  const size_t stride          = padded * SoAFields3D::NUM_FIELDS;
+
+  const int mixed_hessian_fields[3] = {SoAFields3D::HESS01, SoAFields3D::HESS02, SoAFields3D::HESS12};
+  for (const int field : mixed_hessian_fields)
+    if (std::abs(vgh_output[padded * field]) <= RealType(1))
+    {
+      std::fprintf(stderr, "VGH oracle has a negligible mixed Hessian field: %d\n", field);
+      return false;
+    }
 
   for (int ip = 0; ip < npos; ++ip)
-    for (int field = 0; field < 5; ++field)
+    for (const int field : compared_fields)
       for (int spline_index = 0; spline_index < requested; ++spline_index)
       {
-        const RealType vgh   = vgh_output[vgh_stride * ip + padded * vgh_fields[field] + spline_index];
-        const RealType vgl   = vgl_output[vgl_stride * ip + padded * field + spline_index];
+        const RealType vgh   = vgh_output[stride * ip + padded * field + spline_index];
+        const RealType vgl   = vgl_output[stride * ip + padded * field + spline_index];
         const RealType scale = std::max({RealType(1), std::abs(vgh), std::abs(vgl)});
         if (std::abs(vgh - vgl) > tolerance * scale)
         {
@@ -182,6 +217,18 @@ bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_ou
           return false;
         }
       }
+
+  const int untouched_fields[6] = {SoAFields3D::HESS00, SoAFields3D::HESS01, SoAFields3D::HESS02,
+                                   SoAFields3D::HESS11, SoAFields3D::HESS12, SoAFields3D::HESS22};
+  for (int ip = 0; ip < npos; ++ip)
+    for (const int field : untouched_fields)
+      for (int spline_index = 0; spline_index < requested; ++spline_index)
+        if (vgl_output[stride * ip + padded * field + spline_index] != output_canary)
+        {
+          std::fprintf(stderr, "direct VGL overwrote Hessian storage: position=%d orbital=%d field=%d\n", ip,
+                       spline_index, field);
+          return false;
+        }
   return true;
 }
 
@@ -189,6 +236,12 @@ bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_ou
 
 int main(int argc, char** argv)
 {
+  if (!is_target_device_active())
+  {
+    std::fprintf(stderr, "benchmark requires execution on an OpenMP target device\n");
+    return 3;
+  }
+
   std::vector<int> sizes;
   for (int arg = 1; arg < argc; ++arg)
   {
@@ -201,7 +254,7 @@ int main(int argc, char** argv)
     sizes.push_back(size);
   }
   if (sizes.empty())
-    sizes = {8, 32, 128, 512};
+    sizes = {32, 128, 512, 513, 1024};
 
   std::printf("# mapped-device B-spline VGL, grid %d^3, %d positions, %d repeats, %d trials\n", grid_size, npos,
               nrepeat, ntrials);
@@ -213,6 +266,7 @@ int main(int argc, char** argv)
     SplineSetup setup;
     const size_t padded = getAlignedSize<RealType>(requested);
     MultiBspline<RealType> splines(setup.grid, setup.bc, padded);
+    splines.flush_zero();
 
     UBspline_3d_d* spline = create_UBspline_3d_d(setup.grid[0], setup.grid[1], setup.grid[2], setup.bc[0], setup.bc[1],
                                                  setup.bc[2], setup.data.data());
@@ -225,6 +279,16 @@ int main(int argc, char** argv)
       splines.set_spline(*spline, index);
     destroy_Bspline(spline);
 
+    auto* host_spline = splines.getSplinePtr();
+    if (host_spline->coefs_size % padded != 0)
+    {
+      std::fprintf(stderr, "spline coefficient layout is not padded-orbital interleaved\n");
+      return 1;
+    }
+    for (size_t offset = 0; offset < host_spline->coefs_size; offset += padded)
+      for (int index = 0; index < requested; ++index)
+        host_spline->coefs[offset + index] *= RealType(index + 1);
+
     MultiBsplineOffloadMapper<RealType> mapper(splines);
     mapper.mapToDevice();
     mapper.updateToDevice();
@@ -236,7 +300,8 @@ int main(int argc, char** argv)
     GGt.updateTo();
 
     Vector<RealType, OffloadAllocator<RealType>> vgh_output(npos * padded * SoAFields3D::NUM_FIELDS);
-    Vector<RealType, OffloadAllocator<RealType>> vgl_output(npos * padded * 5);
+    Vector<RealType, OffloadAllocator<RealType>> vgl_output(npos * padded * SoAFields3D::NUM_FIELDS, output_canary);
+    vgl_output.updateTo();
     const auto* spline_ptr = splines.getSplinePtr();
     auto* GGt_ptr          = GGt.data();
     auto* vgh_output_ptr   = vgh_output.data();
@@ -283,13 +348,13 @@ int main(int argc, char** argv)
     const double vgh_ms      = median(vgh_samples);
     const double vgl_ms      = median(vgl_samples);
     const double ns_per_eval = vgl_ms * 1e6 / (static_cast<double>(nrepeat) * npos * padded);
-    const size_t vgl_stride  = padded * 5;
+    const size_t vgl_stride  = padded * SoAFields3D::NUM_FIELDS;
     double checksum          = 0.0;
     vgl_output.updateFrom();
     for (int ip = 0; ip < npos; ++ip)
       for (int spline_index = 0; spline_index < requested; ++spline_index)
         checksum += static_cast<double>(vgl_output[vgl_stride * ip + spline_index]) +
-            static_cast<double>(vgl_output[vgl_stride * ip + padded * 4 + spline_index]);
+            static_cast<double>(vgl_output[vgl_stride * ip + padded * SoAFields3D::LAPL + spline_index]);
 
     std::printf("  %-10d %-10zu %-12.3f %-12.3f %-12.3f %-12.3f %.17g\n", requested, padded, vgh_ms, vgl_ms,
                 vgh_ms / vgl_ms, ns_per_eval, checksum);
