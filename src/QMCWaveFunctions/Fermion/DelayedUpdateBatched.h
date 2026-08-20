@@ -77,6 +77,8 @@ public:
     Vector<char, OffloadPinnedAllocator<char>> prepare_inv_row_buffer_H2D;
     // mw_accept_rejectRow pointer buffer
     Vector<char, OffloadPinnedAllocator<char>> accept_rejectRow_buffer_H2D;
+    // acceptance mask in natural walker order
+    DualVector<char> accept_rejectRow_mask_H2D;
     // mw_updateInv pointer buffer
     Vector<char, OffloadPinnedAllocator<char>> updateInv_buffer_H2D;
     // mw_evalGrad pointer buffer
@@ -243,9 +245,9 @@ private:
    *
    *  \param[in] engines
    *  \param[in] rowchanged
-   *  \param[in] psiM_g_list        device ptrs
-   *  \param[in] psiM_l_list        device ptrs
-   *  \param[in] isAccepted         bool but wait some lists are also filtered
+   *  \param[in] psiM_g_list        device ptrs in walker order
+   *  \param[in] psiM_l_list        device ptrs in walker order
+   *  \param[in] isAccepted         per-walker acceptance decisions
    *  \param[in] phi_vgl_v          multiple walker orbital VGL
    *  \param[inout] ratios
    */
@@ -262,11 +264,10 @@ private:
     auto& engine_leader = engines.getLeader();
     engine_leader.guard_no_delay();
 
-    const size_t n_accepted = psiM_g_list.size();
-#ifndef NDEBUG
-    size_t n_true = std::count_if(isAccepted.begin(), isAccepted.end(), [](bool accepted) { return accepted; });
-    assert(n_accepted == n_true);
-#endif
+    const size_t nw         = engines.size();
+    const size_t n_accepted = std::count(isAccepted.begin(), isAccepted.end(), true);
+    assert(psiM_g_list.size() == nw);
+    assert(psiM_l_list.size() == nw);
     if (n_accepted == 0)
       return;
 
@@ -279,7 +280,6 @@ private:
     auto& czero_vec             = mw_rsc.czero_vec;
     const int norb              = engine_leader.invRow.size();
     const int lda               = psiMinv_refs[0].get().cols();
-    const int nw                = engines.size();
     const size_t phi_vgl_stride = nw * norb;
     mw_temp.resize(norb * n_accepted);
     mw_rcopy.resize(norb * n_accepted);
@@ -298,8 +298,8 @@ private:
         ptr_buffer[1][count] = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
         ptr_buffer[2][count] = mw_temp.device_data() + norb * count;
         ptr_buffer[3][count] = mw_rcopy.device_data() + norb * count;
-        ptr_buffer[4][count] = psiM_g_list[count];
-        ptr_buffer[5][count] = psiM_l_list[count];
+        ptr_buffer[4][count] = psiM_g_list[iw];
+        ptr_buffer[5][count] = psiM_l_list[iw];
 
         c_ratio_inv[count] = Value(-1) / ratios[iw];
         count++;
@@ -531,9 +531,9 @@ public:
    *  to objects that do get modified.
    *  \param[in] engines
    *  \param[in] rowchanged
-   *  \param[in] psiM_g_list
-   *  \param[in] psiM_l_list
-   *  \param[in] isAccepted
+   *  \param[in] psiM_g_list        device ptrs in walker order
+   *  \param[in] psiM_l_list        device ptrs in walker order
+   *  \param[in] isAccepted         per-walker acceptance decisions
    *  \param[in] phi_vgl_v          multiple walker orbital VGL
    *  \param[inout] ratios
    */
@@ -563,58 +563,46 @@ public:
     auto& cone_vec                    = mw_rsc.cone_vec;
     auto& czero_vec                   = mw_rsc.czero_vec;
     auto& accept_rejectRow_buffer_H2D = mw_rsc.accept_rejectRow_buffer_H2D;
+    auto& accept_rejectRow_mask_H2D   = mw_rsc.accept_rejectRow_mask_H2D;
     int& delay_count                  = engine_leader.delay_count;
     const int lda_Binv                = engine_leader.Binv_gpu.cols();
     const int norb                    = engine_leader.invRow.size();
     const int nw                      = engines.size();
-    const int n_accepted              = psiM_g_list.size();
     const size_t phi_vgl_stride       = nw * norb;
+    assert(psiM_g_list.size() == nw);
+    assert(psiM_l_list.size() == nw);
 
     constexpr size_t num_ptrs_packed = 12; // it must match packing and unpacking
     accept_rejectRow_buffer_H2D.resize((sizeof(Value*) * num_ptrs_packed + sizeof(Value)) * nw);
+    accept_rejectRow_mask_H2D.resize(nw);
     mw_rsc.resize_fill_constant_arrays(nw);
 
     Matrix<Value*> ptr_buffer(reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.data()), num_ptrs_packed, nw);
     Value* c_ratio_inv =
         reinterpret_cast<Value*>(accept_rejectRow_buffer_H2D.data() + sizeof(Value*) * num_ptrs_packed * nw);
-    for (int iw = 0, count_accepted = 0, count_rejected = 0; iw < nw; iw++)
+    for (int iw = 0; iw < nw; iw++)
     {
       DualMatrix<Value>& psiMinv = psiMinv_refs[iw];
       const int lda              = psiMinv.cols();
       This_t& engine             = engines[iw];
-      if (isAccepted[iw])
-      {
-        ptr_buffer[0][count_accepted]  = psiMinv.device_data() + lda * rowchanged;
-        ptr_buffer[1][count_accepted]  = engine.V_gpu.data();
-        ptr_buffer[2][count_accepted]  = engine.U_gpu.data() + norb * delay_count;
-        ptr_buffer[3][count_accepted]  = engine.p_gpu.data();
-        ptr_buffer[4][count_accepted]  = engine.Binv_gpu.data();
-        ptr_buffer[5][count_accepted]  = engine.Binv_gpu.data() + delay_count * lda_Binv;
-        ptr_buffer[6][count_accepted]  = engine.Binv_gpu.data() + delay_count;
-        ptr_buffer[7][count_accepted]  = reinterpret_cast<Value*>(engine.delay_list_gpu.data());
-        ptr_buffer[8][count_accepted]  = engine.V_gpu.data() + norb * delay_count;
-        ptr_buffer[9][count_accepted]  = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
-        ptr_buffer[10][count_accepted] = psiM_g_list[count_accepted];
-        ptr_buffer[11][count_accepted] = psiM_l_list[count_accepted];
-        c_ratio_inv[count_accepted]    = Value(1) / ratios[iw];
-        count_accepted++;
-      }
-      else
-      {
-        ptr_buffer[0][n_accepted + count_rejected] = psiMinv.device_data() + lda * rowchanged;
-        ptr_buffer[1][n_accepted + count_rejected] = engine.V_gpu.data();
-        ptr_buffer[2][n_accepted + count_rejected] = engine.U_gpu.data() + norb * delay_count;
-        ptr_buffer[3][n_accepted + count_rejected] = engine.p_gpu.data();
-        ptr_buffer[4][n_accepted + count_rejected] = engine.Binv_gpu.data();
-        ptr_buffer[5][n_accepted + count_rejected] = engine.Binv_gpu.data() + delay_count * lda_Binv;
-        ptr_buffer[6][n_accepted + count_rejected] = engine.Binv_gpu.data() + delay_count;
-        ptr_buffer[7][n_accepted + count_rejected] = reinterpret_cast<Value*>(engine.delay_list_gpu.data());
-        ptr_buffer[8][n_accepted + count_rejected] = engine.V_gpu.data() + norb * delay_count;
-        count_rejected++;
-      }
+      ptr_buffer[0][iw]  = psiMinv.device_data() + lda * rowchanged;
+      ptr_buffer[1][iw]  = engine.V_gpu.data();
+      ptr_buffer[2][iw]  = engine.U_gpu.data() + norb * delay_count;
+      ptr_buffer[3][iw]  = engine.p_gpu.data();
+      ptr_buffer[4][iw]  = engine.Binv_gpu.data();
+      ptr_buffer[5][iw]  = engine.Binv_gpu.data() + delay_count * lda_Binv;
+      ptr_buffer[6][iw]  = engine.Binv_gpu.data() + delay_count;
+      ptr_buffer[7][iw]  = reinterpret_cast<Value*>(engine.delay_list_gpu.data());
+      ptr_buffer[8][iw]  = engine.V_gpu.data() + norb * delay_count;
+      ptr_buffer[9][iw]  = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
+      ptr_buffer[10][iw] = psiM_g_list[iw];
+      ptr_buffer[11][iw] = psiM_l_list[iw];
+      c_ratio_inv[iw]    = isAccepted[iw] ? Value(1) / ratios[iw] : Value(0);
+      accept_rejectRow_mask_H2D[iw] = isAccepted[iw];
     }
 
     queue.enqueueH2D(accept_rejectRow_buffer_H2D);
+    queue.enqueueH2D(accept_rejectRow_mask_H2D);
 
     Value** invRow_mw_ptr = reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.device_data());
     Value** V_mw_ptr      = reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw);
@@ -639,6 +627,7 @@ public:
         reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 11);
     Value* ratio_inv_mw_ptr =
         reinterpret_cast<Value*>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 12);
+    const char* accept_mask_dev = accept_rejectRow_mask_H2D.device_data();
 
     //std::copy_n(Ainv[rowchanged], norb, V[delay_count]);
     compute::BLAS::copy_batched(blas_handle, norb, invRow_mw_ptr, 1, V_row_mw_ptr, 1, nw);
@@ -646,21 +635,22 @@ public:
     // the new Binv is [[X y] [z sigma]]
     //BLAS::gemv('T', norb, delay_count + 1, cminusone, V.data(), norb, psiV.data(), 1, czero, p.data(), 1);
     compute::BLAS::gemv_batched(blas_handle, 'T', norb, delay_count, cminusone_vec.device_data(), V_mw_ptr, norb,
-                                phiVGL_mw_ptr, 1, czero_vec.device_data(), p_mw_ptr, 1, n_accepted);
+                                phiVGL_mw_ptr, 1, czero_vec.device_data(), p_mw_ptr, 1, nw);
     // y
     //BLAS::gemv('T', delay_count, delay_count, sigma, Binv.data(), lda_Binv, p.data(), 1, czero, Binv.data() + delay_count,
     //           lda_Binv);
     compute::BLAS::gemv_batched(blas_handle, 'T', delay_count, delay_count, ratio_inv_mw_ptr, Binv_mw_ptr, lda_Binv,
-                                p_mw_ptr, 1, czero_vec.device_data(), BinvCol_mw_ptr, lda_Binv, n_accepted);
+                                p_mw_ptr, 1, czero_vec.device_data(), BinvCol_mw_ptr, lda_Binv, nw);
     // X
     //BLAS::ger(delay_count, delay_count, cone, Binv[delay_count], 1, Binv.data() + delay_count, lda_Binv,
     //          Binv.data(), lda_Binv);
     compute::BLAS::ger_batched(blas_handle, delay_count, delay_count, cone_vec.device_data(), BinvRow_mw_ptr, 1,
-                               BinvCol_mw_ptr, lda_Binv, Binv_mw_ptr, lda_Binv, n_accepted);
+                               BinvCol_mw_ptr, lda_Binv, Binv_mw_ptr, lda_Binv, nw);
     // sigma and Z
     compute::add_delay_list_save_sigma_VGL_batched(queue, delay_list_mw_ptr, rowchanged, delay_count, Binv_mw_ptr,
                                                    lda_Binv, ratio_inv_mw_ptr, phiVGL_mw_ptr, phi_vgl_stride,
-                                                   U_row_mw_ptr, dpsiM_mw_out, d2psiM_mw_out, norb, n_accepted, nw);
+                                                   U_row_mw_ptr, dpsiM_mw_out, d2psiM_mw_out, norb, 0, nw,
+                                                   accept_mask_dev);
     delay_count++;
     // update Ainv when maximal delay is reached
     if (delay_count == lda_Binv)

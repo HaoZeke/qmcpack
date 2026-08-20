@@ -67,7 +67,7 @@ struct DiracDeterminantBatched<PL, VT, FPVT>::DiracDeterminantBatchedMultiWalker
   OffloadMatrix<ComplexType> mw_dspin;
   /// reference to per DDB psiMinvs in a crowd
   RefVector<DualMatrix<Value>> psiMinv_refs;
-  /// Device pointer lists sized per accepted walkers and retained by the crowd resource.
+  /// Device pointer lists in walker order and retained by the crowd resource.
   std::vector<Value*> psiM_g_dev_ptr_list;
   std::vector<Value*> psiM_l_dev_ptr_list;
   ///
@@ -478,29 +478,23 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_accept_rejectMove(
   ScopedTimer update(UpdateTimer);
 
   const int nw = wfc_list.size();
-  int count    = 0;
-  for (int iw = 0; iw < nw; iw++)
-    if (isAccepted[iw])
-      count++;
-  const int n_accepted = count;
-
   RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
   engine_list.reserve(nw);
   auto& psiM_g_dev_ptr_list = mw_res.psiM_g_dev_ptr_list;
   auto& psiM_l_dev_ptr_list = mw_res.psiM_l_dev_ptr_list;
-  psiM_g_dev_ptr_list.resize(n_accepted);
-  psiM_l_dev_ptr_list.resize(n_accepted);
+  psiM_g_dev_ptr_list.resize(nw);
+  psiM_l_dev_ptr_list.resize(nw);
 
   const int WorkingIndex = iat - FirstIndex;
-  for (int iw = 0, count = 0; iw < nw; iw++)
+  for (int iw = 0; iw < nw; iw++)
   {
     // This can be auto but some debuggers can't figure the type out.
     DiracDeterminantBatched<PL, VT, FPVT>& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
     engine_list.push_back(det.det_engine_);
+    psiM_g_dev_ptr_list[iw] = det.psiM_vgl.device_data() + psiM_vgl.capacity() + NumOrbitals * WorkingIndex * DIM;
+    psiM_l_dev_ptr_list[iw] = det.psiM_vgl.device_data() + psiM_vgl.capacity() * 4 + NumOrbitals * WorkingIndex;
     if (isAccepted[iw])
     {
-      psiM_g_dev_ptr_list[count] = det.psiM_vgl.device_data() + psiM_vgl.capacity() + NumOrbitals * WorkingIndex * DIM;
-      psiM_l_dev_ptr_list[count] = det.psiM_vgl.device_data() + psiM_vgl.capacity() * 4 + NumOrbitals * WorkingIndex;
       if (det.curRatio == PsiValue(0))
 
       {
@@ -510,7 +504,6 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_accept_rejectMove(
         throw std::runtime_error(msg.str());
       }
       det.log_value_ += convertValueToLog(det.curRatio);
-      count++;
     }
     det.curRatio = 1.0;
   }
