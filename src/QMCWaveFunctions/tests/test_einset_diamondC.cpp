@@ -254,8 +254,7 @@ void test_einset_diamond_1x1x1(bool use_offload, int distributed_ranks = 1, int 
 
   SPOSet::OffloadValueVector device_ratios;
   SPOSet::OffloadValueVector device_grads;
-  spo->mw_evaluateVGLandDetRatioGradsDevice(spo_list, p_list, 0, inv_row_ptr, phi_vgl_v, device_ratios,
-                                            device_grads);
+  spo->mw_evaluateVGLandDetRatioGradsDevice(spo_list, p_list, 0, inv_row_ptr, phi_vgl_v, device_ratios, device_grads);
   REQUIRE(device_ratios.size() == nw);
   REQUIRE(device_grads.size() == nw * SPOSet::DIM);
   device_ratios.updateFrom();
