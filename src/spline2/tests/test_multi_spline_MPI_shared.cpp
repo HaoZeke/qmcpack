@@ -17,9 +17,11 @@
 #include "spline2/MultiBsplineOffloadMapperPeer.hpp"
 #include "spline2/MultiBsplineMPISharedOffload.hpp"
 #include "spline2/MultiBsplineEval.hpp"
+#include "spline2/MultiBsplineVGLH_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "config/stdlib/Constants.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
+#include "OMPTarget/OMPTargetMath.hpp"
 #include "einspline/bspline_create.h"
 
 namespace qmcplusplus
@@ -329,7 +331,9 @@ struct test_shared_offload : public test_splines_base<T, 5>
   using base = test_splines_base<T, 5>;
   using base::bc;
   using base::data;
+  using base::delta;
   using base::grid;
+  using base::N;
 
   void test(size_t num_splines, unsigned shared_ranks, unsigned distributed_ranks = 1)
   {
@@ -351,11 +355,31 @@ struct test_shared_offload : public test_splines_base<T, 5>
     const size_t npad = getAlignedSize<T>(num_splines);
     REQUIRE(bs.num_splines_padded() == npad);
 
-    UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
-    auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
+    std::vector<double> mixed_data(data.size());
+    const double tpi = 2 * M_PI;
+    for (int i = 0; i < N; ++i)
+      for (int j = 0; j < N; ++j)
+        for (int k = 0; k < N; ++k)
+        {
+          const double x = delta * i;
+          const double y = delta * j;
+          const double z = delta * k;
+          mixed_data[i * N * N + j * N + k] =
+              std::sin(tpi * (x + y)) + 2.0 * std::cos(tpi * (y + z)) + 3.0 * std::sin(tpi * (z + x));
+        }
+
+    std::vector<double> orbital_data(mixed_data.size());
+    auto offsets = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
     for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
+    {
+      for (size_t coefficient = 0; coefficient < mixed_data.size(); ++coefficient)
+        orbital_data[coefficient] = mixed_data[coefficient] * (i + 1);
+      UBspline_3d_d* aspline =
+          create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], orbital_data.data());
+      REQUIRE(aspline != nullptr);
       bs.set_spline(*aspline, i);
-    destroy_Bspline(aspline);
+      destroy_Bspline(aspline);
+    }
 
     // publishes every rank's stores before uploading the shared coefficients and
     // repairing the device coefs pointer
@@ -373,6 +397,85 @@ struct test_shared_offload : public test_splines_base<T, 5>
 
     for (size_t i = 0; i < num_splines; i++)
       CHECK(v_dev[i] == Approx(v_host[i]));
+
+    VectorSoaContainer<T, 3> grad_host(npad);
+    VectorSoaContainer<T, 6> hess_host(npad);
+    bs.evaluate_vgh(pos, v_host, grad_host, hess_host);
+
+    Vector<T, OffloadAllocator<T>> GGt{T(1.05), T(0.20),  T(-0.29), T(0.20), T(0.9025),
+                                       T(0.41), T(-0.29), T(0.41),  T(1.26)};
+    GGt.updateTo();
+    constexpr T canary = T(-12345.5);
+    Vector<T, OffloadAllocator<T>> vgl_dev(npad * SoAFields3D::NUM_FIELDS, canary);
+    vgl_dev.updateTo();
+
+    auto* GGt_ptr                     = GGt.data();
+    auto* vgl_dev_ptr                 = vgl_dev.data();
+    const auto block_starts           = bs.getBlockOffsets();
+    constexpr size_t ChunkSizePerTeam = 512;
+    const T x = pos[0], y = pos[1], z = pos[2];
+    for (size_t ib = 0; ib < bs.getNumBlocks(); ++ib)
+    {
+      const auto* spline_ptr  = &bs.getBlock(ib);
+      const size_t block_size = spline_ptr->num_splines;
+      if (block_size == 0)
+        continue;
+      const size_t block_offset = block_starts[ib];
+      const int NumTeams        = static_cast<int>((block_size + ChunkSizePerTeam - 1) / ChunkSizePerTeam);
+
+      PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams)")
+      for (int team_id = 0; team_id < NumTeams; ++team_id)
+      {
+        const size_t first = ChunkSizePerTeam * team_id;
+        const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_size);
+        int ix, iy, iz;
+        T a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
+        spline2::computeLocationAndFractional(spline_ptr, x, y, z, ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c);
+        const T symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
+                             GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
+
+        PRAGMA_OFFLOAD("omp parallel for")
+        for (int index = 0; index < last - first; ++index)
+        {
+          const size_t local_index  = first + index;
+          const size_t output_index = block_offset + local_index;
+          spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, local_index, a, b, c, da, db,
+                                               dc, d2a, d2b, d2c, symGGt, vgl_dev_ptr + output_index, npad,
+                                               npad * SoAFields3D::LAPL);
+        }
+      }
+    }
+    vgl_dev.updateFrom();
+
+    const T symGGt_host[6] = {GGt[0], GGt[1] + GGt[3], GGt[2] + GGt[6], GGt[4], GGt[5] + GGt[7], GGt[8]};
+    CHECK(std::abs(hess_host[0][1]) > T(1));
+    CHECK(std::abs(hess_host[0][2]) > T(1));
+    CHECK(std::abs(hess_host[0][4]) > T(1));
+    for (size_t i = 0; i < num_splines; ++i)
+    {
+      CHECK(vgl_dev[npad * SoAFields3D::VAL + i] == Approx(v_host[i]));
+      CHECK(vgl_dev[npad * SoAFields3D::GRAD0 + i] == Approx(grad_host[i][0]));
+      CHECK(vgl_dev[npad * SoAFields3D::GRAD1 + i] == Approx(grad_host[i][1]));
+      CHECK(vgl_dev[npad * SoAFields3D::GRAD2 + i] == Approx(grad_host[i][2]));
+      CHECK(vgl_dev[npad * SoAFields3D::LAPL + i] ==
+            Approx(SymTrace(hess_host[i][0], hess_host[i][1], hess_host[i][2], hess_host[i][3], hess_host[i][4],
+                            hess_host[i][5], symGGt_host)));
+    }
+
+    const int untouched_fields[] = {SoAFields3D::HESS00, SoAFields3D::HESS01, SoAFields3D::HESS02,
+                                    SoAFields3D::HESS11, SoAFields3D::HESS12, SoAFields3D::HESS22};
+    for (const int field : untouched_fields)
+      for (size_t i = 0; i < num_splines; ++i)
+        CHECK(vgl_dev[npad * field + i] == canary);
+
+    if (distributed_ranks > 1)
+    {
+      const size_t boundary = block_starts[1];
+      REQUIRE(boundary > 0);
+      REQUIRE(boundary < num_splines);
+      CHECK(v_host[boundary - 1] == Approx(v_host[0] * T(boundary)));
+      CHECK(v_host[boundary] == Approx(v_host[0] * T(boundary + 1)));
+    }
   }
 };
 
