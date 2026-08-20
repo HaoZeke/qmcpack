@@ -148,7 +148,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
     const char* setting = std::getenv("QMCPACK_CHECK_DEVICE_ACCEPT");
     return setting != nullptr && *setting == '1';
   }();
-  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratios;
+  TrialWaveFunction::OffloadRatioVector device_ratios;
+  TrialWaveFunction::OffloadGradVector device_grads;
   Vector<RealType, OffloadPinnedAllocator<RealType>> device_log_gf;
   Vector<RealType, OffloadPinnedAllocator<RealType>> device_log_gb;
   Vector<RealType, OffloadPinnedAllocator<RealType>> device_variates;
@@ -213,6 +214,9 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         ps_dispatcher.flex_makeMove(walker_elecs, iat, drifts, are_valid);
 
         twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
+        if (check_device_acceptance)
+          if constexpr (CT == CoordsType::POS)
+            TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, device_ratios, device_grads);
 
         computeLogGreensFunction(deltas, taus, log_gf);
 
@@ -267,12 +271,14 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         {
           for (int iw = 0; iw < num_walkers; ++iw)
           {
-            device_ratios[iw] = ratios[iw];
+            if constexpr (CT != CoordsType::POS)
+              device_ratios[iw] = ratios[iw];
             device_log_gf[iw] = log_gf[iw];
             device_log_gb[iw] = log_gb[iw];
             device_valid[iw]  = are_valid[iw] && !rejects[iw] ? 1 : 0;
           }
-          device_ratios.updateTo();
+          if constexpr (CT != CoordsType::POS)
+            device_ratios.updateTo();
           device_log_gf.updateTo();
           device_log_gb.updateTo();
           device_variates.updateTo();
