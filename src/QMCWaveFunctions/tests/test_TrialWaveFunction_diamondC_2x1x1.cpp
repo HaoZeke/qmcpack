@@ -44,6 +44,95 @@ struct OffloadSwitches
   bool jas;
 };
 
+void checkResidentProposalState(const TrialWaveFunction& source_psi, const ParticleSet& source_elec)
+{
+  constexpr int nw            = 2;
+  constexpr int moved_elec_id = 0;
+
+  ParticleSet device_elec(source_elec);
+  ParticleSet device_elec_clone(source_elec);
+  ParticleSet reference_elec(source_elec);
+  ParticleSet reference_elec_clone(source_elec);
+
+  auto device_psi          = source_psi.makeClone(device_elec);
+  auto device_psi_clone    = source_psi.makeClone(device_elec_clone);
+  auto reference_psi       = source_psi.makeClone(reference_elec);
+  auto reference_psi_clone = source_psi.makeClone(reference_elec_clone);
+
+  ResourceCollection device_pset_res("resident_state_device_pset_res");
+  ResourceCollection device_twf_res("resident_state_device_twf_res");
+  device_elec.createResource(device_pset_res);
+  device_psi->createResource(device_twf_res);
+
+  ResourceCollection reference_pset_res("resident_state_reference_pset_res");
+  ResourceCollection reference_twf_res("resident_state_reference_twf_res");
+  reference_elec.createResource(reference_pset_res);
+  reference_psi->createResource(reference_twf_res);
+
+  RefVectorWithLeader<ParticleSet> device_p_list(device_elec, {device_elec, device_elec_clone});
+  RefVectorWithLeader<TrialWaveFunction> device_wf_list(*device_psi, {*device_psi, *device_psi_clone});
+  RefVectorWithLeader<ParticleSet> reference_p_list(reference_elec, {reference_elec, reference_elec_clone});
+  RefVectorWithLeader<TrialWaveFunction> reference_wf_list(*reference_psi, {*reference_psi, *reference_psi_clone});
+
+  ResourceCollectionTeamLock<ParticleSet> device_pset_lock(device_pset_res, device_p_list);
+  ResourceCollectionTeamLock<TrialWaveFunction> device_twf_lock(device_twf_res, device_wf_list);
+  ResourceCollectionTeamLock<ParticleSet> reference_pset_lock(reference_pset_res, reference_p_list);
+  ResourceCollectionTeamLock<TrialWaveFunction> reference_twf_lock(reference_twf_res, reference_wf_list);
+
+  ParticleSet::mw_update(device_p_list);
+  TrialWaveFunction::mw_evaluateLog(device_wf_list, device_p_list);
+  ParticleSet::mw_update(reference_p_list);
+  TrialWaveFunction::mw_evaluateLog(reference_wf_list, reference_p_list);
+
+  const std::vector<QMCTraits::PosType> displacements{{0.1, 0.1, 0.2}, {0.2, 0.1, 0.1}};
+  ParticleSet::mw_makeMove(device_p_list, moved_elec_id, displacements);
+  ParticleSet::mw_makeMove(reference_p_list, moved_elec_id, displacements);
+
+  TrialWaveFunction::OffloadRatioVector device_ratios;
+  WaveFunctionComponent::OffloadGradVector device_grads;
+  TrialWaveFunction::mw_calcRatioGradDevice(device_wf_list, device_p_list, moved_elec_id, device_ratios, device_grads);
+  device_ratios.updateFrom();
+  device_grads.updateFrom();
+
+  std::vector<PsiValue> reference_ratios(nw);
+  TWFGrads<CoordsType::POS> reference_grads(nw);
+  TrialWaveFunction::mw_calcRatioGrad(reference_wf_list, reference_p_list, moved_elec_id, reference_ratios,
+                                      reference_grads);
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    CHECK(device_ratios[iw] == ValueApprox(reference_ratios[iw]));
+    for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+      CHECK(device_grads[iw][idim] == ValueApprox(reference_grads.grads_positions[iw][idim]));
+  }
+
+  const std::vector<bool> is_accepted{true, false};
+  TrialWaveFunction::mw_accept_rejectMove(device_wf_list, device_p_list, moved_elec_id, is_accepted, true);
+  ParticleSet::mw_accept_rejectMove(device_p_list, moved_elec_id, is_accepted, true);
+  TrialWaveFunction::mw_completeUpdates(device_wf_list);
+  TrialWaveFunction::mw_evaluateGL(device_wf_list, device_p_list, false);
+
+  TrialWaveFunction::mw_accept_rejectMove(reference_wf_list, reference_p_list, moved_elec_id, is_accepted, true);
+  ParticleSet::mw_accept_rejectMove(reference_p_list, moved_elec_id, is_accepted, true);
+  TrialWaveFunction::mw_completeUpdates(reference_wf_list);
+  TrialWaveFunction::mw_evaluateGL(reference_wf_list, reference_p_list, false);
+
+  for (int iw = 0; iw < nw; ++iw)
+  {
+    CHECK(device_wf_list[iw].getLogPsi() == Approx(reference_wf_list[iw].getLogPsi()));
+    CHECK(device_wf_list[iw].getPhase() == Approx(reference_wf_list[iw].getPhase()));
+    for (int iel = 0; iel < device_p_list[iw].getTotalNum(); ++iel)
+    {
+      for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+      {
+        CHECK(device_p_list[iw].R[iel][idim] == Approx(reference_p_list[iw].R[iel][idim]));
+        CHECK(device_p_list[iw].G[iel][idim] == ValueApprox(reference_p_list[iw].G[iel][idim]));
+      }
+      CHECK(device_p_list[iw].L[iel] == ValueApprox(reference_p_list[iw].L[iel]));
+    }
+  }
+}
+
 /** Templated test of TrialWF with different DiracDet flavors.
  */
 template<class DiracDet, class SPO_precision>
@@ -207,6 +296,9 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
 #else
   CHECK(logpsi_clone == Approx(-5.932711221043984));
 #endif
+
+  if (offload_switches.spo && !offload_switches.jas && std::is_same_v<SPO_precision, float_tag>)
+    checkResidentProposalState(*psi_clone, elec_clone);
 
   const int moved_elec_id = 0;
 
