@@ -59,6 +59,8 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
   Vector<int, OffloadPinnedAllocator<int>> job_elec;
   Vector<Real, OffloadPinnedAllocator<Real>> job_dist;
   Vector<Real, OffloadPinnedAllocator<Real>> job_displ; // 3 per job
+  /// compact output capacity per walker and electron group
+  std::vector<size_t> job_stride_by_group;
   /// a crowds worth of per particle nonlocal ecp potential values
   Matrix<Real> ve_samples;
   Matrix<Real> vi_samples;
@@ -333,7 +335,9 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
   }
 
   res.job_counts.resize(nw);
-  size_t job_stride = nelec_group * 2 + 8;
+  if (res.job_stride_by_group.size() != P_leader.groups())
+    res.job_stride_by_group.assign(P_leader.groups(), 0);
+  size_t job_stride = std::max(nelec_group * 2 + 8, res.job_stride_by_group[ig]);
   while (true)
   {
     res.job_ion.resize(nw * job_stride);
@@ -391,6 +395,7 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
       break;
     job_stride = required_stride;
   }
+  res.job_stride_by_group[ig] = job_stride;
 
   if (materialize_jobs)
     for (size_t iw = 0; iw < nw; ++iw)
