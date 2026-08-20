@@ -16,6 +16,7 @@
 #ifndef QMCPLUSPLUS_MULTIBSPLINE_OFFLOAD_MAPPER_PEER_HPP
 #define QMCPLUSPLUS_MULTIBSPLINE_OFFLOAD_MAPPER_PEER_HPP
 
+#include <cstddef>
 #include <string>
 #include <vector>
 #include "MultiBsplineOffloadMapper.hpp"
@@ -41,6 +42,9 @@ struct CollectiveFailure
 
 /** Report the same failure decision and source rank to every communicator member. */
 CollectiveFailure collectiveFailure(Communicate& comm, bool local_failed);
+
+/** Return whether a peer block has both storage and bytes to upload. */
+bool peerBlockNeedsUpload(const void* device_ptr, size_t bytes);
 } // namespace detail
 
 /** Map ONE device copy of the coefficients and let every device in the group read it.
@@ -69,12 +73,31 @@ class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>
   using Base        = MultiBsplineOffloadMapper<T>;
   using HostBspline = MultiBsplineBase<T>;
 
+  struct PeerBlockState
+  {
+    void* device_ptr       = nullptr;
+    bool descriptor_mapped = false;
+    bool owner_allocation  = false;
+    bool imported_handle   = false;
+    bool associated        = false;
+  };
+
   /// ranks sharing one device copy; must all be on the same node
   Communicate& comm_;
-  /// device allocation per block; block ib lives on the device of rank ib % size
-  std::vector<void*> device_ptrs_;
+  /// resource ownership for each block; block ib lives on rank ib % size
+  std::vector<PeerBlockState> peer_blocks_;
   /// whether every rank can open allocations from every owner in this node-local group
-  const bool use_peer_mapping_;
+  bool use_peer_mapping_ = false;
+  /// whether peer resources require collective teardown
+  bool peer_resources_active_ = false;
+  /// whether a failed setup or upload makes this mapper unusable
+  bool peer_mapping_failed_ = false;
+
+  /** Turn a rank-local API result into one failure path for the whole communicator. */
+  void failCollectivelyIf(bool local_failed, const char* phase, int block);
+
+  /** Release peer resources in dependency order without throwing from destruction. */
+  void cleanupPeerMappings() noexcept;
 
 public:
   /** Return whether CUDA IPC can connect every rank's selected device.

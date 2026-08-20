@@ -54,12 +54,19 @@ detail::CollectiveFailure detail::collectiveFailure(Communicate& comm, bool loca
   return {first_failure_rank < comm.size(), first_failure_rank < comm.size() ? first_failure_rank : -1};
 }
 
+bool detail::peerBlockNeedsUpload(const void* device_ptr, size_t bytes)
+{
+  return device_ptr != nullptr && bytes != 0;
+}
+
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
-    : Base(host_bsplines), comm_(comm), use_peer_mapping_(comm.size() > 1 && canShareDeviceMemory(comm))
+    : Base(host_bsplines), comm_(comm)
 {
   // IPC coefficient mappings refer to allocations owned by one rank in the group.
   // The peer destructor closes or frees them; the base destructor owns fallback maps.
+  Base::owns_coefs_mapping_ = false;
+  use_peer_mapping_        = comm.size() > 1 && canShareDeviceMemory(comm);
   Base::owns_coefs_mapping_ = !use_peer_mapping_;
 #if defined(ENABLE_CUDA)
   if (comm_.size() > 1 && !use_peer_mapping_ && comm_.rank() == 0)
@@ -159,6 +166,102 @@ bool MultiBsplineOffloadMapperPeer<T>::canShareDeviceMemory(Communicate& comm)
 }
 
 template<typename T>
+void MultiBsplineOffloadMapperPeer<T>::failCollectivelyIf(bool local_failed, const char* phase, int block)
+{
+  detail::CollectiveFailure failure{};
+  try
+  {
+    failure = detail::collectiveFailure(comm_, local_failed);
+  }
+  catch (...)
+  {
+    // A failed communicator cannot support collective cleanup. Leave the allocations
+    // untouched and prevent the destructor from entering another collective.
+    peer_mapping_failed_  = true;
+    peer_resources_active_ = false;
+    throw;
+  }
+
+  if (!failure.any_failed)
+    return;
+
+  peer_mapping_failed_ = true;
+  cleanupPeerMappings();
+  throw UniformCommunicateError("MultiBsplineOffloadMapperPeer " + std::string(phase) + " failed for block " +
+                                std::to_string(block) + " on rank " + std::to_string(failure.first_failed_rank) +
+                                "!");
+}
+
+template<typename T>
+void MultiBsplineOffloadMapperPeer<T>::cleanupPeerMappings() noexcept
+{
+  if (!peer_resources_active_)
+    return;
+  peer_resources_active_ = false;
+
+  const int dev = omp_get_default_device();
+  int local_disassociate_failure = 0;
+  for (size_t ib = 0; ib < peer_blocks_.size(); ++ib)
+  {
+    auto& block = peer_blocks_[ib];
+    if (!block.associated)
+      continue;
+
+    if (omp_target_disassociate_ptr(Base::block_coefs_[ib], dev) == 0)
+      block.associated = false;
+    else
+      local_disassociate_failure = 1;
+  }
+
+  int group_disassociate_failure = 1;
+  const bool disassociation_complete =
+      MPI_Allreduce(&local_disassociate_failure, &group_disassociate_failure, 1, MPI_INT, MPI_MAX, comm_.getMPI()) ==
+          MPI_SUCCESS &&
+      group_disassociate_failure == 0;
+
+  int local_close_failure = 0;
+  if (disassociation_complete)
+    for (auto& block : peer_blocks_)
+      if (block.imported_handle)
+      {
+        if (cudaIpcCloseMemHandle(block.device_ptr) == cudaSuccess)
+        {
+          block.imported_handle = false;
+          block.device_ptr      = nullptr;
+        }
+        else
+          local_close_failure = 1;
+      }
+
+  int group_close_failure = 1;
+  const bool imported_handles_closed =
+      disassociation_complete &&
+      MPI_Allreduce(&local_close_failure, &group_close_failure, 1, MPI_INT, MPI_MAX, comm_.getMPI()) == MPI_SUCCESS &&
+      group_close_failure == 0;
+
+  for (size_t ib = 0; ib < peer_blocks_.size(); ++ib)
+    if (peer_blocks_[ib].descriptor_mapped)
+    {
+      auto* spline_m = &Base::host_bsplines_.getBlock(ib);
+      PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1])")
+      peer_blocks_[ib].descriptor_mapped = false;
+    }
+
+  if (imported_handles_closed)
+    for (size_t ib = 0; ib < peer_blocks_.size(); ++ib)
+    {
+      auto& block = peer_blocks_[ib];
+      if (block.owner_allocation && cudaFree(block.device_ptr) == cudaSuccess)
+      {
+        block.owner_allocation = false;
+        block.device_ptr       = nullptr;
+      }
+    }
+
+  peer_blocks_.clear();
+}
+
+template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 {
   if (!use_peer_mapping_)
@@ -167,11 +270,17 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
     return;
   }
 
+  if (peer_mapping_failed_)
+    throw UniformCommunicateError("MultiBsplineOffloadMapperPeer cannot remap after a collective failure!");
+  if (peer_resources_active_)
+    throw UniformCommunicateError("MultiBsplineOffloadMapperPeer is already mapped!");
+
   const int dev     = omp_get_default_device();
   const int nranks  = comm_.size();
   const int my_rank = comm_.rank();
   const int nblocks = Base::host_bsplines_.getNumBlocks();
-  device_ptrs_.assign(nblocks, nullptr);
+  peer_blocks_.assign(nblocks, PeerBlockState{});
+  peer_resources_active_ = true;
 
   // Ownership is spread across the ranks rather than parked on rank 0, and that is
   // what makes this worth doing. A single owner holding the whole table leaves its
@@ -185,45 +294,55 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
     auto* coefs        = Base::block_coefs_[ib];
     const size_t bytes = spline_m->coefs_size * sizeof(T);
     const int owner    = ib % nranks;
+    auto& block        = peer_blocks_[ib];
 
     // the descriptor is small and per rank; only the coefficients are worth sharing
     PRAGMA_OFFLOAD("omp target enter data map(to: spline_m[:1])")
+    block.descriptor_mapped = true;
 
     // an empty block has nothing to export: cudaMalloc of zero bytes yields a pointer
     // that cudaIpcGetMemHandle rejects with an invalid argument
     if (bytes == 0)
       continue;
 
-    void* dptr = nullptr;
-    cudaIpcMemHandle_t handle;
+    cudaIpcMemHandle_t handle{};
+    bool local_owner_failure = false;
     if (my_rank == owner)
     {
-      cudaErrorCheck(cudaMalloc(&dptr, bytes), "cudaMalloc failed in MultiBsplineOffloadMapperPeer!");
-      cudaErrorCheck(cudaIpcGetMemHandle(&handle, dptr),
-                     "cudaIpcGetMemHandle failed in MultiBsplineOffloadMapperPeer!");
+      const auto allocation_status = cudaMalloc(&block.device_ptr, bytes);
+      if (allocation_status == cudaSuccess)
+      {
+        block.owner_allocation = true;
+        local_owner_failure = cudaIpcGetMemHandle(&handle, block.device_ptr) != cudaSuccess;
+      }
+      else
+        local_owner_failure = true;
     }
+    failCollectivelyIf(local_owner_failure, "allocation/export", ib);
 
     // raw MPI_Bcast rather than Communicate::bcast, which is instantiated only for
     // the arithmetic types; an IPC handle is an opaque byte blob
-    MPI_Bcast(&handle, sizeof(handle), MPI_BYTE, owner, comm_.getMPI());
+    const bool local_broadcast_failure =
+        MPI_Bcast(&handle, sizeof(handle), MPI_BYTE, owner, comm_.getMPI()) != MPI_SUCCESS;
+    failCollectivelyIf(local_broadcast_failure, "handle broadcast", ib);
 
+    bool local_open_failure = false;
     if (my_rank != owner)
     {
       // cudaIpcMemLazyEnablePeerAccess turns on access to the owner's device on first
       // use. It fails with an invalid argument when the owner's device is not visible
       // to this rank, which is what a one-device-per-task binding produces.
-      const auto err = cudaIpcOpenMemHandle(&dptr, handle, cudaIpcMemLazyEnablePeerAccess);
-      if (err != cudaSuccess)
-        throw UniformCommunicateError(
-            std::string("MultiBsplineOffloadMapperPeer: cudaIpcOpenMemHandle failed with '") + cudaGetErrorString(err) +
-            "'. Every rank sharing the coefficients must be able to address every device in the "
-            "group, so request all the devices on the node rather than binding one per task.");
+      local_open_failure =
+          cudaIpcOpenMemHandle(&block.device_ptr, handle, cudaIpcMemLazyEnablePeerAccess) != cudaSuccess;
+      if (!local_open_failure)
+        block.imported_handle = true;
     }
+    failCollectivelyIf(local_open_failure, "handle import", ib);
 
-    if (omp_target_associate_ptr(coefs, dptr, bytes, 0, dev) != 0)
-      throw UniformCommunicateError("MultiBsplineOffloadMapperPeer: omp_target_associate_ptr failed!");
-
-    device_ptrs_[ib] = dptr;
+    const bool local_association_failure = omp_target_associate_ptr(coefs, block.device_ptr, bytes, 0, dev) != 0;
+    if (!local_association_failure)
+      block.associated = true;
+    failCollectivelyIf(local_association_failure, "pointer association", ib);
   }
 }
 
@@ -236,25 +355,34 @@ void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
     return;
   }
 
+  if (peer_mapping_failed_ || !peer_resources_active_)
+    throw UniformCommunicateError("MultiBsplineOffloadMapperPeer has no usable peer mapping to update!");
+
   // each block has one physical copy, so its owner writes it and the rest wait rather
   // than pushing identical bytes at memory they do not own
   const int nranks = comm_.size();
   for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
+  {
+    bool local_upload_failure = false;
     if (comm_.rank() == ib % nranks)
     {
       auto* spline_m = &Base::host_bsplines_.getBlock(ib);
       auto* coefs    = Base::block_coefs_[ib];
-      cudaErrorCheck(cudaMemcpy(device_ptrs_[ib], coefs, spline_m->coefs_size * sizeof(T), cudaMemcpyHostToDevice),
-                     "cudaMemcpy failed in MultiBsplineOffloadMapperPeer!");
+      const size_t bytes = spline_m->coefs_size * sizeof(T);
+      if (bytes != 0)
+        local_upload_failure =
+            !detail::peerBlockNeedsUpload(peer_blocks_[ib].device_ptr, bytes) ||
+            cudaMemcpy(peer_blocks_[ib].device_ptr, coefs, bytes, cudaMemcpyHostToDevice) != cudaSuccess;
     }
-  comm_.barrier();
+    failCollectivelyIf(local_upload_failure, "coefficient upload", ib);
+  }
 
   // Each rank owns its descriptor mapping. Store the IPC allocation address in that
   // descriptor so production kernels can dereference spline_m->coefs directly.
   for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ++ib)
   {
     auto* spline_m     = &const_cast<HostBspline&>(Base::host_bsplines_).getBlock(ib);
-    auto* device_coefs = static_cast<T*>(device_ptrs_[ib]);
+    auto* device_coefs = static_cast<T*>(peer_blocks_[ib].device_ptr);
     if (!device_coefs)
       continue;
     PRAGMA_OFFLOAD("omp target is_device_ptr(device_coefs) map(always, to: spline_m[:1])")
@@ -267,26 +395,7 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
 {
   if (!use_peer_mapping_)
     return;
-
-  const int dev = omp_get_default_device();
-  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
-  {
-    auto* spline_m = &Base::host_bsplines_.getBlock(ib);
-    auto* coefs    = Base::block_coefs_[ib];
-    if (device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
-    {
-      omp_target_disassociate_ptr(coefs, dev);
-      if (comm_.rank() != ib % comm_.size())
-        cudaIpcCloseMemHandle(device_ptrs_[ib]);
-    }
-    PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1])")
-  }
-
-  // Importing ranks close every handle before an owner releases its allocation.
-  comm_.barrier();
-  for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ++ib)
-    if (comm_.rank() == ib % comm_.size() && device_ptrs_.size() > static_cast<size_t>(ib) && device_ptrs_[ib])
-      cudaFree(device_ptrs_[ib]);
+  cleanupPeerMappings();
 }
 
 #else // no device runtime that can share memory between processes
