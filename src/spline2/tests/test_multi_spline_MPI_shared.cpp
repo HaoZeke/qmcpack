@@ -355,10 +355,10 @@ struct test_shared_offload : public test_splines_base<T, 5>
     auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
     for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
       bs.set_spline(*aspline, i);
-    comm.barrier();
     destroy_Bspline(aspline);
 
-    // pushes the shared coefficients to the device and repairs the device coefs pointer
+    // publishes every rank's stores before uploading the shared coefficients and
+    // repairing the device coefs pointer
     bs.finalize();
 
     const TinyVector<T, 3> pos = {0.1, 0.2, 0.3};
