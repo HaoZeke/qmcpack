@@ -839,20 +839,21 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
 
   ParticleSet::mw_update(p_list);
 
-  std::array<std::vector<std::pair<int, int>>, 2> host_pairs;
+  std::array<std::vector<NLPPJob<Real>>, 2> host_jobs;
   for (size_t iw = 0; iw < p_list.size(); ++iw)
   {
     const auto& table = p_list[iw].getDistTableAB(testing::TestNonLocalECPotential::getTableIndex(nl_ecp));
     for (int jel = p_list[iw].first(0); jel < p_list[iw].last(0); ++jel)
     {
-      const auto& dist = table.getDistRow(jel);
+      const auto& dist  = table.getDistRow(jel);
+      const auto& displ = table.getDisplRow(jel);
       for (int iat = 0; iat < ions.getTotalNum(); ++iat)
         if (dist[iat] < testing::TestNonLocalECPotential::getRmax(nl_ecp, iat))
-          host_pairs[iw].emplace_back(iat, jel);
+          host_jobs[iw].emplace_back(iat, jel, dist[iat], -displ[iat]);
     }
   }
-  REQUIRE(host_pairs[0].size() == 11);
-  REQUIRE(host_pairs[1].size() == 10);
+  REQUIRE(host_jobs[0].size() == 11);
+  REQUIRE(host_jobs[1].size() == 10);
 
   const auto check_device_jobs = [&]() {
     REQUIRE(testing::TestNonLocalECPotential::buildNeighborJobsOnDevice(o_list, p_list, 0));
@@ -860,11 +861,14 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
     {
       const auto& jobs =
           testing::TestNonLocalECPotential::getNeighborJobs(o_list.getCastedElement<NonLocalECPotential>(iw), 0);
-      REQUIRE(jobs.size() == host_pairs[iw].size());
+      REQUIRE(jobs.size() == host_jobs[iw].size());
       for (size_t job_id = 0; job_id < jobs.size(); ++job_id)
       {
-        CHECK(jobs[job_id].ion_id == host_pairs[iw][job_id].first);
-        CHECK(jobs[job_id].electron_id == host_pairs[iw][job_id].second);
+        CHECK(jobs[job_id].ion_id == host_jobs[iw][job_id].ion_id);
+        CHECK(jobs[job_id].electron_id == host_jobs[iw][job_id].electron_id);
+        CHECK(jobs[job_id].ion_elec_dist == Approx(host_jobs[iw][job_id].ion_elec_dist));
+        for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+          CHECK(jobs[job_id].ion_elec_displ[idim] == Approx(host_jobs[iw][job_id].ion_elec_displ[idim]));
       }
     }
   };
