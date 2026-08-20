@@ -45,24 +45,25 @@ public:
     DIM     = OHMMS_DIM,
     DIM_VGL = OHMMS_DIM + 2 // Value(1) + Gradients(OHMMS_DIM) + Laplacian(1)
   };
-  using ValueType         = T;
-  using PosType           = QMCTraits::QTBase::PosType;
-  using IndexType         = QMCTraits::IndexType;
-  using RealType          = typename OrbitalSetTraits<ValueType>::RealType;
-  using ComplexType       = std::complex<RealType>;
-  using GradType          = typename OrbitalSetTraits<ValueType>::GradType;
-  using FullPrecValue     = ValueAlias<OHMMS_PRECISION_FULL, ValueType>;
-  using ValueVector       = typename OrbitalSetTraits<ValueType>::ValueVector;
-  using ValueMatrix       = typename OrbitalSetTraits<ValueType>::ValueMatrix;
-  using GradVector        = typename OrbitalSetTraits<ValueType>::GradVector;
-  using GradMatrix        = typename OrbitalSetTraits<ValueType>::GradMatrix;
-  using HessVector        = typename OrbitalSetTraits<ValueType>::HessVector;
-  using HessMatrix        = typename OrbitalSetTraits<ValueType>::HessMatrix;
-  using GGGVector         = typename OrbitalSetTraits<ValueType>::GradHessVector;
-  using GGGMatrix         = typename OrbitalSetTraits<ValueType>::GradHessMatrix;
-  using SPOMap            = std::map<std::string, const std::unique_ptr<const SPOSetT>>;
-  using OffloadMWVGLArray = Array<ValueType, 3, OffloadPinnedAllocator<ValueType>>; // [VGL, walker, Orbs]
-  using OffloadMWVArray   = Array<ValueType, 2, OffloadPinnedAllocator<ValueType>>; // [walker, Orbs]
+  using ValueType          = T;
+  using PosType            = QMCTraits::QTBase::PosType;
+  using IndexType          = QMCTraits::IndexType;
+  using RealType           = typename OrbitalSetTraits<ValueType>::RealType;
+  using ComplexType        = std::complex<RealType>;
+  using GradType           = typename OrbitalSetTraits<ValueType>::GradType;
+  using FullPrecValue      = ValueAlias<OHMMS_PRECISION_FULL, ValueType>;
+  using ValueVector        = typename OrbitalSetTraits<ValueType>::ValueVector;
+  using ValueMatrix        = typename OrbitalSetTraits<ValueType>::ValueMatrix;
+  using GradVector         = typename OrbitalSetTraits<ValueType>::GradVector;
+  using GradMatrix         = typename OrbitalSetTraits<ValueType>::GradMatrix;
+  using HessVector         = typename OrbitalSetTraits<ValueType>::HessVector;
+  using HessMatrix         = typename OrbitalSetTraits<ValueType>::HessMatrix;
+  using GGGVector          = typename OrbitalSetTraits<ValueType>::GradHessVector;
+  using GGGMatrix          = typename OrbitalSetTraits<ValueType>::GradHessMatrix;
+  using SPOMap             = std::map<std::string, const std::unique_ptr<const SPOSetT>>;
+  using OffloadValueVector = Vector<ValueType, OffloadPinnedAllocator<ValueType>>;
+  using OffloadMWVGLArray  = Array<ValueType, 3, OffloadPinnedAllocator<ValueType>>; // [VGL, walker, Orbs]
+  using OffloadMWVArray    = Array<ValueType, 2, OffloadPinnedAllocator<ValueType>>; // [walker, Orbs]
   template<typename DT>
   using OffloadMatrix = Matrix<DT, OffloadPinnedAllocator<DT>>;
 
@@ -350,6 +351,18 @@ public:
                                               OffloadMWVGLArray& phi_vgl_v,
                                               std::vector<ValueType>& ratios,
                                               std::vector<GradType>& grads) const;
+
+  /** Evaluate orbital VGL data and determinant ratios and gradients for multiple walkers.
+   *
+   * Device data of phi_vgl_v, ratios, and flattened walker-major grads is up to date upon return.
+   */
+  virtual void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSetT>& spo_list,
+                                                    const RefVectorWithLeader<ParticleSet>& P_list,
+                                                    int iat,
+                                                    const std::vector<const ValueType*>& invRow_ptr_list,
+                                                    OffloadMWVGLArray& phi_vgl_v,
+                                                    OffloadValueVector& ratios,
+                                                    OffloadValueVector& grads) const;
 
   /** evaluate the values, gradients and laplacians of this single-particle orbital sets and determinant ratio
    *  and grads of multiple walkers. Device data of phi_vgl_v must be up-to-date upon return.

@@ -182,6 +182,32 @@ void SPOSetT<T>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPOSet
 }
 
 template<typename T>
+void SPOSetT<T>::mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSetT>& spo_list,
+                                                      const RefVectorWithLeader<ParticleSet>& P_list,
+                                                      int iat,
+                                                      const std::vector<const ValueType*>& invRow_ptr_list,
+                                                      OffloadMWVGLArray& phi_vgl_v,
+                                                      OffloadValueVector& ratios,
+                                                      OffloadValueVector& grads) const
+{
+  const size_t nw = spo_list.size();
+  std::vector<ValueType> host_ratios(nw);
+  std::vector<GradType> host_grads(nw);
+  mw_evaluateVGLandDetRatioGrads(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v, host_ratios, host_grads);
+
+  ratios.resize(nw);
+  grads.resize(nw * DIM);
+  for (size_t iw = 0; iw < nw; ++iw)
+  {
+    ratios[iw] = host_ratios[iw];
+    for (size_t idim = 0; idim < DIM; ++idim)
+      grads[iw * DIM + idim] = host_grads[iw][idim];
+  }
+  ratios.updateTo();
+  grads.updateTo();
+}
+
+template<typename T>
 void SPOSetT<T>::mw_evaluateVGLandDetRatioGradsWithSpin(const RefVectorWithLeader<SPOSetT>& spo_list,
                                                         const RefVectorWithLeader<ParticleSet>& P_list,
                                                         int iat,
