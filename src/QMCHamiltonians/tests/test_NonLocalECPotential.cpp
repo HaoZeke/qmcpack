@@ -816,7 +816,7 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
   TrialWaveFunction psi(runtime_options);
   TrialWaveFunction psi2(runtime_options);
 
-  NonLocalECPotential nl_ecp(ions, elec, false, false);
+  NonLocalECPotential nl_ecp(ions, elec, false, true);
   Communicate* comm = OHMMS::Controller;
   ECPComponentBuilder ecp_comp_builder("test_read_ecp", comm, 4, 1);
   REQUIRE(ecp_comp_builder.read_pp_file("Na.BFD.xml"));
@@ -878,6 +878,18 @@ TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
   {
     ResourceCollectionTeamLock<OperatorBase> copied_nl_ecp_lock(copied_nl_ecp_res, o_list);
     check_device_jobs();
+
+    RefVectorWithLeader<TrialWaveFunction> twf_list(psi, {psi, psi2});
+    testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp);
+    testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp2);
+    testing::TestNonLocalECPotential::mw_evaluateImpl(nl_ecp, o_list, twf_list, p_list, false, std::nullopt, true);
+
+    const auto mw_value  = nl_ecp.getValue();
+    const auto mw_value2 = nl_ecp2.getValue();
+    testing::TestNonLocalECPotential::evaluateImpl(nl_ecp, psi, elec, false, true);
+    testing::TestNonLocalECPotential::evaluateImpl(nl_ecp2, psi2, elec2, false, true);
+    CHECK(nl_ecp.getValue() == Approx(mw_value));
+    CHECK(nl_ecp2.getValue() == Approx(mw_value2));
   }
 }
 #endif
