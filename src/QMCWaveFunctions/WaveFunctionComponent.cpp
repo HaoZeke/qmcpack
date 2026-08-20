@@ -153,6 +153,25 @@ void WaveFunctionComponent::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionC
     ratios[iw] = wfc_list[iw].ratioGrad(p_list[iw], iat, grad_new[iw]);
 }
 
+void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                               const RefVectorWithLeader<ParticleSet>& p_list,
+                                               int iat,
+                                               OffloadRatioVector& ratios,
+                                               OffloadGradVector& grads) const
+{
+  const size_t nw = wfc_list.size();
+  std::vector<PsiValue> host_ratios(nw);
+  std::vector<GradType> host_grads(nw, GradType(0));
+  mw_ratioGrad(wfc_list, p_list, iat, host_ratios, host_grads);
+
+  ratios.resize(nw);
+  grads.resize(nw);
+  std::copy(host_ratios.begin(), host_ratios.end(), ratios.begin());
+  std::copy(host_grads.begin(), host_grads.end(), grads.begin());
+  ratios.updateTo();
+  grads.updateTo();
+}
+
 void WaveFunctionComponent::mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                                  const RefVectorWithLeader<ParticleSet>& p_list,
                                                  int iat,

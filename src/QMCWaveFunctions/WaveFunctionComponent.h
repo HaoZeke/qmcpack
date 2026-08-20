@@ -302,6 +302,20 @@ public:
                             std::vector<PsiValue>& ratios,
                             std::vector<GradType>& grad_new) const;
 
+  using OffloadRatioVector = Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>;
+  using OffloadGradVector  = Vector<GradType, OffloadPinnedAllocator<GradType>>;
+
+  /** Evaluate component ratios and gradient contributions for multiple walkers.
+   *
+   * Device data of ratios and gradients is up to date upon return. The default
+   * implementation evaluates on the host and transfers the component results.
+   */
+  virtual void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                  const RefVectorWithLeader<ParticleSet>& p_list,
+                                  int iat,
+                                  OffloadRatioVector& ratios,
+                                  OffloadGradVector& grads) const;
+
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet
    * @param iat index of the particle whose new position was proposed
