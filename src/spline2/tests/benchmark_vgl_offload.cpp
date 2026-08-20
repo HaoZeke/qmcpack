@@ -43,7 +43,7 @@ using RealType = OHMMS_PRECISION;
 constexpr int grid_size           = 20;
 constexpr int npos                = 512;
 constexpr int nrepeat             = 40;
-constexpr int ntrials             = 5;
+constexpr int ntrials             = 6;
 constexpr size_t ChunkSizePerTeam = 512;
 constexpr RealType output_canary  = RealType(-12345.5);
 
@@ -180,7 +180,10 @@ double measure(Evaluator&& evaluator)
 double median(std::vector<double> samples)
 {
   std::sort(samples.begin(), samples.end());
-  return samples[samples.size() / 2];
+  const size_t middle = samples.size() / 2;
+  if (samples.size() % 2 != 0)
+    return samples[middle];
+  return (samples[middle - 1] + samples[middle]) / 2;
 }
 
 bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_output,
