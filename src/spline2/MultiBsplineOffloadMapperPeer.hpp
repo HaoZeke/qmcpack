@@ -38,18 +38,9 @@ namespace qmcplusplus
  * QMC_OFFLOAD_MEM_ASSOCIATED, so the evaluation kernels are untouched: they still
  * dereference spline_m->coefs inside the target region and reach the shared copy.
  *
- * Measured on a Snellius gpu_h100 node, four H100s connected NV6 all to all: one
- * allocation on device 0, read correctly from devices 0, 1, 2 and 3.
- *
- * Two constraints the caller has to respect.
- *
- * Every rank in the group must be able to SEE every device in it. Under a scheduler
- * request that binds one device per task, each rank sees a single device and
- * cudaIpcOpenMemHandle fails with an invalid argument, because a rank cannot map
- * memory belonging to a device it cannot address. Ask for all the devices on the node
- * and let each rank select its own.
- *
- * The group must be within one node. IPC handles do not cross node boundaries.
+ * CUDA IPC requires a node-local group in which every rank can see and access each
+ * selected device. The mapper checks that invariant collectively and uses ordinary
+ * per-rank mappings when it is not satisfied.
  */
 template<typename T>
 class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>

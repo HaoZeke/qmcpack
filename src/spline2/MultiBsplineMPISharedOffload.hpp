@@ -36,17 +36,14 @@ namespace qmcplusplus
  * copy per group of ranks, but has no route to a device. MultiBsplineOffloadMapper
  * already maps an arbitrary host spline onto devices. This joins the two.
  *
- * Sharing is what the SPO evaluation can consume today, and it is what the reader asks
- * for. Distributing is accepted by the constructor because the machinery underneath
- * supports it, MultiBsplineMPIShared divides the orbitals into blocks and
- * MultiBsplineOffloadMapper maps and evaluates every block, but it is not yet reachable
- * from a deck: several evaluation paths in SplineC2COMPTarget and SplineC2ROMPTarget
- * still call getSplinePtr(), which throws unless there is exactly one block.
+ * MultiBsplineMPIShared divides the orbitals into blocks, and
+ * MultiBsplineOffloadMapper maps and evaluates each block. Complex offload SPO paths
+ * consume distributed blocks directly. Real offload SPO paths require one block.
  *
- * With one block, device memory is unchanged: each rank maps the whole table onto its
- * own device, and what shrinks is host memory, by the size of the sharing group. Device
- * memory is the ceiling that actually limits walkers per device, and only distributing
- * moves it.
+ * A peer-capable node places each block on one selected device and lets the other ranks
+ * read it through CUDA IPC. Ownership rotates across ranks, so matching the number of
+ * blocks to the selected devices balances coefficient storage. Configurations without
+ * mutual peer access use one complete device mapping per rank.
  */
 template<typename T>
 class MultiBsplineMPISharedOffload : public MultiBsplineMPIShared<T>
@@ -60,12 +57,8 @@ private:
 public:
   /** @param distributed_ranks how many blocks to divide the orbitals into.
    *
-   * 1 shares one copy of every orbital across the group, which is all the SPO
-   * evaluation can consume today. Larger values divide the orbitals into that many
-   * blocks, which is what would let a multi-device node stop holding the whole table
-   * on every device, and the mapper and the base class already handle it. The reader
-   * still refuses to ask for more than 1 until every evaluation path stops calling
-   * getSplinePtr(), so this parameter exists to be tested rather than deployed.
+   * 1 keeps every orbital in one block. Larger values divide the orbitals into that
+   * many blocks so ownership can be balanced across devices.
    */
   template<typename BCT>
   MultiBsplineMPISharedOffload(const Ugrid grid[3],
@@ -88,15 +81,7 @@ public:
     mapper_->mapToDevice();
   }
 
-  /** copy the coefficients to the device and repair the device-side coefs pointer.
-   *
-   * Called once construction has filled the host coefficients. The single map clause
-   * does both jobs, as in MultiBsplineOffload::finalize: coefs is already present on
-   * the device from mapToDevice, so mapping it here copies into that allocation, and
-   * naming it in the clause is what makes the assignment below store a device address
-   * rather than a host one. The fixup is required because the offload kernels in
-   * SplineC2COMPTarget dereference spline_m->coefs inside the target region.
-   */
+  /** Upload coefficients through the selected mapper and attach descriptor pointers. */
   void finalize() override { mapper_->updateToDevice(); }
 
   /** Evaluate mapped spline values through the mapper owned by this object.
