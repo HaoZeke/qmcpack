@@ -201,8 +201,8 @@ void test_mapped_vgl_contraction()
   test_splines_base<T, 5, num_splines> setup;
   MultiBspline<T> bs(setup.grid, setup.bc, setup.npad);
 
-  UBspline_3d_d* aspline = create_UBspline_3d_d(setup.grid[0], setup.grid[1], setup.grid[2], setup.bc[0],
-                                                setup.bc[1], setup.bc[2], setup.data.data());
+  UBspline_3d_d* aspline = create_UBspline_3d_d(setup.grid[0], setup.grid[1], setup.grid[2], setup.bc[0], setup.bc[1],
+                                                setup.bc[2], setup.data.data());
   REQUIRE(aspline != nullptr);
   for (int i = 0; i < num_splines; ++i)
     bs.set_spline(*aspline, i);
@@ -213,8 +213,7 @@ void test_mapped_vgl_contraction()
   mapped_bs.updateToDevice();
 
   // A non-diagonal reciprocal lattice produces all six independent metric terms.
-  const T reciprocal_lattice[9] = {T(1.0),  T(0.2), T(-0.1), T(0.05), T(0.9),
-                                   T(0.3), T(-0.2), T(0.1), T(1.1)};
+  const T reciprocal_lattice[9] = {T(1.0), T(0.2), T(-0.1), T(0.05), T(0.9), T(0.3), T(-0.2), T(0.1), T(1.1)};
   Vector<T, OffloadAllocator<T>> GGt(9);
   for (int row = 0; row < 3; ++row)
     for (int col = 0; col < 3; ++col)
@@ -240,16 +239,16 @@ void test_mapped_vgl_contraction()
   {
     int ix, iy, iz;
     T a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
-    spline2::computeLocationAndFractional(spline_ptr, T(0.137), T(0.293), T(0.419), ix, iy, iz, a, b, c, da,
-                                          db, dc, d2a, d2b, d2c);
+    spline2::computeLocationAndFractional(spline_ptr, T(0.137), T(0.293), T(0.419), ix, iy, iz, a, b, c, da, db, dc,
+                                          d2a, d2b, d2c);
     const T symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
                          GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
 
     PRAGMA_OFFLOAD("omp distribute parallel for")
     for (int index = 0; index < num_splines; ++index)
     {
-      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc,
-                                           d2a, d2b, d2c, vgh_output_ptr + index, field_stride);
+      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
+                                           d2c, vgh_output_ptr + index, field_stride);
       vgh_output_ptr[field_stride * SoAFields3D::LAPL + index] =
           SymTrace(vgh_output_ptr[field_stride * SoAFields3D::HESS00 + index],
                    vgh_output_ptr[field_stride * SoAFields3D::HESS01 + index],
@@ -258,9 +257,8 @@ void test_mapped_vgl_contraction()
                    vgh_output_ptr[field_stride * SoAFields3D::HESS12 + index],
                    vgh_output_ptr[field_stride * SoAFields3D::HESS22 + index], symGGt);
 
-      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc,
-                                           d2a, d2b, d2c, symGGt, vgl_output_ptr + index, field_stride,
-                                           field_stride * 4);
+      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
+                                           d2c, symGGt, vgl_output_ptr + index, field_stride, field_stride * 4);
     }
   }
 

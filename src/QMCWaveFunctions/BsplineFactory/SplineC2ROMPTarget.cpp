@@ -636,9 +636,8 @@ void SplineC2ROMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
         for (int index = 0; index < last - first; index++)
         {
           spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, symGGt,
-                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
-                                               spline_padded_size * SoAFields3D::LAPL);
+                                               db, dc, d2a, d2b, d2c, symGGt, offload_scratch_iw_ptr + first + index,
+                                               spline_padded_size, spline_padded_size * SoAFields3D::LAPL);
         }
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
@@ -800,9 +799,8 @@ void SplineC2ROMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         for (int index = 0; index < last - first; index++)
         {
           spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, symGGt,
-                                               offload_scratch_iw_ptr + first + index, spline_padded_size,
-                                               spline_padded_size * SoAFields3D::LAPL);
+                                               db, dc, d2a, d2b, d2c, symGGt, offload_scratch_iw_ptr + first + index,
+                                               spline_padded_size, spline_padded_size * SoAFields3D::LAPL);
         }
         const size_t first_cplx = first / 2;
         const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);

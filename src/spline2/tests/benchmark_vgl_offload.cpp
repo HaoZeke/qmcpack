@@ -89,25 +89,22 @@ void evaluate_vgh_trace(const SplineType* spline_ptr,
     const RealType x = fraction + RealType(0.001) * ip;
     const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
     const RealType z = RealType(0.25) + RealType(0.003) * ip;
-    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix,
-                                          iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c);
+    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
+                                          iz, a, b, c, da, db, dc, d2a, d2b, d2c);
     const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
                                 GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
-    RealType* out = output + position_stride * ip;
+    RealType* out            = output + position_stride * ip;
 
     PRAGMA_OFFLOAD("omp parallel for")
     for (size_t spline_index = 0; spline_index < padded; ++spline_index)
     {
-      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz,
-                                           static_cast<int>(spline_index), a, b, c, da, db, dc, d2a, d2b, d2c,
-                                           out + spline_index, padded);
+      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index), a,
+                                           b, c, da, db, dc, d2a, d2b, d2c, out + spline_index, padded);
       out[padded * SoAFields3D::LAPL + spline_index] =
-          SymTrace(out[padded * SoAFields3D::HESS00 + spline_index],
-                   out[padded * SoAFields3D::HESS01 + spline_index],
-                   out[padded * SoAFields3D::HESS02 + spline_index],
-                   out[padded * SoAFields3D::HESS11 + spline_index],
-                   out[padded * SoAFields3D::HESS12 + spline_index],
-                   out[padded * SoAFields3D::HESS22 + spline_index], symGGt);
+          SymTrace(out[padded * SoAFields3D::HESS00 + spline_index], out[padded * SoAFields3D::HESS01 + spline_index],
+                   out[padded * SoAFields3D::HESS02 + spline_index], out[padded * SoAFields3D::HESS11 + spline_index],
+                   out[padded * SoAFields3D::HESS12 + spline_index], out[padded * SoAFields3D::HESS22 + spline_index],
+                   symGGt);
     }
   }
 }
@@ -128,17 +125,17 @@ void evaluate_vgl(const SplineType* spline_ptr,
     const RealType x = fraction + RealType(0.001) * ip;
     const RealType y = RealType(0.5) * fraction + RealType(0.002) * ip;
     const RealType z = RealType(0.25) + RealType(0.003) * ip;
-    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix,
-                                          iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c);
+    spline2::computeLocationAndFractional(spline_ptr, x - std::floor(x), y - std::floor(y), z - std::floor(z), ix, iy,
+                                          iz, a, b, c, da, db, dc, d2a, d2b, d2c);
     const RealType symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
                                 GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
-    RealType* out = output + position_stride * ip;
+    RealType* out            = output + position_stride * ip;
 
     PRAGMA_OFFLOAD("omp parallel for")
     for (size_t spline_index = 0; spline_index < padded; ++spline_index)
-      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz,
-                                           static_cast<int>(spline_index), a, b, c, da, db, dc, d2a, d2b, d2c,
-                                           symGGt, out + spline_index, padded, padded * 4);
+      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(spline_index), a,
+                                           b, c, da, db, dc, d2a, d2b, d2c, symGGt, out + spline_index, padded,
+                                           padded * 4);
   }
 }
 
@@ -163,8 +160,8 @@ bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_ou
                       int requested,
                       size_t padded)
 {
-  const int vgh_fields[5] = {SoAFields3D::VAL, SoAFields3D::GRAD0, SoAFields3D::GRAD1, SoAFields3D::GRAD2,
-                             SoAFields3D::LAPL};
+  const int vgh_fields[5]  = {SoAFields3D::VAL, SoAFields3D::GRAD0, SoAFields3D::GRAD1, SoAFields3D::GRAD2,
+                              SoAFields3D::LAPL};
   const RealType tolerance = RealType(256) * std::numeric_limits<RealType>::epsilon();
   const size_t vgh_stride  = padded * SoAFields3D::NUM_FIELDS;
   const size_t vgl_stride  = padded * 5;
@@ -173,8 +170,8 @@ bool validate_outputs(const Vector<RealType, OffloadAllocator<RealType>>& vgh_ou
     for (int field = 0; field < 5; ++field)
       for (int spline_index = 0; spline_index < requested; ++spline_index)
       {
-        const RealType vgh = vgh_output[vgh_stride * ip + padded * vgh_fields[field] + spline_index];
-        const RealType vgl = vgl_output[vgl_stride * ip + padded * field + spline_index];
+        const RealType vgh   = vgh_output[vgh_stride * ip + padded * vgh_fields[field] + spline_index];
+        const RealType vgl   = vgl_output[vgl_stride * ip + padded * field + spline_index];
         const RealType scale = std::max({RealType(1), std::abs(vgh), std::abs(vgl)});
         if (std::abs(vgh - vgl) > tolerance * scale)
         {
@@ -208,8 +205,8 @@ int main(int argc, char** argv)
 
   std::printf("# mapped-device B-spline VGL, grid %d^3, %d positions, %d repeats, %d trials\n", grid_size, npos,
               nrepeat, ntrials);
-  std::printf("# %-10s %-10s %-12s %-12s %-12s %-12s %s\n", "orbitals", "padded", "vgh_ms", "vgl_ms",
-              "speedup", "ns_per_eval", "checksum");
+  std::printf("# %-10s %-10s %-12s %-12s %-12s %-12s %s\n", "orbitals", "padded", "vgh_ms", "vgl_ms", "speedup",
+              "ns_per_eval", "checksum");
 
   for (const int requested : sizes)
   {
@@ -233,9 +230,9 @@ int main(int argc, char** argv)
     mapper.updateToDevice();
 
     // G*G^T for a non-diagonal reciprocal lattice.
-    Vector<RealType, OffloadAllocator<RealType>> GGt{RealType(1.05), RealType(0.20),   RealType(-0.29),
-                                                     RealType(0.20), RealType(0.9025), RealType(0.41),
-                                                     RealType(-0.29), RealType(0.41),  RealType(1.26)};
+    Vector<RealType, OffloadAllocator<RealType>> GGt{RealType(1.05),  RealType(0.20),   RealType(-0.29),
+                                                     RealType(0.20),  RealType(0.9025), RealType(0.41),
+                                                     RealType(-0.29), RealType(0.41),   RealType(1.26)};
     GGt.updateTo();
 
     Vector<RealType, OffloadAllocator<RealType>> vgh_output(npos * padded * SoAFields3D::NUM_FIELDS);
@@ -248,7 +245,9 @@ int main(int argc, char** argv)
     const auto run_vgh = [&](RealType fraction) {
       evaluate_vgh_trace(spline_ptr, GGt_ptr, vgh_output_ptr, padded, fraction);
     };
-    const auto run_vgl = [&](RealType fraction) { evaluate_vgl(spline_ptr, GGt_ptr, vgl_output_ptr, padded, fraction); };
+    const auto run_vgl = [&](RealType fraction) {
+      evaluate_vgl(spline_ptr, GGt_ptr, vgl_output_ptr, padded, fraction);
+    };
 
     run_vgh(RealType(0.375));
     run_vgl(RealType(0.375));
@@ -281,11 +280,11 @@ int main(int argc, char** argv)
       }
     }
 
-    const double vgh_ms       = median(vgh_samples);
-    const double vgl_ms       = median(vgl_samples);
-    const double ns_per_eval  = vgl_ms * 1e6 / (static_cast<double>(nrepeat) * npos * padded);
-    const size_t vgl_stride   = padded * 5;
-    double checksum           = 0.0;
+    const double vgh_ms      = median(vgh_samples);
+    const double vgl_ms      = median(vgl_samples);
+    const double ns_per_eval = vgl_ms * 1e6 / (static_cast<double>(nrepeat) * npos * padded);
+    const size_t vgl_stride  = padded * 5;
+    double checksum          = 0.0;
     vgl_output.updateFrom();
     for (int ip = 0; ip < npos; ++ip)
       for (int spline_index = 0; spline_index < requested; ++spline_index)
