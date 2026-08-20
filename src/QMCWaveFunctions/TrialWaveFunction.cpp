@@ -740,6 +740,49 @@ void TrialWaveFunction::mw_calcRatioGrad(const RefVectorWithLeader<TrialWaveFunc
   }
 }
 
+void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                               const RefVectorWithLeader<ParticleSet>& p_list,
+                                               int iat,
+                                               OffloadRatioVector& ratios,
+                                               OffloadGradVector& grads)
+{
+  assert(wf_list.size() == p_list.size());
+  const size_t nw = wf_list.size();
+  ratios.resize(nw);
+  grads.resize(nw);
+  auto* ratios_ptr = ratios.device_data();
+  auto* grads_ptr  = grads.device_data();
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(ratios_ptr, grads_ptr)")
+  for (size_t iw = 0; iw < nw; ++iw)
+  {
+    ratios_ptr[iw] = PsiValue(1);
+    grads_ptr[iw]  = GradType(0);
+  }
+
+  auto& wf_leader = wf_list.getLeader();
+  ScopedTimer local_timer(wf_leader.TWF_timers_[VGL_TIMER]);
+  OffloadRatioVector component_ratios;
+  OffloadGradVector component_grads;
+  for (int i = 0; i < wf_leader.Z.size(); ++i)
+  {
+    ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER + TIMER_SKIP * i]);
+    const auto wfc_list(wf_leader.extractWFCRefList(wf_list, i));
+    wf_leader.Z[i]->mw_ratioGradDevice(wfc_list, p_list, iat, component_ratios, component_grads);
+
+    const auto* component_ratios_ptr = component_ratios.device_data();
+    const auto* component_grads_ptr  = component_grads.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                    is_device_ptr(ratios_ptr, grads_ptr, component_ratios_ptr, component_grads_ptr)")
+    for (size_t iw = 0; iw < nw; ++iw)
+    {
+      ratios_ptr[iw] *= component_ratios_ptr[iw];
+      for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+        grads_ptr[iw][idim] += component_grads_ptr[iw][idim];
+    }
+  }
+}
+
 void TrialWaveFunction::printGL(ParticleSet::ParticleGradient& G, ParticleSet::ParticleLaplacian& L, std::string tag)
 {
   std::ostringstream o;

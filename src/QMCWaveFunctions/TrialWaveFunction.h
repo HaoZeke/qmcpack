@@ -396,6 +396,16 @@ public:
                                std::vector<PsiValue>& ratios,
                                TWFGrads<CT>& grads);
 
+  using OffloadRatioVector = WaveFunctionComponent::OffloadRatioVector;
+  using OffloadGradVector  = WaveFunctionComponent::OffloadGradVector;
+
+  /** Form the ratio product and summed position gradients in device storage. */
+  static void mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     int iat,
+                                     OffloadRatioVector& ratios,
+                                     OffloadGradVector& grads);
+
   /** Prepare internal data for updating WFC correspond to a particle group
    *  Particle groups usually correspond to determinants of different spins.
    *  This call can be used to handle precomputation for PbyP moves.
