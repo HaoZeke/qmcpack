@@ -27,6 +27,31 @@
 namespace qmcplusplus
 {
 
+TEST_CASE("MultiBspline peer topology policy", "[spline2][shared-offload]")
+{
+  const std::string local_node = "node-a";
+  const std::string local_gpu  = "0000:01:00.0";
+  const std::vector<std::string> owner_nodes{"node-a", "node-a"};
+  const std::vector<std::string> owner_gpus{"0000:01:00.0", "0000:02:00.0"};
+
+  CHECK(detail::localPeerTopologyAllowsSharing(local_node, local_gpu, owner_gpus, owner_nodes, owner_gpus, {1, 1}));
+  CHECK_FALSE(
+      detail::localPeerTopologyAllowsSharing(local_node, local_gpu, {local_gpu}, owner_nodes, owner_gpus, {1, 1}));
+  CHECK_FALSE(detail::localPeerTopologyAllowsSharing(local_node, local_gpu, owner_gpus, {"node-a", "node-b"},
+                                                     owner_gpus, {1, 1}));
+  CHECK_FALSE(
+      detail::localPeerTopologyAllowsSharing(local_node, local_gpu, owner_gpus, owner_nodes, owner_gpus, {1, 0}));
+}
+
+TEST_CASE("MultiBspline peer failures are collective", "[spline2][shared-offload][peer-collective]")
+{
+  auto& comm              = *OHMMS::Controller;
+  const auto failure      = detail::collectiveFailure(comm, comm.rank() == 1);
+  const bool has_rank_one = comm.size() > 1;
+  CHECK(failure.any_failed == has_rank_one);
+  CHECK(failure.first_failed_rank == (has_rank_one ? 1 : -1));
+}
+
 /** Supports testing many sizes of splines for benchmarking
  *  modified from einspline/tests/test_3d.cpp
  */
