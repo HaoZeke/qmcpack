@@ -488,6 +488,26 @@ struct test_peer_offload : public test_splines_base<T, 5>
     MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
     REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
+    if (distributed_ranks > 1)
+    {
+      const size_t alignment = getAlignment<T>();
+      REQUIRE(num_splines == (distributed_ranks - 1) * alignment + 2);
+
+      const auto& block_starts = bs.getBlockOffsets();
+      REQUIRE(block_starts.size() == distributed_ranks + 1);
+      for (size_t ib = 0; ib + 1 < distributed_ranks; ++ib)
+      {
+        REQUIRE(block_starts[ib] == ib * alignment);
+        REQUIRE(bs.getBlock(ib).num_splines == alignment);
+        REQUIRE(bs.getBlock(ib).z_stride == alignment);
+      }
+      REQUIRE(block_starts[distributed_ranks - 1] == (distributed_ranks - 1) * alignment);
+      REQUIRE(block_starts[distributed_ranks] == num_splines);
+      REQUIRE(bs.getBlock(distributed_ranks - 1).num_splines == 2);
+      REQUIRE(bs.getBlock(distributed_ranks - 1).z_stride == alignment);
+      REQUIRE(bs.num_splines_padded() == distributed_ranks * alignment);
+    }
+
     const size_t npad      = getAlignedSize<T>(num_splines);
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
     auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
@@ -528,9 +548,9 @@ TEST_CASE("MultiBsplineOffloadMapperPeer shared device copy", "[spline2][shared-
   test_peer_offload<double>().test(13);
   test_peer_offload<float>().test(11);
   // more than one block, so ownership rotates and every rank allocates a share
-  test_peer_offload<double>().test(13, 2);
-  test_peer_offload<float>().test(11, 2);
-  test_peer_offload<double>().test(13, 4);
+  test_peer_offload<double>().test(getAlignment<double>() + 2, 2);
+  test_peer_offload<float>().test(getAlignment<float>() + 2, 2);
+  test_peer_offload<double>().test(3 * getAlignment<double>() + 2, 4);
 }
 
 TEST_CASE("MultiBsplineMPIShared distributed offload double", "[spline2]")
