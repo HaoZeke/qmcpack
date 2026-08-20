@@ -38,6 +38,9 @@ namespace qmcplusplus
 struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Resource
 {
   NonLocalECPotentialMultiWalkerResource() : Resource("NonLocalECPotential") {}
+  NonLocalECPotentialMultiWalkerResource(const NonLocalECPotentialMultiWalkerResource& other)
+      : Resource("NonLocalECPotential"), collection(other.collection)
+  {}
 
   std::unique_ptr<Resource> makeClone() const override
   { return std::make_unique<NonLocalECPotentialMultiWalkerResource>(*this); }
