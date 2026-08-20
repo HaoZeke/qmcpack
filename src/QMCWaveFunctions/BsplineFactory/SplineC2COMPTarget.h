@@ -95,6 +95,12 @@ private:
                            const RefVector<GradVector>& dpsi_v_list,
                            const RefVector<ValueVector>& d2psi_v_list) const;
 
+  void mw_evaluateVGLandDetRatioGradsKernel(const RefVectorWithLeader<SPOSet>& spo_list,
+                                            const RefVectorWithLeader<ParticleSet>& P_list,
+                                            int iat,
+                                            const std::vector<const ValueType*>& invRow_ptr_list,
+                                            OffloadMWVGLArray& phi_vgl_v) const;
+
 protected:
   ///multi bspline set
   const std::shared_ptr<MultiBsplineBase<ST>> SplineInst;
@@ -231,6 +237,14 @@ public:
                                               OffloadMWVGLArray& phi_vgl_v,
                                               std::vector<ValueType>& ratios,
                                               std::vector<GradType>& grads) const override;
+
+  void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSet>& spo_list,
+                                            const RefVectorWithLeader<ParticleSet>& P_list,
+                                            int iat,
+                                            const std::vector<const ValueType*>& invRow_ptr_list,
+                                            OffloadMWVGLArray& phi_vgl_v,
+                                            OffloadValueVector& ratios,
+                                            OffloadValueVector& grads) const override;
 
   void assign_vgh(const PointType& r,
                   ValueVector& psi,
