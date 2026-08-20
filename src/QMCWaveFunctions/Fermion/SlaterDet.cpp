@@ -74,6 +74,16 @@ void SlaterDet::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& w
   Dets[det_id]->mw_ratioGrad(extract_DetRef_list(wfc_list, det_id), p_list, iat, ratios, grad_now);
 }
 
+void SlaterDet::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                   const RefVectorWithLeader<ParticleSet>& p_list,
+                                   int iat,
+                                   OffloadRatioVector& ratios,
+                                   OffloadGradVector& grad_now) const
+{
+  const int det_id = getDetID(iat);
+  Dets[det_id]->mw_ratioGradDevice(extract_DetRef_list(wfc_list, det_id), p_list, iat, ratios, grad_now);
+}
+
 void SlaterDet::mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                      const RefVectorWithLeader<ParticleSet>& p_list,
                                      int iat,
