@@ -472,6 +472,93 @@ void test_DiracDeterminantBatched_delayed_update(int delay_rank, DetMatInvertor 
   CHECKED_ELSE(check.result) { FAIL(check.result_message); }
 }
 
+template<PlatformKind PL>
+void test_DiracDeterminantBatched_mixed_delayed_update(DetMatInvertor matrix_inverter_kind)
+{
+  using Det      = DiracDeterminantBatched<PL, Value, QMCTraits::QTFull::ValueType>;
+  const int norb = 4;
+  auto spo_init  = std::make_unique<FakeSPO<Value>>(norb);
+  Det det(*spo_init, 0, norb, 2, matrix_inverter_kind);
+  auto& spo = dynamic_cast<FakeSPO<Value>&>(det.getPhi());
+
+  const SimulationCell simulation_cell;
+  ParticleSet elec(simulation_cell);
+  elec.create({norb});
+
+  ResourceCollection pset_res("test_pset_res");
+  ResourceCollection wfc_res("test_wfc_res");
+  elec.createResource(pset_res);
+  det.createResource(wfc_res);
+
+  ParticleSet elec_clone(elec);
+  auto spo_clone = det.getPhi().makeClone();
+  std::unique_ptr<WaveFunctionComponent> det_clone(det.makeCopy(*spo_clone));
+  auto& det_clone_ref = dynamic_cast<Det&>(*det_clone);
+
+  RefVectorWithLeader<ParticleSet> p_ref_list(elec, {elec, elec_clone});
+  RefVectorWithLeader<WaveFunctionComponent> det_ref_list(det, {det, *det_clone});
+
+  ResourceCollectionTeamLock<ParticleSet> mw_pset_lock(pset_res, p_ref_list);
+  ResourceCollectionTeamLock<WaveFunctionComponent> mw_wfc_lock(wfc_res, det_ref_list);
+
+  ParticleSet::mw_update(p_ref_list);
+  det.mw_recompute(det_ref_list, p_ref_list, {true, true});
+
+  DiracMatrix<Value> dm;
+  auto make_expected_inverse = [&](std::initializer_list<int> changed_rows) {
+    Matrix<Value> expected(spo.a2);
+    for (const int row : changed_rows)
+      for (int col = 0; col < norb; ++col)
+        expected(col, row) = spo.v2(row, col);
+
+    Matrix<Value> transpose(norb, norb);
+    simd::transpose(expected.data(), expected.rows(), expected.cols(), transpose.data(), transpose.rows(),
+                    transpose.cols());
+    LogValue log_value;
+    dm.invert_transpose(transpose, expected, log_value);
+    return expected;
+  };
+
+  const Matrix<Value> row_0_inverse    = make_expected_inverse({0});
+  const Matrix<Value> row_1_inverse    = make_expected_inverse({1});
+  const Matrix<Value> rows_1_3_inverse = make_expected_inverse({1, 3});
+
+  std::vector<PsiValue> ratios(2);
+  std::vector<Grad> grads(2);
+
+  det.mw_ratioGrad(det_ref_list, p_ref_list, 0, ratios, grads);
+  det.mw_accept_rejectMove(det_ref_list, p_ref_list, 0, {false, true}, true);
+
+  det.mw_evalGrad(det_ref_list, p_ref_list, 1, grads);
+  det.mw_ratioGrad(det_ref_list, p_ref_list, 1, ratios, grads);
+  det.mw_accept_rejectMove(det_ref_list, p_ref_list, 1, {true, false}, true);
+  det.mw_completeUpdates(det_ref_list);
+
+  auto check = checkMatrix(row_1_inverse, det.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+  check = checkMatrix(row_0_inverse, det_clone_ref.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+
+  det.mw_evalGrad(det_ref_list, p_ref_list, 2, grads);
+  det.mw_ratioGrad(det_ref_list, p_ref_list, 2, ratios, grads);
+  det.mw_accept_rejectMove(det_ref_list, p_ref_list, 2, {false, false}, true);
+  det.mw_completeUpdates(det_ref_list);
+
+  check = checkMatrix(row_1_inverse, det.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+  check = checkMatrix(row_0_inverse, det_clone_ref.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+
+  det.mw_evalGrad(det_ref_list, p_ref_list, 3, grads);
+  det.mw_ratioGrad(det_ref_list, p_ref_list, 3, ratios, grads);
+  det.mw_accept_rejectMove(det_ref_list, p_ref_list, 3, {true, false}, false);
+
+  check = checkMatrix(rows_1_3_inverse, det.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+  check = checkMatrix(row_0_inverse, det_clone_ref.get_psiMinv());
+  CHECKED_ELSE(check.result) { FAIL(check.result_message); }
+}
+
 TEST_CASE("DiracDeterminantBatched_delayed_update", "[wavefunction][fermion]")
 {
   // maximum delay 2
@@ -485,6 +572,19 @@ TEST_CASE("DiracDeterminantBatched_delayed_update", "[wavefunction][fermion]")
 #endif
   test_DiracDeterminantBatched_delayed_update<PlatformKind::OMPTARGET>(2, DetMatInvertor::ACCEL);
   test_DiracDeterminantBatched_delayed_update<PlatformKind::OMPTARGET>(2, DetMatInvertor::HOST);
+}
+
+TEST_CASE("DiracDeterminantBatched_mixed_delayed_update", "[wavefunction][fermion]")
+{
+#if defined(ENABLE_OFFLOAD) && defined(ENABLE_CUDA)
+  test_DiracDeterminantBatched_mixed_delayed_update<PlatformKind::CUDA>(DetMatInvertor::ACCEL);
+  test_DiracDeterminantBatched_mixed_delayed_update<PlatformKind::CUDA>(DetMatInvertor::HOST);
+#endif
+#if defined(ENABLE_OFFLOAD) && defined(ENABLE_SYCL)
+  test_DiracDeterminantBatched_mixed_delayed_update<PlatformKind::SYCL>(DetMatInvertor::HOST);
+#endif
+  test_DiracDeterminantBatched_mixed_delayed_update<PlatformKind::OMPTARGET>(DetMatInvertor::ACCEL);
+  test_DiracDeterminantBatched_mixed_delayed_update<PlatformKind::OMPTARGET>(DetMatInvertor::HOST);
 }
 
 
