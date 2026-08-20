@@ -555,13 +555,9 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         }
       }
     }
-    // NOTE: this scan reads the electron-ion table on the host, which is why the table
-    // is copied back in full every step (SoaDistanceTableABOMPTarget, the
-    // MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST branch). Only pairs inside Rmax matter and
-    // they are a small fraction of the table, so the filter belongs on the device with
-    // just the survivors returned. buildNeighborJobsOnDevice does that. While it is
-    // being proven it runs alongside and its result is compared here rather than used,
-    // because a neighbour list that silently disagrees would corrupt the energy.
+    // This independent host scan checks the device filter whether its output is used for
+    // the energy or built only for validation. Comparing against nlpp_jobs would compare
+    // the device output with itself when QMCPACK_DEVICE_NLPP_JOBS is enabled.
     if (const char* check = std::getenv("QMCPACK_CHECK_DEVICE_NLPP_JOBS"); check && *check == '1' && iw == 0)
     {
       auto& res = O_leader.mw_res_handle_.getResource();
