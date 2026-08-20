@@ -636,10 +636,11 @@ TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2][shared-offl
 
 TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2][shared-offload]")
 {
+  const size_t two_block_splines = getAlignment<float>() + 2;
   test_shared_offload<float>().test(11, 1);
   test_shared_offload<float>().test(11, 2);
-  test_shared_offload<float>().test(11, 2, 2);
-  test_shared_offload<float>().test(11, 1, 2);
+  test_shared_offload<float>().test(two_block_splines, 2, 2);
+  test_shared_offload<float>().test(two_block_splines, 1, 2);
 }
 
 TEST_CASE("MultiBsplineMPIShared periodic double", "[spline2]")
