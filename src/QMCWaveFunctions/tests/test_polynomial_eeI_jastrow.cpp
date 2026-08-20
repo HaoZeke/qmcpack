@@ -44,21 +44,37 @@ TEST_CASE("PolynomialFunctor3D functor zero", "[wavefunction]")
 
 TEST_CASE("JeeI functor pack uses ion-group extent", "[wavefunction]")
 {
-  PolynomialFunctor3D functor("test_functor");
-  functor.cutoff_radius = 4.0;
-  functor.resize(2, 2);
-  functor.Parameters = {0.001, -0.002, 0.003, -0.004, 0.005, -0.006, 0.007, -0.008};
-  functor.reset_gamma();
+  PolynomialFunctor3D first("first");
+  PolynomialFunctor3D second("second");
+  first.cutoff_radius = second.cutoff_radius = 4.0;
+  first.resize(1, 1);
+  second.resize(1, 1);
+  first.gamma           = 0.0;
+  second.gamma          = 0.0;
+  first.gamma(0, 0, 0)  = 1.0;
+  second.gamma(1, 0, 0) = 1.0;
 
   Array<PolynomialFunctor3D*, 3> functors;
   functors.resize(2, 1, 1);
   functors          = nullptr;
-  functors(0, 0, 0) = &functor;
+  functors(0, 0, 0) = &first;
+  functors(1, 0, 0) = &second;
 
   JeeIMultiWalkerMem<RealType> mem;
   mem.packFunctors(functors, 1, 2);
 
-  CHECK(mem.fn_have.size() == 2);
+  REQUIRE(mem.fn_have.size() == 2);
+  CHECK(mem.fn_have[1] == 1);
+  CHECK(mem.gamma_offset[1] == 8);
+  CHECK(mem.gamma_flat.size() == 16);
+
+  constexpr RealType r12 = 0.25;
+  constexpr RealType r1I = 0.5;
+  constexpr RealType r2I = 0.75;
+  const RealType packed =
+      PolynomialFunctor3D::evaluateV_impl(r12, r1I, r2I, mem.gamma_flat.data() + mem.gamma_offset[1], mem.N_eI[1],
+                                          mem.N_ee[1], mem.C[1], mem.L[1]);
+  CHECK(packed == Approx(second.evaluate(r12, r1I, r2I)));
 }
 
 TEST_CASE("JeeI functor pack preserves per-functor cutoff", "[wavefunction]")
@@ -68,11 +84,11 @@ TEST_CASE("JeeI functor pack preserves per-functor cutoff", "[wavefunction]")
   first.cutoff_radius  = 4.0;
   second.cutoff_radius = 6.0;
   first.resize(1, 1);
-  second.resize(1, 1);
+  second.resize(2, 1);
   first.gamma           = 0.0;
   second.gamma          = 0.0;
   first.gamma(0, 0, 0)  = 1.0;
-  second.gamma(0, 0, 0) = 1.0;
+  second.gamma(2, 0, 0) = 1.0;
 
   Array<PolynomialFunctor3D*, 3> functors;
   functors.resize(2, 2, 2);
@@ -87,11 +103,37 @@ TEST_CASE("JeeI functor pack preserves per-functor cutoff", "[wavefunction]")
   constexpr RealType r1I = 0.5;
   constexpr RealType r2I = 0.75;
   constexpr size_t fidx  = 4;
+  CHECK(mem.gamma_offset[0] == 0);
+  CHECK(mem.gamma_offset[fidx] == 8);
+  CHECK(mem.gamma_flat.size() == 26);
+  CHECK(mem.N_eI[fidx] == 2);
+  CHECK(mem.N_ee[fidx] == 1);
   const RealType packed =
       PolynomialFunctor3D::evaluateV_impl(r12, r1I, r2I, mem.gamma_flat.data() + mem.gamma_offset[fidx], mem.N_eI[fidx],
                                           mem.N_ee[fidx], mem.C[fidx], mem.L[fidx]);
 
   CHECK(packed == Approx(second.evaluate(r12, r1I, r2I)));
+
+  auto* gamma_flat        = mem.gamma_flat.data();
+  auto* gamma_offset      = mem.gamma_offset.data();
+  auto* fn_have           = mem.fn_have.data();
+  auto* fn_N_eI           = mem.N_eI.data();
+  auto* fn_N_ee           = mem.N_ee.data();
+  auto* fn_C              = mem.C.data();
+  auto* fn_L              = mem.L.data();
+  const size_t gamma_size = mem.gamma_flat.size();
+  const size_t nfun       = mem.fn_have.size();
+  RealType target_packed  = 0;
+  PRAGMA_OFFLOAD("omp target \
+                  map(to: gamma_flat[:gamma_size], gamma_offset[:nfun], fn_have[:nfun], \
+                          fn_N_eI[:nfun], fn_N_ee[:nfun], fn_C[:nfun], fn_L[:nfun]) \
+                  map(from: target_packed)")
+  {
+    if (fn_have[fidx])
+      target_packed = PolynomialFunctor3D::evaluateV_impl(r12, r1I, r2I, gamma_flat + gamma_offset[fidx], fn_N_eI[fidx],
+                                                          fn_N_ee[fidx], fn_C[fidx], fn_L[fidx]);
+  }
+  CHECK(target_packed == Approx(second.evaluate(r12, r1I, r2I)));
 }
 
 TEST_CASE("JeeI functor pack clears empty schema", "[wavefunction]")
