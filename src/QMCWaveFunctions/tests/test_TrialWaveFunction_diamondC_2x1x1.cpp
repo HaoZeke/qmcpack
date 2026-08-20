@@ -378,6 +378,20 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
             << grad_new.grads_positions[0][0] << " " << grad_new.grads_positions[0][1] << " "
             << grad_new.grads_positions[0][2] << " " << grad_new.grads_positions[1][0] << " "
             << grad_new.grads_positions[1][1] << " " << grad_new.grads_positions[1][2] << std::endl;
+
+  TrialWaveFunction::OffloadRatioVector device_ratios;
+  WaveFunctionComponent::OffloadGradVector device_grads;
+  TrialWaveFunction::mw_calcRatioGradDevice(wf_ref_list, p_ref_list, moved_elec_id, device_ratios, device_grads);
+  REQUIRE(device_ratios.size() == ratios.size());
+  REQUIRE(device_grads.size() == grad_new.grads_positions.size());
+  device_ratios.updateFrom();
+  device_grads.updateFrom();
+  for (size_t iw = 0; iw < ratios.size(); ++iw)
+  {
+    CHECK(device_ratios[iw] == ValueApprox(ratios[iw]));
+    for (size_t idim = 0; idim < QMCTraits::DIM; ++idim)
+      CHECK(device_grads[iw][idim] == ValueApprox(grad_new.grads_positions[iw][idim]));
+  }
 #if defined(QMC_COMPLEX)
   CHECK(ratios[0] == ComplexApprox(ValueType(1, 0)).epsilon(5e-5));
   CHECK(grad_new.grads_positions[0][0] ==
