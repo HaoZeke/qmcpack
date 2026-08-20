@@ -83,7 +83,7 @@ public:
     const MPI_Aint allocation_size =
         comm_rank < distributed_ranks_ ? spline_owned.coefs_size * sizeof(T) + Alloc::alignment : 0;
     void* coefs = nullptr;
-    auto err = MPI_Win_allocate_shared(allocation_size, sizeof(T), info, comm.getMPI(), &coefs, &win);
+    auto err    = MPI_Win_allocate_shared(allocation_size, sizeof(T), info, comm.getMPI(), &coefs, &win);
     MPI_Info_free(&info);
     if (err != MPI_SUCCESS)
       throw UniformCommunicateError("MultiBsplineMPIShared::MultiBsplineMPIShared MPI_Win_allocate_shared failed!");
@@ -106,6 +106,16 @@ public:
         throw UniformCommunicateError(
             "MultiBsplineMPIShared::MultiBsplineMPIShared spline_m.coefs address not aligned!");
     }
+  }
+
+  /** Publish local stores and acquire stores made by every rank in the shared window. */
+  void finalize() override
+  {
+    if (MPI_Win_sync(win) != MPI_SUCCESS)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize writer MPI_Win_sync failed!");
+    comm_->barrier();
+    if (MPI_Win_sync(win) != MPI_SUCCESS)
+      throw UniformCommunicateError("MultiBsplineMPIShared::finalize reader MPI_Win_sync failed!");
   }
 
   ~MultiBsplineMPIShared() override;

@@ -77,8 +77,12 @@ public:
     mapper_->mapToDevice();
   }
 
-  /** Upload coefficients through the selected mapper and attach descriptor pointers. */
-  void finalize() override { mapper_->updateToDevice(); }
+  /** Publish shared coefficients, upload them, and attach descriptor pointers. */
+  void finalize() override
+  {
+    Base::finalize();
+    mapper_->updateToDevice();
+  }
 
   /** Evaluate mapped spline values through the mapper owned by this object.
    *
