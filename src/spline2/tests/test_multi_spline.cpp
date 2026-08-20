@@ -20,6 +20,9 @@
 #include "config/stdlib/Constants.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "einspline/bspline_create.h"
+#if defined(ENABLE_OFFLOAD)
+#include <omp.h>
+#endif
 
 namespace qmcplusplus
 {
@@ -197,16 +200,35 @@ struct test_splines : public test_splines_base<T, GRID_SIZE, NUM_SPLINES>
 template<typename T>
 void test_mapped_vgl_contraction()
 {
-  constexpr int num_splines = 3;
+  constexpr int num_splines = 513;
   test_splines_base<T, 5, num_splines> setup;
   MultiBspline<T> bs(setup.grid, setup.bc, setup.npad);
 
+  std::vector<double> mixed_data(setup.data.size());
+  const double tpi = 2 * M_PI;
+  for (int i = 0; i < setup.N; ++i)
+    for (int j = 0; j < setup.N; ++j)
+      for (int k = 0; k < setup.N; ++k)
+      {
+        const double x = setup.delta * i;
+        const double y = setup.delta * j;
+        const double z = setup.delta * k;
+        mixed_data[i * setup.N * setup.N + j * setup.N + k] =
+            std::sin(tpi * (x + y)) + 2.0 * std::cos(tpi * (y + z)) + 3.0 * std::sin(tpi * (z + x));
+      }
+
   UBspline_3d_d* aspline = create_UBspline_3d_d(setup.grid[0], setup.grid[1], setup.grid[2], setup.bc[0], setup.bc[1],
-                                                setup.bc[2], setup.data.data());
+                                                setup.bc[2], mixed_data.data());
   REQUIRE(aspline != nullptr);
   for (int i = 0; i < num_splines; ++i)
     bs.set_spline(*aspline, i);
   destroy_Bspline(aspline);
+
+  auto* host_spline = bs.getSplinePtr();
+  REQUIRE(host_spline->coefs_size % setup.npad == 0);
+  for (size_t offset = 0; offset < host_spline->coefs_size; offset += setup.npad)
+    for (int index = 0; index < num_splines; ++index)
+      host_spline->coefs[offset + index] *= T(index + 1);
 
   MultiBsplineOffloadMapper<T> mapped_bs(bs);
   mapped_bs.mapToDevice();
@@ -227,7 +249,9 @@ void test_mapped_vgl_contraction()
 
   const size_t field_stride = setup.npad;
   Vector<T, OffloadAllocator<T>> vgh_output(field_stride * SoAFields3D::NUM_FIELDS);
-  Vector<T, OffloadAllocator<T>> vgl_output(field_stride * 5);
+  constexpr T canary = T(-12345.5);
+  Vector<T, OffloadAllocator<T>> vgl_output(field_stride * SoAFields3D::NUM_FIELDS, canary);
+  vgl_output.updateTo();
 
   const auto* spline_ptr   = bs.getSplinePtr();
   const auto* spline_coefs = spline_ptr->coefs;
@@ -235,8 +259,18 @@ void test_mapped_vgl_contraction()
   auto* vgh_output_ptr     = vgh_output.data();
   auto* vgl_output_ptr     = vgl_output.data();
 
-  PRAGMA_OFFLOAD("omp target teams num_teams(1)")
+  constexpr size_t ChunkSizePerTeam = 512;
+  const size_t NumTeams             = (field_stride + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+  int initial_device                = 0;
+  PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams) map(from: initial_device)")
+  for (size_t team_id = 0; team_id < NumTeams; ++team_id)
   {
+#if defined(ENABLE_OFFLOAD)
+    if (team_id == 0)
+      initial_device = omp_is_initial_device();
+#endif
+    const size_t first = ChunkSizePerTeam * team_id;
+    const size_t last  = omptarget::min(first + ChunkSizePerTeam, field_stride);
     int ix, iy, iz;
     T a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
     spline2::computeLocationAndFractional(spline_ptr, T(0.137), T(0.293), T(0.419), ix, iy, iz, a, b, c, da, db, dc,
@@ -244,11 +278,11 @@ void test_mapped_vgl_contraction()
     const T symGGt[6] = {GGt_ptr[0], GGt_ptr[1] + GGt_ptr[3], GGt_ptr[2] + GGt_ptr[6],
                          GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
 
-    PRAGMA_OFFLOAD("omp distribute parallel for")
-    for (int index = 0; index < num_splines; ++index)
+    PRAGMA_OFFLOAD("omp parallel for")
+    for (size_t index = first; index < last; ++index)
     {
-      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
-                                           d2c, vgh_output_ptr + index, field_stride);
+      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(index), a, b, c, da,
+                                           db, dc, d2a, d2b, d2c, vgh_output_ptr + index, field_stride);
       vgh_output_ptr[field_stride * SoAFields3D::LAPL + index] =
           SymTrace(vgh_output_ptr[field_stride * SoAFields3D::HESS00 + index],
                    vgh_output_ptr[field_stride * SoAFields3D::HESS01 + index],
@@ -257,22 +291,39 @@ void test_mapped_vgl_contraction()
                    vgh_output_ptr[field_stride * SoAFields3D::HESS12 + index],
                    vgh_output_ptr[field_stride * SoAFields3D::HESS22 + index], symGGt);
 
-      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
-                                           d2c, symGGt, vgl_output_ptr + index, field_stride, field_stride * 4);
+      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(index), a, b, c, da,
+                                           db, dc, d2a, d2b, d2c, symGGt, vgl_output_ptr + index, field_stride,
+                                           field_stride * SoAFields3D::LAPL);
     }
   }
 
   vgh_output.updateFrom();
   vgl_output.updateFrom();
 
+#if defined(ENABLE_OFFLOAD)
+  CHECK(initial_device == 0);
+#endif
+  CHECK(std::abs(vgh_output[field_stride * SoAFields3D::HESS01]) > T(1));
+  CHECK(std::abs(vgh_output[field_stride * SoAFields3D::HESS02]) > T(1));
+  CHECK(std::abs(vgh_output[field_stride * SoAFields3D::HESS12]) > T(1));
+
+  const int compared_fields[] = {SoAFields3D::VAL, SoAFields3D::GRAD0, SoAFields3D::GRAD1, SoAFields3D::GRAD2,
+                                 SoAFields3D::LAPL};
   for (int index = 0; index < num_splines; ++index)
-  {
-    CHECK(vgl_output[field_stride * 0 + index] == Approx(vgh_output[field_stride * SoAFields3D::VAL + index]));
-    CHECK(vgl_output[field_stride * 1 + index] == Approx(vgh_output[field_stride * SoAFields3D::GRAD0 + index]));
-    CHECK(vgl_output[field_stride * 2 + index] == Approx(vgh_output[field_stride * SoAFields3D::GRAD1 + index]));
-    CHECK(vgl_output[field_stride * 3 + index] == Approx(vgh_output[field_stride * SoAFields3D::GRAD2 + index]));
-    CHECK(vgl_output[field_stride * 4 + index] == Approx(vgh_output[field_stride * SoAFields3D::LAPL + index]));
-  }
+    for (const int field : compared_fields)
+      CHECK(vgl_output[field_stride * field + index] == Approx(vgh_output[field_stride * field + index]));
+
+  const int untouched_fields[] = {SoAFields3D::HESS00, SoAFields3D::HESS01, SoAFields3D::HESS02,
+                                  SoAFields3D::HESS11, SoAFields3D::HESS12, SoAFields3D::HESS22};
+  for (const int field : untouched_fields)
+    for (int index = 0; index < num_splines; ++index)
+      CHECK(vgl_output[field_stride * field + index] == canary);
+
+  const T base_value = vgh_output[field_stride * SoAFields3D::VAL];
+  CHECK(vgh_output[field_stride * SoAFields3D::VAL + 511] ==
+        Approx(base_value * T(512)).epsilon(512 * std::numeric_limits<T>::epsilon()));
+  CHECK(vgh_output[field_stride * SoAFields3D::VAL + 512] ==
+        Approx(base_value * T(513)).epsilon(512 * std::numeric_limits<T>::epsilon()));
 }
 
 TEST_CASE("MultiBspline mapped VGL contraction double", "[spline2]") { test_mapped_vgl_contraction<double>(); }
