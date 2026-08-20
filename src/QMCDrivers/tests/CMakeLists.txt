@@ -106,7 +106,10 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 8 $<TARGET_FILE:${UTEST_EXE}>)
-set_tests_properties(${UTEST_NAME} PROPERTIES WORKING_DIRECTORY ${UTEST_DIR})
+set_tests_properties(
+  ${UTEST_NAME}
+  PROPERTIES WORKING_DIRECTORY ${UTEST_DIR}
+             ENVIRONMENT "QMCPACK_CHECK_DEVICE_ACCEPT=1")
 
 if(HAVE_MPI)
   set(UTEST_EXE test_new_${SRC_DIR}_mpi)
