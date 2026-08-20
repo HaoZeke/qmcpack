@@ -59,6 +59,10 @@ struct DiracDeterminantBatched<PL, VT, FPVT>::DiracDeterminantBatchedMultiWalker
   OffloadMWVGLArray phi_vgl_v;
   /// multi walker of ratio
   std::vector<Value> ratios_local;
+  /// determinant ratios in device storage at SPO precision
+  SPOSet::OffloadValueVector sposet_ratios_device;
+  /// determinant gradients in device storage at SPO precision, [nw][DIM]
+  SPOSet::OffloadValueVector sposet_grads_device;
   /// multi walker of grads
   std::vector<Grad> grad_new_local;
   /// multi walker of spingrads
@@ -352,6 +356,62 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGrad(const RefVectorWithLead
     ratios[iw] = det.curRatio = ratios_local[iw];
     grad_new[iw] += grad_new_local[iw];
   }
+}
+
+template<PlatformKind PL, typename VT, typename FPVT>
+void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
+    const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+    const RefVectorWithLeader<ParticleSet>& p_list,
+    int iat,
+    OffloadRatioVector& ratios,
+    OffloadGradVector& grads) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  auto& mw_res     = wfc_leader.mw_res_handle_.getResource();
+  const int nw     = wfc_list.size();
+
+  {
+    ScopedTimer local_timer(SPOVGLTimer);
+    RefVectorWithLeader<SPOSet> phi_list(phi_);
+    phi_list.reserve(nw);
+    RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
+    engine_list.reserve(nw);
+    const int WorkingIndex = iat - FirstIndex;
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+      phi_list.push_back(det.phi_);
+      engine_list.push_back(det.det_engine_);
+    }
+
+    auto psiMinv_row_dev_ptr_list = UpdateEngine::mw_getInvRow(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs,
+                                                               WorkingIndex, !phi_.isOMPoffload());
+
+    mw_res.phi_vgl_v.resize(SPOSet::DIM_VGL, nw, NumOrbitals);
+    wfc_leader.phi_.mw_evaluateVGLandDetRatioGradsDevice(phi_list, p_list, iat, psiMinv_row_dev_ptr_list,
+                                                         mw_res.phi_vgl_v, mw_res.sposet_ratios_device,
+                                                         mw_res.sposet_grads_device);
+
+    ratios.resize(nw);
+    grads.resize(nw);
+    const auto* sposet_ratios_ptr = mw_res.sposet_ratios_device.device_data();
+    const auto* sposet_grads_ptr  = mw_res.sposet_grads_device.device_data();
+    auto* ratios_ptr              = ratios.device_data();
+    auto* grads_ptr               = grads.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                    is_device_ptr(sposet_ratios_ptr, sposet_grads_ptr, ratios_ptr, grads_ptr)")
+    for (int iw = 0; iw < nw; ++iw)
+    {
+      ratios_ptr[iw] = static_cast<PsiValue>(sposet_ratios_ptr[iw]);
+      for (int idim = 0; idim < DIM; ++idim)
+        grads_ptr[iw][idim] = sposet_grads_ptr[iw * DIM + idim];
+    }
+  }
+
+  wfc_leader.UpdateMode = ORB_PBYP_PARTIAL;
+  for (int iw = 0; iw < nw; ++iw)
+    wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw).UpdateMode = ORB_PBYP_PARTIAL;
 }
 
 template<PlatformKind PL, typename VT, typename FPVT>
