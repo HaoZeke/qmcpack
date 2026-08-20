@@ -8,6 +8,8 @@
 //
 // File created by: Peter Doak, doakpw@ornl.gov, Oak Ridge National Laboratory
 //////////////////////////////////////////////////////////////////////////////////////
+#include <array>
+
 #include <catch2/catch_test_macros.hpp>
 #include "Utilities/for_testing/Catch2Approx.h"
 
@@ -69,6 +71,19 @@ public:
   {
     return nl_ecp.neighbor_lists.getNeighboringIons(jel).size();
   }
+
+  static bool buildNeighborJobsOnDevice(const RefVectorWithLeader<OperatorBase>& o_list,
+                                        const RefVectorWithLeader<ParticleSet>& p_list,
+                                        int ig)
+  { return NonLocalECPotential::buildNeighborJobsOnDevice(o_list, p_list, ig); }
+
+  static const std::vector<NLPPJob<Real>>& getNeighborJobs(const NonLocalECPotential& nl_ecp, int ig)
+  { return nl_ecp.nlpp_jobs[ig]; }
+
+  static int getTableIndex(const NonLocalECPotential& nl_ecp) { return nl_ecp.myTableIndex; }
+
+  static Real getRmax(const NonLocalECPotential& nl_ecp, int iat)
+  { return nl_ecp.PP[iat] ? nl_ecp.PP[iat]->getRmax() : Real(-1); }
 };
 
 } // namespace testing
@@ -745,4 +760,113 @@ TEST_CASE("NonLocalECPotential mw_evaluate ragged job counts", "[hamiltonian]")
   CHECK(nl_ecp2.getValue() == Approx(mw_value2));
   CHECK(nl_ecp3.getValue() == Approx(mw_value3));
 }
+
+#if defined(ENABLE_OFFLOAD)
+TEST_CASE("NonLocalECPotential crowded device neighbor jobs", "[hamiltonian]")
+{
+  using Real = QMCTraits::RealType;
+
+  Lattice lattice;
+  lattice.BoxBConds = true;
+  lattice.R.diagonal(20.0);
+  lattice.LR_dim_cutoff = 15;
+  lattice.reset();
+
+  const SimulationCell simulation_cell(lattice);
+
+  ParticleSet ions(simulation_cell, DynamicCoordinateKind::DC_POS_OFFLOAD);
+  ions.setName("ion");
+  ions.create({11});
+  for (int iat = 0; iat < 10; ++iat)
+    ions.R[iat] = {Real(-0.45) + Real(0.1) * iat, 0.0, 0.0};
+  ions.R[10] = {3.3, 0.0, 0.0};
+
+  SpeciesSet& ion_species                         = ions.getSpeciesSet();
+  const int index_species                         = ion_species.addSpecies("Na");
+  const int index_charge                          = ion_species.addAttribute("charge");
+  const int index_atomic_number                   = ion_species.addAttribute("atomic_number");
+  ion_species(index_charge, index_species)        = 1;
+  ion_species(index_atomic_number, index_species) = 1;
+  ions.createSK();
+  ions.resetGroups();
+  ions.update();
+
+  ParticleSet elec(simulation_cell, DynamicCoordinateKind::DC_POS_OFFLOAD);
+  elec.setName("elec");
+  elec.create({1});
+  elec.R[0] = {0.0, 0.0, 0.0};
+
+  SpeciesSet& elec_species             = elec.getSpeciesSet();
+  const int up_index                   = elec_species.addSpecies("u");
+  const int charge_index               = elec_species.addAttribute("charge");
+  const int mass_index                 = elec_species.addAttribute("mass");
+  elec_species(charge_index, up_index) = -1;
+  elec_species(mass_index, up_index)   = 1.0;
+  elec.createSK();
+  elec.resetGroups();
+  elec.addTable(ions);
+  elec.update();
+
+  ParticleSet elec2(elec);
+  elec2.R[0] = {-0.3, 0.0, 0.0};
+  elec2.update();
+  RefVectorWithLeader<ParticleSet> p_list(elec, {elec, elec2});
+
+  RuntimeOptions runtime_options;
+  TrialWaveFunction psi(runtime_options);
+  TrialWaveFunction psi2(runtime_options);
+
+  NonLocalECPotential nl_ecp(ions, elec, false, false);
+  Communicate* comm = OHMMS::Controller;
+  ECPComponentBuilder ecp_comp_builder("test_read_ecp", comm, 4, 1);
+  REQUIRE(ecp_comp_builder.read_pp_file("Na.BFD.xml"));
+  UPtr<NonLocalECPComponent> nl_ecp_comp = std::move(ecp_comp_builder.pp_nonloc);
+  nl_ecp.addComponent(0, std::move(nl_ecp_comp));
+
+  const Real rmax = testing::TestNonLocalECPotential::getRmax(nl_ecp, 0);
+  REQUIRE(rmax > Real(3.3));
+  REQUIRE(rmax < Real(3.6));
+
+  UPtr<OperatorBase> nl_ecp2_ptr = nl_ecp.makeClone(elec2, psi2);
+  auto& nl_ecp2                  = dynamic_cast<NonLocalECPotential&>(*nl_ecp2_ptr);
+  RefVectorWithLeader<OperatorBase> o_list(nl_ecp, {nl_ecp, nl_ecp2});
+
+  ResourceCollection pset_res("test_pset_res");
+  elec.createResource(pset_res);
+  ResourceCollectionTeamLock<ParticleSet> pset_lock(pset_res, p_list);
+  ResourceCollection nl_ecp_res("test_nl_ecp_res");
+  nl_ecp.createResource(nl_ecp_res);
+  ResourceCollectionTeamLock<OperatorBase> nl_ecp_lock(nl_ecp_res, o_list);
+
+  ParticleSet::mw_update(p_list);
+
+  std::array<std::vector<std::pair<int, int>>, 2> host_pairs;
+  for (size_t iw = 0; iw < p_list.size(); ++iw)
+  {
+    const auto& table = p_list[iw].getDistTableAB(testing::TestNonLocalECPotential::getTableIndex(nl_ecp));
+    for (int jel = p_list[iw].first(0); jel < p_list[iw].last(0); ++jel)
+    {
+      const auto& dist = table.getDistRow(jel);
+      for (int iat = 0; iat < ions.getTotalNum(); ++iat)
+        if (dist[iat] < testing::TestNonLocalECPotential::getRmax(nl_ecp, iat))
+          host_pairs[iw].emplace_back(iat, jel);
+    }
+  }
+  REQUIRE(host_pairs[0].size() == 11);
+  REQUIRE(host_pairs[1].size() == 10);
+
+  REQUIRE(testing::TestNonLocalECPotential::buildNeighborJobsOnDevice(o_list, p_list, 0));
+  for (size_t iw = 0; iw < o_list.size(); ++iw)
+  {
+    const auto& jobs =
+        testing::TestNonLocalECPotential::getNeighborJobs(o_list.getCastedElement<NonLocalECPotential>(iw), 0);
+    REQUIRE(jobs.size() == host_pairs[iw].size());
+    for (size_t job_id = 0; job_id < jobs.size(); ++job_id)
+    {
+      CHECK(jobs[job_id].ion_id == host_pairs[iw][job_id].first);
+      CHECK(jobs[job_id].electron_id == host_pairs[iw][job_id].second);
+    }
+  }
+}
+#endif
 } // namespace qmcplusplus
