@@ -129,16 +129,16 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<int, OffloadPinnedAllocator<int>> memb_elec;
   Vector<VALT, OffloadPinnedAllocator<VALT>> memb_dist;
   Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
+  Vector<size_t, OffloadPinnedAllocator<size_t>> gamma_offset;
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
+  Vector<int, OffloadPinnedAllocator<int>> N_eI, N_ee, C;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> L;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
   Vector<int, OffloadPinnedAllocator<int>> ion_group;
   Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
   Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
 
   size_t memb_walker_stride = 0;
-  size_t gamma_size         = 0;
-  int N_eI = 0, N_ee = 0, C = 0;
-  VALT L   = 0;
 
   JeeIMultiWalkerMem() : Resource("JeeIMultiWalkerMem") {}
   JeeIMultiWalkerMem(const JeeIMultiWalkerMem&) : JeeIMultiWalkerMem() {}
@@ -193,27 +193,36 @@ struct JeeIMultiWalkerMem : public Resource
   void packFunctors(const FARRAY& F, int eGroups, int iGroups)
   {
     const size_t ncombo = static_cast<size_t>(iGroups) * eGroups * eGroups;
-    fn_have.resize(static_cast<size_t>(eGroups) * eGroups * eGroups);
+    fn_have.resize(ncombo);
+    gamma_offset.resize(ncombo);
+    N_eI.resize(ncombo);
+    N_ee.resize(ncombo);
+    C.resize(ncombo);
+    L.resize(ncombo);
     std::fill(fn_have.begin(), fn_have.end(), char(0));
+    std::fill(gamma_offset.begin(), gamma_offset.end(), size_t(0));
+    std::fill(N_eI.begin(), N_eI.end(), 0);
+    std::fill(N_ee.begin(), N_ee.end(), 0);
+    std::fill(C.begin(), C.end(), 0);
+    std::fill(L.begin(), L.end(), VALT(0));
 
-    const auto* sample = [&]() -> decltype(F(0, 0, 0)) {
-      for (int ig = 0; ig < iGroups; ig++)
-        for (int jg = 0; jg < eGroups; jg++)
-          for (int kg = 0; kg < eGroups; kg++)
-            if (F(ig, jg, kg))
-              return F(ig, jg, kg);
-      return nullptr;
-    }();
-    if (sample == nullptr)
-      return;
+    size_t gamma_total = 0;
+    for (int ig = 0; ig < iGroups; ig++)
+      for (int jg = 0; jg < eGroups; jg++)
+        for (int kg = 0; kg < eGroups; kg++)
+          if (const auto* functor = F(ig, jg, kg))
+          {
+            const size_t fidx  = (static_cast<size_t>(ig) * eGroups + jg) * eGroups + kg;
+            fn_have[fidx]      = char(1);
+            gamma_offset[fidx] = gamma_total;
+            N_eI[fidx]         = functor->getNeI();
+            N_ee[fidx]         = functor->getNee();
+            C[fidx]            = functor->getC();
+            L[fidx]            = VALT(0.5) * functor->cutoff_radius;
+            gamma_total += functor->gammaFlatSize();
+          }
 
-    gamma_size = sample->gammaFlatSize();
-    N_eI       = sample->getNeI();
-    N_ee       = sample->getNee();
-    C          = sample->getC();
-    L          = VALT(0.5) * sample->cutoff_radius;
-
-    gamma_flat.resize(gamma_size * static_cast<size_t>(eGroups) * eGroups * eGroups);
+    gamma_flat.resize(std::max(size_t(1), gamma_total));
     std::fill(gamma_flat.begin(), gamma_flat.end(), VALT(0));
     for (int ig = 0; ig < iGroups; ig++)
       for (int jg = 0; jg < eGroups; jg++)
@@ -221,11 +230,15 @@ struct JeeIMultiWalkerMem : public Resource
           if (F(ig, jg, kg))
           {
             const size_t fidx = (static_cast<size_t>(ig) * eGroups + jg) * eGroups + kg;
-            F(ig, jg, kg)->copyGammaFlat(gamma_flat.data() + fidx * gamma_size);
-            fn_have[fidx] = char(1);
+            F(ig, jg, kg)->copyGammaFlat(gamma_flat.data() + gamma_offset[fidx]);
           }
     gamma_flat.updateTo();
+    gamma_offset.updateTo();
     fn_have.updateTo();
+    N_eI.updateTo();
+    N_ee.updateTo();
+    C.updateTo();
+    L.updateTo();
   }
 
   template<typename CUTVEC, typename GRPVEC>
@@ -719,6 +732,7 @@ public:
 
     const int Nion    = wfc_leader.Nion;
     const int eGroups = wfc_leader.eGroups;
+    const int iGroups = wfc_leader.iGroups;
     const auto& refPS = vp_leader.getRefPS();
     mem.vp_jg.resize(nVPs);
     for (size_t ivp = 0; ivp < nVPs; ivp++)
@@ -729,7 +743,12 @@ public:
     auto* memb_elec  = mem.memb_elec.data();
     auto* memb_dist  = mem.memb_dist.data();
     auto* gamma_flat = mem.gamma_flat.data();
+    auto* gamma_off  = mem.gamma_offset.data();
     auto* fn_have    = mem.fn_have.data();
+    auto* fn_N_eI    = mem.N_eI.data();
+    auto* fn_N_ee    = mem.N_ee.data();
+    auto* fn_C       = mem.C.data();
+    auto* fn_L       = mem.L.data();
     auto* ion_cut    = mem.ion_cutoff.data();
     auto* ion_grp    = mem.ion_group.data();
     auto* vals       = mem.vals.data();
@@ -738,30 +757,27 @@ public:
     auto* refp       = mw_refPctls.data();
 
     const size_t memb_stride = mem.memb_walker_stride;
-    const size_t gsize       = mem.gamma_size;
-    const int N_eI_k         = mem.N_eI;
-    const int N_ee_k         = mem.N_ee;
-    const int C_k            = mem.C;
-    const RealType L_k       = mem.L;
+    const size_t nfun        = static_cast<size_t>(iGroups) * eGroups * eGroups;
+    const size_t gamma_size  = mem.gamma_flat.size();
     const size_t n_memb      = mem.memb_elec.size();
     const size_t n_off       = mem.memb_offsets.size();
 
     PRAGMA_OFFLOAD("omp target teams distribute \
                     map(to: refp[:nVPs], walker_of[:nVPs], jg_of[:nVPs]) \
                     map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb]) \
-                    map(to: gamma_flat[:gsize * eGroups * eGroups * eGroups], \
-                            fn_have[:eGroups * eGroups * eGroups]) \
+                    map(to: gamma_flat[:gamma_size], gamma_off[:nfun], fn_have[:nfun], \
+                            fn_N_eI[:nfun], fn_N_ee[:nfun], fn_C[:nfun], fn_L[:nfun]) \
                     map(to: ion_cut[:Nion], ion_grp[:Nion]) \
                     map(always, from: vals[:nVPs]) \
                     is_device_ptr(mw_ei, mw_ee)")
     for (size_t ivp = 0; ivp < nVPs; ivp++)
     {
-      const int jel            = refp[ivp];
-      const int jg             = jg_of[ivp];
-      const size_t memb_base   = static_cast<size_t>(walker_of[ivp]) * memb_stride;
-      const RealType* ei_row   = mw_ei + ivp * stride_ei;
-      const RealType* ee_row   = mw_ee + ivp * stride_ee;
-      RealType sum             = 0;
+      const int jel          = refp[ivp];
+      const int jg           = jg_of[ivp];
+      const size_t memb_base = static_cast<size_t>(walker_of[ivp]) * memb_stride;
+      const RealType* ei_row = mw_ei + ivp * stride_ei;
+      const RealType* ee_row = mw_ee + ivp * stride_ee;
+      RealType sum           = 0;
 
       PRAGMA_OFFLOAD("omp parallel for reduction(+: sum)")
       for (int iat = 0; iat < Nion; iat++)
@@ -775,7 +791,7 @@ public:
           const int fidx = (ig * eGroups + jg) * eGroups + kg;
           if (!fn_have[fidx])
             continue;
-          const RealType* grow = gamma_flat + static_cast<size_t>(fidx) * gsize;
+          const RealType* grow = gamma_flat + gamma_off[fidx];
           const size_t slot    = memb_base + static_cast<size_t>(kg) * Nion + iat;
           const size_t begin   = memb_off[slot];
           const size_t end     = memb_off[slot + 1];
@@ -784,7 +800,8 @@ public:
             const int kel = memb_elec[idx];
             if (kel == jel)
               continue;
-            sum += FT::evaluateV_impl(ee_row[kel], r_jI, memb_dist[idx], grow, N_eI_k, N_ee_k, C_k, L_k);
+            sum += FT::evaluateV_impl(ee_row[kel], r_jI, memb_dist[idx], grow, fn_N_eI[fidx], fn_N_ee[fidx], fn_C[fidx],
+                                      fn_L[fidx]);
           }
         }
       }
