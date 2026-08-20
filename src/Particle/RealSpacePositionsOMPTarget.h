@@ -131,20 +131,18 @@ public:
     mw_accept_indices.resize(nw);
     auto* restrict id_array = mw_accept_indices.data();
 
-    size_t num_accepted = 0;
+    // Each slot is either its walker index or the rejection sentinel.
+    // The target launch shape depends only on the crowd size.
     for (int iw = 0; iw < nw; iw++)
       if (isAccepted[iw])
       {
-        auto& coords           = coords_list.getCastedElement<RealSpacePositionsOMPTarget>(iw);
-        id_array[num_accepted] = iw;
+        auto& coords = coords_list.getCastedElement<RealSpacePositionsOMPTarget>(iw);
+        id_array[iw] = iw;
         // save new coordinates on host copy
         coords.RSoA_hostview(iat) = mw_new_pos[iw];
-        num_accepted++;
       }
-
-    // early return to avoid OpenMP runtime mishandling of size 0 in transfer/compute.
-    if (num_accepted == 0)
-      return;
+      else
+        id_array[iw] = -1;
 
     //offload to GPU
     auto* restrict mw_pos_ptr  = mw_new_pos.data();
@@ -153,10 +151,12 @@ public:
     const size_t mw_pos_stride = mw_new_pos.capacity();
 
     PRAGMA_OFFLOAD("omp target teams distribute parallel for \
-                    map(always, to : id_array[:num_accepted])")
-    for (int i = 0; i < num_accepted; i++)
+                    map(always, to : id_array[:nw])")
+    for (int i = 0; i < nw; i++)
     {
-      const int iw           = id_array[i];
+      const int iw = id_array[i];
+      if (iw < 0)
+        continue;
       RealType* RSoA_dev_ptr = mw_rosa_ptr[iw];
       for (int id = 0; id < QMCTraits::DIM; id++)
         RSoA_dev_ptr[iat + rsoa_stride * id] = mw_pos_ptr[iw + mw_pos_stride * id];
