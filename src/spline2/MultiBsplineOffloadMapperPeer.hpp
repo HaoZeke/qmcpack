@@ -16,12 +16,24 @@
 #ifndef QMCPLUSPLUS_MULTIBSPLINE_OFFLOAD_MAPPER_PEER_HPP
 #define QMCPLUSPLUS_MULTIBSPLINE_OFFLOAD_MAPPER_PEER_HPP
 
+#include <string>
 #include <vector>
 #include "MultiBsplineOffloadMapper.hpp"
 #include "Message/Communicate.h"
 
 namespace qmcplusplus
 {
+namespace detail
+{
+/** Decide whether one rank can address every selected device in its sharing group. */
+bool localPeerTopologyAllowsSharing(const std::string& local_node,
+                                    const std::string& selected_bus_id,
+                                    const std::vector<std::string>& visible_bus_ids,
+                                    const std::vector<std::string>& owner_nodes,
+                                    const std::vector<std::string>& owner_bus_ids,
+                                    const std::vector<int>& owner_peer_access);
+} // namespace detail
+
 /** Map ONE device copy of the coefficients and let every device in the group read it.
  * @tparam T the precision of splines
  *
