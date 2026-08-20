@@ -213,7 +213,8 @@ private:
    */
   static bool buildNeighborJobsOnDevice(const RefVectorWithLeader<OperatorBase>& o_list,
                                         const RefVectorWithLeader<ParticleSet>& p_list,
-                                        int ig);
+                                        int ig,
+                                        bool materialize_jobs = true);
   /// mult walker shared resource
   ResourceHandle<NonLocalECPotentialMultiWalkerResource> mw_res_handle_;
 

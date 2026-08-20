@@ -52,7 +52,7 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
    */
   Vector<Real, OffloadPinnedAllocator<Real>> rmax_per_ion;
   Vector<int, OffloadPinnedAllocator<int>> job_counts;    // [nw]
-  Vector<int, OffloadPinnedAllocator<int>> job_ion;       // [nw][max_jobs]
+  Vector<int, OffloadPinnedAllocator<int>> job_ion;       // [nw][job_stride]
   Vector<int, OffloadPinnedAllocator<int>> job_elec;
   Vector<Real, OffloadPinnedAllocator<Real>> job_dist;
   Vector<Real, OffloadPinnedAllocator<Real>> job_displ;   // 3 per job
@@ -285,16 +285,18 @@ void NonLocalECPotential::evaluateImpl(TrialWaveFunction& psi, ParticleSet& P, b
  * displacement components follow at offsets num_padded, 2 * num_padded and
  * 3 * num_padded within the same stride.
  *
+ * @param materialize_jobs copy the compacted device output into each operator's job list
  * @return false when the device path is unavailable, leaving the caller on the host scan
  */
 bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<OperatorBase>& o_list,
                                                     const RefVectorWithLeader<ParticleSet>& p_list,
-                                                    int ig)
+                                                    int ig,
+                                                    bool materialize_jobs)
 {
-  auto& O_leader          = o_list.getCastedLeader<NonLocalECPotential>();
+  auto& O_leader              = o_list.getCastedLeader<NonLocalECPotential>();
   const ParticleSet& P_leader = p_list.getLeader();
-  const auto& table       = P_leader.getDistTableAB(O_leader.myTableIndex);
-  const Real* mw_dist     = nullptr;
+  const auto& table           = P_leader.getDistTableAB(O_leader.myTableIndex);
+  const Real* mw_dist         = nullptr;
   try
   {
     mw_dist = table.getMultiWalkerDataPtr();
@@ -306,8 +308,9 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
   if (mw_dist == nullptr)
     return false;
 
-  auto& res       = O_leader.mw_res_handle_.getResource();
-  const size_t nw = o_list.size();
+  const Real* mw_dist_dev  = getOffloadDevicePtr(const_cast<Real*>(mw_dist));
+  auto& res                = O_leader.mw_res_handle_.getResource();
+  const size_t nw          = o_list.size();
   const size_t num_sources = O_leader.PP.size();
   const size_t num_padded  = getAlignedSize<Real>(num_sources);
   const size_t stride_size = num_padded * 4;
@@ -326,47 +329,81 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
     res.rmax_per_ion.updateTo();
   }
 
-  const size_t max_jobs = nelec_group * 2 + 8; // same assumption as the host reserve
   res.job_counts.resize(nw);
-  res.job_ion.resize(nw * max_jobs);
-  res.job_elec.resize(nw * max_jobs);
-  res.job_dist.resize(nw * max_jobs);
-  res.job_displ.resize(nw * max_jobs * 3);
-
-  auto* counts_ptr = res.job_counts.data();
-  auto* ion_ptr    = res.job_ion.data();
-  auto* elec_ptr   = res.job_elec.data();
-  auto* dist_ptr   = res.job_dist.data();
-  auto* displ_ptr  = res.job_displ.data();
-  auto* rmax_ptr   = res.rmax_per_ion.data();
-
-  PRAGMA_OFFLOAD("omp target teams distribute num_teams(nw) \
-                  map(always, from: counts_ptr[:nw], ion_ptr[:nw*max_jobs], elec_ptr[:nw*max_jobs], \
-                                    dist_ptr[:nw*max_jobs], displ_ptr[:nw*max_jobs*3]) \
-                  is_device_ptr(mw_dist)")
-  for (size_t iw = 0; iw < nw; iw++)
+  size_t job_stride = nelec_group * 2 + 8;
+  while (true)
   {
-    int count = 0;
-    for (int jel = first_elec; jel < last_elec; jel++)
+    res.job_ion.resize(nw * job_stride);
+    res.job_elec.resize(nw * job_stride);
+    res.job_dist.resize(nw * job_stride);
+    res.job_displ.resize(nw * job_stride * 3);
+
+    auto* counts_ptr = res.job_counts.data();
+    auto* ion_ptr    = res.job_ion.data();
+    auto* elec_ptr   = res.job_elec.data();
+    auto* dist_ptr   = res.job_dist.data();
+    auto* displ_ptr  = res.job_displ.data();
+    auto* counts_dev = res.job_counts.device_data();
+    auto* ion_dev    = res.job_ion.device_data();
+    auto* elec_dev   = res.job_elec.device_data();
+    auto* dist_dev   = res.job_dist.device_data();
+    auto* displ_dev  = res.job_displ.device_data();
+    auto* rmax_dev   = res.rmax_per_ion.device_data();
+
+    PRAGMA_OFFLOAD("omp target teams distribute num_teams(nw) \
+                    is_device_ptr(mw_dist_dev, counts_dev, ion_dev, elec_dev, dist_dev, displ_dev, rmax_dev)")
+    for (size_t iw = 0; iw < nw; iw++)
     {
-      const size_t t    = iw * nelec_total + jel;
-      const Real* dists = mw_dist + t * stride_size;
-      for (size_t iat = 0; iat < num_sources; iat++)
-        if (rmax_ptr[iat] > Real(0) && dists[iat] < rmax_ptr[iat] && count < static_cast<int>(max_jobs))
-        {
-          const size_t slot   = iw * max_jobs + count;
-          ion_ptr[slot]       = static_cast<int>(iat);
-          elec_ptr[slot]      = jel;
-          dist_ptr[slot]      = dists[iat];
-          // displacements are stored as the table's convention; the host scan negates
-          displ_ptr[slot * 3 + 0] = -dists[num_padded + iat];
-          displ_ptr[slot * 3 + 1] = -dists[2 * num_padded + iat];
-          displ_ptr[slot * 3 + 2] = -dists[3 * num_padded + iat];
-          count++;
-        }
+      int count = 0;
+      for (int jel = first_elec; jel < last_elec; jel++)
+      {
+        const size_t t    = iw * nelec_total + jel;
+        const Real* dists = mw_dist_dev + t * stride_size;
+        for (size_t iat = 0; iat < num_sources; iat++)
+          if (rmax_dev[iat] > Real(0) && dists[iat] < rmax_dev[iat])
+          {
+            const int job_id = count++;
+            if (job_id >= static_cast<int>(job_stride))
+              continue;
+
+            const size_t slot = iw * job_stride + job_id;
+            ion_dev[slot]     = static_cast<int>(iat);
+            elec_dev[slot]    = jel;
+            dist_dev[slot]    = dists[iat];
+            // displacements are stored as the table's convention; the host scan negates
+            displ_dev[slot * 3 + 0] = -dists[num_padded + iat];
+            displ_dev[slot * 3 + 1] = -dists[2 * num_padded + iat];
+            displ_dev[slot * 3 + 2] = -dists[3 * num_padded + iat];
+          }
+      }
+      counts_dev[iw] = count;
     }
-    counts_ptr[iw] = count;
+
+    PRAGMA_OFFLOAD("omp target update from(counts_ptr[:nw], ion_ptr[:nw*job_stride], elec_ptr[:nw*job_stride], \
+                                           dist_ptr[:nw*job_stride], displ_ptr[:nw*job_stride*3])")
+    size_t required_stride = 0;
+    for (size_t iw = 0; iw < nw; ++iw)
+      required_stride = std::max(required_stride, static_cast<size_t>(res.job_counts[iw]));
+    if (required_stride <= job_stride)
+      break;
+    job_stride = required_stride;
   }
+
+  if (materialize_jobs)
+    for (size_t iw = 0; iw < nw; ++iw)
+    {
+      auto& O       = o_list.getCastedElement<NonLocalECPotential>(iw);
+      auto& joblist = O.nlpp_jobs[ig];
+      joblist.clear();
+      joblist.reserve(res.job_counts[iw]);
+      for (int job_id = 0; job_id < res.job_counts[iw]; ++job_id)
+      {
+        const size_t slot = iw * job_stride + job_id;
+        joblist.emplace_back(res.job_ion[slot], res.job_elec[slot], res.job_dist[slot],
+                             PosType(res.job_displ[slot * 3 + 0], res.job_displ[slot * 3 + 1],
+                                     res.job_displ[slot * 3 + 2]));
+      }
+    }
 
   return true;
 }
@@ -455,7 +492,6 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         O.nlpp_jobs[ig].clear();
     }
 
-    auto& res = O_leader.mw_res_handle_.getResource();
     for (int ig = 0; ig < pset_leader.groups() && device_jobs; ++ig)
     {
       if (!buildNeighborJobsOnDevice(o_list, p_list, ig))
@@ -463,22 +499,11 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         device_jobs = false; // no device table, every walker falls back together
         break;
       }
-      const size_t max_jobs = (pset_leader.last(ig) - pset_leader.first(ig)) * 2 + 8;
       for (size_t iw = 0; iw < nw; iw++)
       {
-        auto& O           = o_list.getCastedElement<NonLocalECPotential>(iw);
-        auto& joblist     = O.nlpp_jobs[ig];
-        const int njobs   = res.job_counts[iw];
-        for (int j = 0; j < njobs; j++)
-        {
-          const size_t slot = iw * max_jobs + j;
-          const int iat     = res.job_ion[slot];
-          const int jel     = res.job_elec[slot];
-          O.neighbor_lists.addElecIonPair(jel, iat);
-          joblist.emplace_back(iat, jel, res.job_dist[slot],
-                               PosType(res.job_displ[slot * 3 + 0], res.job_displ[slot * 3 + 1],
-                                       res.job_displ[slot * 3 + 2]));
-        }
+        auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+        for (const auto& job : O.nlpp_jobs[ig])
+          O.neighbor_lists.addElecIonPair(job.electron_id, job.ion_id);
       }
     }
 
@@ -538,7 +563,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
     {
       auto& res = O_leader.mw_res_handle_.getResource();
       for (int ig = 0; ig < P.groups(); ++ig)
-        if (buildNeighborJobsOnDevice(o_list, p_list, ig))
+        if (buildNeighborJobsOnDevice(o_list, p_list, ig, false))
         {
           const int dev_count = res.job_counts[0];
           // Scan the host table here rather than reading nlpp_jobs: under
