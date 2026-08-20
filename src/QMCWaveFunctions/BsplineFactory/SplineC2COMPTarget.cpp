@@ -30,7 +30,7 @@ void SplineC2COMPTarget<ST>::storeParamsBeforeRotation()
 {
   // Rotation mixes every orbital with every other, so with the coefficients divided
   // into blocks each output block would need input from all of them: a cross-block
-  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // gemm rather than a change of indexing. Orbital optimisation therefore requires
   // a single block. Saying so here beats the bare throw from getSplinePtr().
   if (SplineInst->getNumBlocks() > 1)
     throw std::runtime_error("SplineC2COMPTarget: orbital rotation is not implemented for coefficients "
@@ -47,7 +47,7 @@ void SplineC2COMPTarget<ST>::applyRotation(const ValueMatrix& rot_mat, bool use_
 {
   // Rotation mixes every orbital with every other, so with the coefficients divided
   // into blocks each output block would need input from all of them: a cross-block
-  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // gemm rather than a change of indexing. Orbital optimisation therefore requires
   // a single block. Saying so here beats the bare throw from getSplinePtr().
   if (SplineInst->getNumBlocks() > 1)
     throw std::runtime_error("SplineC2COMPTarget: orbital rotation is not implemented for coefficients "
@@ -624,16 +624,8 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
   auto* prim_lattice_G_ptr       = prim_lattice_G_offload->data();
   auto* myKcart_ptr              = myKcart->data();
 
-  // The spline evaluation and the assignment to psi were one fused kernel while the
-  // coefficients were guaranteed to be a single block. Splitting them is what lets the
-  // coefficients be distributed across ranks, and so across devices, because assign_vgl
-  // reads offload_scratch across the whole orbital range and cannot run until every
-  // block has written its part of it.
-  //
-  // The cost of the split is one extra kernel launch and a round trip of
-  // offload_scratch through device memory. It is paid even with a single block, which
-  // is what makes it measurable: run this against the fused version at
-  // distributed_ranks 1 and the difference is the price of the split alone.
+  // Each block writes its global slice of offload_scratch. assign_vgl reads the whole
+  // orbital range, so assignment runs only after every block evaluation.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
 
@@ -642,12 +634,12 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr        = &SplineInst->getBlock(ib);
-      const size_t block_splines    = spline_ptr->num_splines;
+      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
-      const size_t block_offset     = block_offsets[ib];
-      const int NumTeamsBlock       = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+      const size_t block_offset = block_offsets[ib];
+      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
       PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*num_pos) \
                       map(always, to: pos_copy_ptr[0:num_pos*6])")
@@ -688,8 +680,7 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
         }
     }
 
-    // every block has written offload_scratch by now, so the orbital-range assignment
-    // can run once over the whole set
+    // Every block slice is populated before assignment covers the whole orbital set.
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
                     map(always, to: pos_copy_ptr[0:num_pos*6]) \
                     map(always, from: results_scratch_ptr[0:sposet_padded_size*num_pos*5])")
@@ -699,9 +690,8 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
         const size_t first = ChunkSizePerTeam * team_id;
         const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
-        auto* restrict offload_scratch_iw_ptr =
-            offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
-        auto* restrict psi_iw_ptr = results_scratch_ptr + sposet_padded_size * iw * 5;
+        auto* restrict offload_scratch_iw_ptr = offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
+        auto* restrict psi_iw_ptr             = results_scratch_ptr + sposet_padded_size * iw * 5;
 
         const ST G[9] = {prim_lattice_G_ptr[0], prim_lattice_G_ptr[1], prim_lattice_G_ptr[2],
                          prim_lattice_G_ptr[3], prim_lattice_G_ptr[4], prim_lattice_G_ptr[5],
@@ -835,9 +825,8 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
   // assignment so the coefficients may be held in more than one block. The
   // assignment and the ratio reduction that follows it both read offload_scratch
   // across the whole orbital range, so neither can run until every block has
-  // written. The team decomposition of the second kernel is deliberately the same
-  // as before, over spline_padded_size, so the rg_private layout and the host-side
-  // reduction below it are unchanged.
+  // written. The second kernel covers spline_padded_size so its team indices match the
+  // rg_private layout consumed by the host reduction.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
 
@@ -876,7 +865,8 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
           // evaluation per team again without giving up SPMD for the loop that follows.
           ST a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
           ST symGGt[6];
-          PRAGMA_OFFLOAD("omp allocate(ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt) allocator(omp_pteam_mem_alloc)")
+          PRAGMA_OFFLOAD(
+              "omp allocate(ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt) allocator(omp_pteam_mem_alloc)")
 
           PRAGMA_OFFLOAD("omp parallel")
           {
@@ -894,20 +884,20 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
             PRAGMA_OFFLOAD("omp barrier")
 
             PRAGMA_OFFLOAD("omp for")
-          for (int index = 0; index < last - first; index++)
-          {
-            // coefficients are indexed within the block, results at the global offset
-            const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
-                                                 spline_padded_size);
-            offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-                SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+            for (int index = 0; index < last - first; index++)
+            {
+              // coefficients are indexed within the block, results at the global offset
+              const size_t output_index = block_offset + first + index;
+              spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
+                                                   da, db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
+                                                   spline_padded_size);
+              offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
+                  SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
             }
           }
         }

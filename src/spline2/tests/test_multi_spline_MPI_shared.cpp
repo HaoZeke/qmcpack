@@ -316,12 +316,12 @@ struct test_splines<T, 5> : public test_splines_base<T, 5>
  *
  * Covers the path MultiBsplineMPISharedOffload puts into production: the coefficients
  * are allocated once per group of ranks in an MPI-3 shared window, mapped onto the
- * device, and read back by the mapper's multi-walker evaluation. The values are
+ * device through its owned mapper, and read back by multi-walker evaluation. The values are
  * compared against the host evaluation of the same object, so the check is on the
  * mapping rather than on any hard-coded number.
  *
- * Without ENABLE_OFFLOAD the offload pragmas compile away and this still exercises the
- * shared window and the blocked evaluation, so it is worth running on host builds too.
+ * Host builds exercise the shared window and blocked evaluation with inactive offload
+ * pragmas.
  */
 template<typename T>
 struct test_shared_offload : public test_splines_base<T, 5>
@@ -378,14 +378,9 @@ struct test_shared_offload : public test_splines_base<T, 5>
 
 /** Coefficients split into blocks across ranks, evaluated on the device.
  *
- * The sharing case above keeps one block and gives every rank the whole table on its
- * own device. Distributing splits the orbitals into one block per rank, which is what
- * would let a multi-device node stop holding an identical copy of the coefficients on
- * every device. MultiBsplineOffloadMapper::mw_evaluate_v already walks the blocks,
- * taking each block's own spline pointer and coefficients and writing its results at
- * that block's offset, so the device side of that arrangement is testable now even
- * though no SPO class asks for it yet: SplineC2COMPTarget and SplineC2ROMPTarget reach
- * the coefficients through getSplinePtr(), which throws with more than one block.
+ * Distributing splits orbitals into blocks. MultiBsplineOffloadMapper::mw_evaluate_v
+ * walks the blocks, takes each block's descriptor and coefficients, and writes results
+ * at the corresponding global offset.
  *
  * The device result is compared against the host evaluation of the same object, which
  * walks the blocks too, so what is under test is that the blocked device path agrees
@@ -412,7 +407,7 @@ struct test_distributed_offload : public test_splines_base<T, 5>
     MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_distributed), distributed_ranks);
     REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
-    const size_t npad = getAlignedSize<T>(num_splines);
+    const size_t npad      = getAlignedSize<T>(num_splines);
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
     auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
     for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
@@ -447,8 +442,7 @@ struct test_distributed_offload : public test_splines_base<T, 5>
  * checked is that a rank reading through a pointer it did not allocate gets the same
  * values as the host evaluation.
  *
- * Without a device runtime carrying inter-process handles the class falls back to the
- * per-rank mapping, so this remains a valid, if less interesting, test everywhere.
+ * Configurations without interoperable device handles use the per-rank mapping.
  */
 template<typename T>
 struct test_peer_offload : public test_splines_base<T, 5>
@@ -490,8 +484,7 @@ struct test_peer_offload : public test_splines_base<T, 5>
     // to the descriptor rather than only making the standalone host pointer present.
     const auto* spline_ptr = &bs.getBlock(0);
     T device_coef{};
-    PRAGMA_OFFLOAD("omp target map(from: device_coef)")
-    { device_coef = spline_ptr->coefs[0]; }
+    PRAGMA_OFFLOAD("omp target map(from: device_coef)") { device_coef = spline_ptr->coefs[0]; }
     CHECK(device_coef == Approx(spline_ptr->coefs[0]));
 
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};

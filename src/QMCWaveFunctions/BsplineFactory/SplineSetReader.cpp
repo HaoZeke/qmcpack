@@ -55,11 +55,10 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 
   if (use_offload)
   {
-    // Sharing is supported on offload builds: the coefficients live in one MPI-3 shared
-    // window per group of ranks and each rank maps that window onto its own device.
-    // Distributing is supported for the complex offload SPO, whose evaluation paths all
-    // walk the blocks. The real one still reaches the coefficients through
-    // getSplinePtr(), which requires a single block, so it stays restricted.
+    // Offload groups hold coefficients in one MPI-3 shared window. Peer-capable CUDA
+    // groups distribute device allocations; other configurations map each rank.
+    // Complex offload evaluation walks coefficient blocks. Real offload evaluation
+    // reaches coefficients through getSplinePtr(), which requires one block.
 #if !defined(QMC_COMPLEX)
     if (distributed_ranks > 1)
       app_warning() << "Offload implementation doesn't support distributing the memory of spline coefficients "
@@ -99,9 +98,9 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   {
 #if defined(HAVE_MPI)
     if (shared_ranks > 1 || distributed_ranks > 1)
-      multi_splines_ptr = std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines,
-                                                                             std::move(dist_comm_ptr),
-                                                                             distributed_ranks);
+      multi_splines_ptr =
+          std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines, std::move(dist_comm_ptr),
+                                                             distributed_ranks);
     else
 #endif
       multi_splines_ptr = std::make_unique<MultiBsplineOffload<ST>>(xyz_grid, xyz_bc, num_splines);
