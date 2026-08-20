@@ -19,6 +19,7 @@
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "config/stdlib/Constants.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
+#include "OMPTarget/OMPTargetMath.hpp"
 #include "einspline/bspline_create.h"
 #if defined(ENABLE_OFFLOAD)
 #include <omp.h>
@@ -203,6 +204,7 @@ void test_mapped_vgl_contraction()
   constexpr int num_splines = 513;
   test_splines_base<T, 5, num_splines> setup;
   MultiBspline<T> bs(setup.grid, setup.bc, setup.npad);
+  bs.flush_zero();
 
   std::vector<double> mixed_data(setup.data.size());
   const double tpi = 2 * M_PI;
