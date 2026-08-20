@@ -28,3 +28,6 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+if(HAVE_MPI)
+  add_unit_test(${UTEST_NAME}-r2 2 1 $<TARGET_FILE:${UTEST_EXE}> "[shared-offload]")
+endif()

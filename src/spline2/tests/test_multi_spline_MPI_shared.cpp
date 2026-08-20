@@ -365,14 +365,10 @@ struct test_shared_offload : public test_splines_base<T, 5>
     aligned_vector<T> v_host(npad);
     bs.evaluate_v(pos, v_host);
 
-    MultiBsplineOffloadMapper<T> mapped_bs(bs);
-    mapped_bs.mapToDevice();
-    mapped_bs.updateToDevice();
-
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
     pos_arr.updateTo();
     Vector<T, OffloadAllocator<T>> v_dev(npad);
-    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
     v_dev.updateFrom();
 
     for (size_t i = 0; i < num_splines; i++)
@@ -489,6 +485,15 @@ struct test_peer_offload : public test_splines_base<T, 5>
     mapped_bs.mapToDevice();
     mapped_bs.updateToDevice();
 
+    // Production kernels reach coefficients through the mapped spline descriptor.
+    // Reading through that pointer checks that the mapper attaches the IPC allocation
+    // to the descriptor rather than only making the standalone host pointer present.
+    const auto* spline_ptr = &bs.getBlock(0);
+    T device_coef{};
+    PRAGMA_OFFLOAD("omp target map(from: device_coef)")
+    { device_coef = spline_ptr->coefs[0]; }
+    CHECK(device_coef == Approx(spline_ptr->coefs[0]));
+
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
     pos_arr.updateTo();
     Vector<T, OffloadAllocator<T>> v_dev(npad);
@@ -500,7 +505,7 @@ struct test_peer_offload : public test_splines_base<T, 5>
   }
 };
 
-TEST_CASE("MultiBsplineOffloadMapperPeer shared device copy", "[spline2]")
+TEST_CASE("MultiBsplineOffloadMapperPeer shared device copy", "[spline2][shared-offload]")
 {
   test_peer_offload<double>().test(13);
   test_peer_offload<float>().test(11);
@@ -524,7 +529,7 @@ TEST_CASE("MultiBsplineMPIShared distributed offload float", "[spline2]")
   test_distributed_offload<float>().test(11, 4);
 }
 
-TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
+TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2][shared-offload]")
 {
   test_shared_offload<double>().test(13, 1);
   test_shared_offload<double>().test(13, 2);
@@ -533,7 +538,7 @@ TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
   test_shared_offload<double>().test(13, 1, 2);
 }
 
-TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2]")
+TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2][shared-offload]")
 {
   test_shared_offload<float>().test(11, 1);
   test_shared_offload<float>().test(11, 2);
