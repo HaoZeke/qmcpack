@@ -9,6 +9,7 @@
 // File refactored from: DMC.cpp
 //////////////////////////////////////////////////////////////////////////////////////
 
+#include <algorithm>
 #include <functional>
 #include <cassert>
 #include <cmath>
@@ -213,10 +214,23 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         ps_dispatcher.flex_makeMove(walker_elecs, iat, drifts, are_valid);
 
-        twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
         if (check_device_acceptance)
           if constexpr (CT == CoordsType::POS)
             TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, device_ratios, device_grads);
+        twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
+        if (check_device_acceptance)
+          if constexpr (CT == CoordsType::POS)
+          {
+            device_ratios.updateFrom();
+            const auto ratio_tolerance = std::sqrt(std::numeric_limits<SPOSet::RealType>::epsilon());
+            for (int iw = 0; iw < num_walkers; ++iw)
+            {
+              const auto difference = std::abs(device_ratios[iw] - ratios[iw]);
+              const auto scale = std::max({FullPrecRealType(1), std::abs(device_ratios[iw]), std::abs(ratios[iw])});
+              if (!std::isfinite(difference) || difference > ratio_tolerance * scale)
+                throw std::runtime_error("DMC resident ratio disagrees with the host proposal ratio");
+            }
+          }
 
         computeLogGreensFunction(deltas, taus, log_gf);
 
