@@ -61,6 +61,39 @@ TEST_CASE("JeeI functor pack uses ion-group extent", "[wavefunction]")
   CHECK(mem.fn_have.size() == 2);
 }
 
+TEST_CASE("JeeI functor pack preserves per-functor cutoff", "[wavefunction]")
+{
+  PolynomialFunctor3D first("first");
+  PolynomialFunctor3D second("second");
+  first.cutoff_radius  = 4.0;
+  second.cutoff_radius = 6.0;
+  first.resize(1, 1);
+  second.resize(1, 1);
+  first.gamma           = 0.0;
+  second.gamma          = 0.0;
+  first.gamma(0, 0, 0)  = 1.0;
+  second.gamma(0, 0, 0) = 1.0;
+
+  Array<PolynomialFunctor3D*, 3> functors;
+  functors.resize(2, 2, 2);
+  functors          = nullptr;
+  functors(0, 0, 0) = &first;
+  functors(1, 0, 0) = &second;
+
+  JeeIMultiWalkerMem<RealType> mem;
+  mem.packFunctors(functors, 2, 2);
+
+  constexpr RealType r12 = 0.25;
+  constexpr RealType r1I = 0.5;
+  constexpr RealType r2I = 0.75;
+  constexpr size_t fidx  = 4;
+  const RealType packed =
+      PolynomialFunctor3D::evaluateV_impl(r12, r1I, r2I, mem.gamma_flat.data() + mem.gamma_offset[fidx], mem.N_eI[fidx],
+                                          mem.N_ee[fidx], mem.C[fidx], mem.L[fidx]);
+
+  CHECK(packed == Approx(second.evaluate(r12, r1I, r2I)));
+}
+
 void create_J3_ion_reference_values(TinyVector<ParticleSet::ParticleGradient, 3>& igr_egrad,
                                     TinyVector<ParticleSet::ParticleLaplacian, 3>& igr_lapl,
                                     int ionid)
