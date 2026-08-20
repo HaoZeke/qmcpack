@@ -28,3 +28,14 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+
+# Times the offloaded VGL evaluation against the orbital count. Not a test: the decks small
+# enough to keep beside a checkout carry a handful of orbitals, where the kernel is pure
+# overhead, so a kernel change cannot be judged on them. Build and run by hand.
+if(ENABLE_OFFLOAD)
+  add_executable(benchmark_vgl_offload EXCLUDE_FROM_ALL benchmark_vgl_offload.cpp)
+  target_link_libraries(benchmark_vgl_offload spline2 einspline qmcutil platform_runtime)
+  if(USE_OBJECT_TARGET)
+    target_link_libraries(benchmark_vgl_offload spline2_omptarget)
+  endif()
+endif()

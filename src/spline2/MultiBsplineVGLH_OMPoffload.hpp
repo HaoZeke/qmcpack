@@ -348,5 +348,93 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
   val_grads_hess[out_offset * 9] = hzz * dzInv * dzInv;
 }
 
+
+/** value, gradient and laplacian for one orbital, laplacian formed in registers
+ *
+ *  evaluate_vgh_impl_v2 accumulates the hessian in registers, writes all six components to
+ *  memory, and the caller reads them straight back to contract them into the laplacian. The
+ *  hessian is not wanted for anything else on the VGL path: the pass that follows reads only
+ *  the value, the three gradients and the laplacian.
+ *
+ *  Contract here instead, while the components are still in registers, and write five values
+ *  rather than ten. That removes six stores and six dependent loads per orbital, which is
+ *  what a latency bound kernel is waiting on.
+ *
+ *  symGGt is the symmetrised metric the caller already forms once per team.
+ */
+template<typename T>
+inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
+                                 const T* restrict spline_coefs,
+                                 int ix,
+                                 int iy,
+                                 int iz,
+                                 const int index,
+                                 const T a[4],
+                                 const T b[4],
+                                 const T c[4],
+                                 const T da[4],
+                                 const T db[4],
+                                 const T dc[4],
+                                 const T d2a[4],
+                                 const T d2b[4],
+                                 const T d2c[4],
+                                 const T symGGt[6],
+                                 T* restrict val_grads_lapl,
+                                 const size_t out_offset,
+                                 const size_t lapl_offset)
+{
+  const intptr_t xs = spline_m->x_stride;
+  const intptr_t ys = spline_m->y_stride;
+  const intptr_t zs = spline_m->z_stride;
+
+  T val = T();
+  T gx = T(), gy = T(), gz = T();
+  T hxx = T(), hxy = T(), hxz = T(), hyy = T(), hyz = T(), hzz = T();
+
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+    {
+      const T* restrict coefs = spline_coefs + ((ix + i) * xs + (iy + j) * ys + iz * zs);
+      const T coefsv          = coefs[index];
+      const T coefsvzs        = coefs[index + zs];
+      const T coefsv2zs       = coefs[index + 2 * zs];
+      const T coefsv3zs       = coefs[index + 3 * zs];
+
+      const T pre20 = d2a[i] * b[j];
+      const T pre10 = da[i] * b[j];
+      const T pre00 = a[i] * b[j];
+      const T pre11 = da[i] * db[j];
+      const T pre01 = a[i] * db[j];
+      const T pre02 = a[i] * d2b[j];
+
+      const T sum0 = c[0] * coefsv + c[1] * coefsvzs + c[2] * coefsv2zs + c[3] * coefsv3zs;
+      const T sum1 = dc[0] * coefsv + dc[1] * coefsvzs + dc[2] * coefsv2zs + dc[3] * coefsv3zs;
+      const T sum2 = d2c[0] * coefsv + d2c[1] * coefsvzs + d2c[2] * coefsv2zs + d2c[3] * coefsv3zs;
+
+      hxx += pre20 * sum0;
+      hxy += pre11 * sum0;
+      hxz += pre10 * sum1;
+      hyy += pre02 * sum0;
+      hyz += pre01 * sum1;
+      hzz += pre00 * sum2;
+      gx += pre10 * sum0;
+      gy += pre01 * sum0;
+      gz += pre00 * sum1;
+      val += pre00 * sum0;
+    }
+
+  const T dxInv = spline_m->x_grid.delta_inv;
+  const T dyInv = spline_m->y_grid.delta_inv;
+  const T dzInv = spline_m->z_grid.delta_inv;
+
+  val_grads_lapl[0]              = val;
+  val_grads_lapl[out_offset]     = gx * dxInv;
+  val_grads_lapl[out_offset * 2] = gy * dyInv;
+  val_grads_lapl[out_offset * 3] = gz * dzInv;
+  val_grads_lapl[lapl_offset]    = hxx * dxInv * dxInv * symGGt[0] + hxy * dxInv * dyInv * symGGt[1] +
+      hxz * dxInv * dzInv * symGGt[2] + hyy * dyInv * dyInv * symGGt[3] + hyz * dyInv * dzInv * symGGt[4] +
+      hzz * dzInv * dzInv * symGGt[5];
+}
+
 } // namespace spline2offload
 #endif
