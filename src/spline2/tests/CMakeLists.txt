@@ -28,3 +28,12 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+
+# Compares mapped-device VGH+trace and direct VGL evaluation across orbital counts.
+if(ENABLE_OFFLOAD)
+  add_executable(benchmark_vgl_offload EXCLUDE_FROM_ALL benchmark_vgl_offload.cpp)
+  target_link_libraries(benchmark_vgl_offload spline2 einspline qmcutil platform_runtime)
+  if(USE_OBJECT_TARGET)
+    target_link_libraries(benchmark_vgl_offload spline2_omptarget)
+  endif()
+endif()
