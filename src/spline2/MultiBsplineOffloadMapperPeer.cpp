@@ -45,6 +45,15 @@ bool detail::localPeerTopologyAllowsSharing(const std::string& local_node,
   return true;
 }
 
+detail::CollectiveFailure detail::collectiveFailure(Communicate& comm, bool local_failed)
+{
+  const int local_failure_rank = local_failed ? comm.rank() : comm.size();
+  int first_failure_rank       = comm.size();
+  if (MPI_Allreduce(&local_failure_rank, &first_failure_rank, 1, MPI_INT, MPI_MIN, comm.getMPI()) != MPI_SUCCESS)
+    throw UniformCommunicateError("MultiBsplineOffloadMapperPeer failure reduction failed!");
+  return {first_failure_rank < comm.size(), first_failure_rank < comm.size() ? first_failure_rank : -1};
+}
+
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
     : Base(host_bsplines), comm_(comm), use_peer_mapping_(comm.size() > 1 && canShareDeviceMemory(comm))
