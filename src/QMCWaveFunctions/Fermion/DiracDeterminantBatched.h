@@ -158,6 +158,12 @@ public:
                     std::vector<PsiValue>& ratios,
                     std::vector<Grad>& grad_new) const override;
 
+  void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                          const RefVectorWithLeader<ParticleSet>& p_list,
+                          int iat,
+                          OffloadRatioVector& ratios,
+                          OffloadGradVector& grads) const override;
+
   void mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
                             int iat,
