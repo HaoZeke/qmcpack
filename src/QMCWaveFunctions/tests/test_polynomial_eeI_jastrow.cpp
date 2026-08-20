@@ -94,6 +94,34 @@ TEST_CASE("JeeI functor pack preserves per-functor cutoff", "[wavefunction]")
   CHECK(packed == Approx(second.evaluate(r12, r1I, r2I)));
 }
 
+TEST_CASE("JeeI functor pack clears empty schema", "[wavefunction]")
+{
+  PolynomialFunctor3D functor("test_functor");
+  functor.cutoff_radius = 4.0;
+  functor.resize(1, 1);
+  functor.gamma = 1.0;
+
+  Array<PolynomialFunctor3D*, 3> functors;
+  functors.resize(1, 1, 1);
+  functors          = nullptr;
+  functors(0, 0, 0) = &functor;
+
+  JeeIMultiWalkerMem<RealType> mem;
+  mem.packFunctors(functors, 1, 1);
+  functors = nullptr;
+  mem.packFunctors(functors, 1, 1);
+
+  REQUIRE(mem.fn_have.size() == 1);
+  CHECK(mem.fn_have[0] == 0);
+  REQUIRE(mem.gamma_flat.size() == 1);
+  CHECK(mem.gamma_flat[0] == Approx(0.0));
+  CHECK(mem.gamma_offset[0] == 0);
+  CHECK(mem.N_eI[0] == 0);
+  CHECK(mem.N_ee[0] == 0);
+  CHECK(mem.C[0] == 0);
+  CHECK(mem.L[0] == Approx(0.0));
+}
+
 void create_J3_ion_reference_values(TinyVector<ParticleSet::ParticleGradient, 3>& igr_egrad,
                                     TinyVector<ParticleSet::ParticleLaplacian, 3>& igr_lapl,
                                     int ionid)
