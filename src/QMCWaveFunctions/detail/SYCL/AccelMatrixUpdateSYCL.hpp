@@ -81,13 +81,14 @@ void add_delay_list_save_sigma_VGL_batched(Queue<PlatformKind::SYCL>& queue,
                                            T* const d2phi_out[],
                                            const int norb,
                                            const int n_accepted,
-                                           const int batch_count)
+                                           const int batch_count,
+                                           const char* const accept_mask = nullptr)
 {
   try
   {
     SYCL::add_delay_list_save_sigma_VGL_batched(queue.getNative(), delay_list, rowchanged, delay_count, binv, binv_lda,
                                                 ratio_inv, phi_vgl_in, phi_vgl_stride, phi_out, dphi_out, d2phi_out,
-                                                norb, n_accepted, batch_count);
+                                                norb, n_accepted, batch_count, accept_mask);
   }
   catch (sycl::exception& e)
   {

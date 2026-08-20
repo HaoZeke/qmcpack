@@ -59,6 +59,7 @@ sycl::event add_delay_list_save_sigma_VGL_batched(sycl::queue& aq,
                                                   const int norb,
                                                   const int n_accepted,
                                                   const int batch_count,
+                                                  const char* const accept_mask = nullptr,
                                                   const std::vector<sycl::event>& dependencies = {});
 
 template<typename T>

@@ -109,12 +109,13 @@ void add_delay_list_save_sigma_VGL_batched(Queue<PlatformKind::OMPTARGET>& queue
                                            T* const d2phi_out[],
                                            const int norb,
                                            const int n_accepted,
-                                           const int batch_count)
+                                           const int batch_count,
+                                           const char* const accept_mask = nullptr)
 {
   PRAGMA_OFFLOAD("omp target teams distribute \
-                  is_device_ptr(delay_list, binv, ratio_inv, phi_vgl_in, phi_out, dphi_out, d2phi_out)")
+                  is_device_ptr(delay_list, binv, ratio_inv, phi_vgl_in, phi_out, dphi_out, d2phi_out, accept_mask)")
   for (size_t iw = 0; iw < batch_count; iw++)
-    if (iw < n_accepted)
+    if (accept_mask ? accept_mask[iw] != 0 : iw < n_accepted)
     {
       // real accept, settle y and Z
       int* __restrict__ delay_list_iw = delay_list[iw];
