@@ -113,6 +113,25 @@ public:
       grad[2] = 987.;
     }
   }
+  void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                          const RefVectorWithLeader<ParticleSet>& p_list,
+                          int iat,
+                          OffloadRatioVector& ratios,
+                          OffloadGradVector& grad_new) const override
+  {
+    const size_t nw = wfc_list.size();
+    ratios.resize(nw);
+    grad_new.resize(nw);
+    auto* ratios_ptr = ratios.device_data();
+    auto* grads_ptr  = grad_new.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(ratios_ptr, grads_ptr)")
+    for (size_t iw = 0; iw < nw; ++iw)
+    {
+      ratios_ptr[iw] = PsiValue(10 + iw);
+      for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+        grads_ptr[iw][idim] = ValueType(100 * (idim + 1) + iw);
+    }
+  }
   void mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
                             int iat,
@@ -207,6 +226,20 @@ TEST_CASE("SlaterDet mw_ APIs", "[wavefunction]")
       CHECK(grad[0] == ValueApprox(321.));
       CHECK(grad[1] == ValueApprox(654.));
       CHECK(grad[2] == ValueApprox(987.));
+    }
+
+    WaveFunctionComponent::OffloadRatioVector device_ratios;
+    WaveFunctionComponent::OffloadGradVector device_grads;
+    slaterdet0.mw_ratioGradDevice(sd_list, p_list, 0, device_ratios, device_grads);
+    REQUIRE(device_ratios.size() == p_list.size());
+    REQUIRE(device_grads.size() == p_list.size());
+    device_ratios.updateFrom();
+    device_grads.updateFrom();
+    for (size_t iw = 0; iw < p_list.size(); ++iw)
+    {
+      CHECK(device_ratios[iw] == ValueApprox(WaveFunctionComponent::PsiValue(10 + iw)));
+      for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+        CHECK(device_grads[iw][idim] == ValueApprox(Value(100 * (idim + 1) + iw)));
     }
 
     slaterdet0.mw_ratioGradWithSpin(sd_list, p_list, 0, ratios, grads, spingrads);
