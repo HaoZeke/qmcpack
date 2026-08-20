@@ -367,6 +367,12 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
     OffloadGradVector& grads) const
 {
   assert(this == &wfc_list.getLeader());
+  if (!phi_.isOMPoffload())
+  {
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grads);
+    return;
+  }
+
   auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
   auto& mw_res     = wfc_leader.mw_res_handle_.getResource();
   const int nw     = wfc_list.size();
