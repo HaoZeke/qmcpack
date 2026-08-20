@@ -361,6 +361,14 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
   std::fill(ratios.begin(), ratios.end(), 0);
   TWFGrads<CoordsType::POS> grad_new(2);
 
+  TrialWaveFunction::OffloadRatioVector device_ratios;
+  WaveFunctionComponent::OffloadGradVector device_grads;
+  TrialWaveFunction::mw_calcRatioGradDevice(wf_ref_list, p_ref_list, moved_elec_id, device_ratios, device_grads);
+  REQUIRE(device_ratios.size() == ratios.size());
+  REQUIRE(device_grads.size() == grad_new.grads_positions.size());
+  device_ratios.updateFrom();
+  device_grads.updateFrom();
+
   if (kind_selected != DynamicCoordinateKind::DC_POS_OFFLOAD)
   {
     ratios[0] = wf_ref_list[0].calcRatioGrad(p_ref_list[0], moved_elec_id, grad_new.grads_positions[0]);
@@ -379,13 +387,6 @@ void testTrialWaveFunction_diamondC_2x1x1(const int ndelay, const OffloadSwitche
             << grad_new.grads_positions[0][2] << " " << grad_new.grads_positions[1][0] << " "
             << grad_new.grads_positions[1][1] << " " << grad_new.grads_positions[1][2] << std::endl;
 
-  TrialWaveFunction::OffloadRatioVector device_ratios;
-  WaveFunctionComponent::OffloadGradVector device_grads;
-  TrialWaveFunction::mw_calcRatioGradDevice(wf_ref_list, p_ref_list, moved_elec_id, device_ratios, device_grads);
-  REQUIRE(device_ratios.size() == ratios.size());
-  REQUIRE(device_grads.size() == grad_new.grads_positions.size());
-  device_ratios.updateFrom();
-  device_grads.updateFrom();
   for (size_t iw = 0; iw < ratios.size(); ++iw)
   {
     CHECK(device_ratios[iw] == ValueApprox(ratios[iw]));

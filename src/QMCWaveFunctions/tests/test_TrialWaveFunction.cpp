@@ -44,6 +44,32 @@ using PosType   = QMCTraits::PosType;
 using RealType  = QMCTraits::RealType;
 using ValueType = QMCTraits::ValueType;
 
+TEST_CASE("TrialWaveFunction empty resident ratio product", "[wavefunction]")
+{
+  RuntimeOptions runtime_options;
+  TrialWaveFunction psi0(runtime_options);
+  TrialWaveFunction psi1(runtime_options);
+  RefVectorWithLeader<TrialWaveFunction> wf_list(psi0, {psi0, psi1});
+
+  auto particle_pool = MinimalParticlePool::make_O2_spinor(OHMMS::Controller);
+  auto& elec         = *particle_pool.getParticleSet("e");
+  RefVectorWithLeader<ParticleSet> p_list(elec, {elec, elec});
+
+  TrialWaveFunction::OffloadRatioVector ratios;
+  TrialWaveFunction::OffloadGradVector grads;
+  TrialWaveFunction::mw_calcRatioGradDevice(wf_list, p_list, 0, ratios, grads);
+  REQUIRE(ratios.size() == wf_list.size());
+  REQUIRE(grads.size() == wf_list.size());
+  ratios.updateFrom();
+  grads.updateFrom();
+  for (size_t iw = 0; iw < wf_list.size(); ++iw)
+  {
+    CHECK(ratios[iw] == ValueApprox(PsiValue(1)));
+    for (int idim = 0; idim < QMCTraits::DIM; ++idim)
+      CHECK(grads[iw][idim] == ValueApprox(ValueType(0)));
+  }
+}
+
 TEST_CASE("TrialWaveFunction_diamondC_1x1x1", "[wavefunction]")
 {
   Communicate* c = OHMMS::Controller;
