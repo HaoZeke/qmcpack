@@ -262,10 +262,10 @@ void test_mapped_vgl_contraction()
   auto* vgl_output_ptr     = vgl_output.data();
 
   constexpr size_t ChunkSizePerTeam = 512;
-  const size_t NumTeams             = (field_stride + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+  const int NumTeams                = static_cast<int>((field_stride + ChunkSizePerTeam - 1) / ChunkSizePerTeam);
   int initial_device                = 0;
   PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams) map(from: initial_device)")
-  for (size_t team_id = 0; team_id < NumTeams; ++team_id)
+  for (int team_id = 0; team_id < NumTeams; ++team_id)
   {
 #if defined(ENABLE_OFFLOAD)
     if (team_id == 0)
@@ -281,21 +281,22 @@ void test_mapped_vgl_contraction()
                          GGt_ptr[4], GGt_ptr[5] + GGt_ptr[7], GGt_ptr[8]};
 
     PRAGMA_OFFLOAD("omp parallel for")
-    for (size_t index = first; index < last; ++index)
+    for (int index = 0; index < last - first; ++index)
     {
-      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(index), a, b, c, da,
-                                           db, dc, d2a, d2b, d2c, vgh_output_ptr + index, field_stride);
-      vgh_output_ptr[field_stride * SoAFields3D::LAPL + index] =
-          SymTrace(vgh_output_ptr[field_stride * SoAFields3D::HESS00 + index],
-                   vgh_output_ptr[field_stride * SoAFields3D::HESS01 + index],
-                   vgh_output_ptr[field_stride * SoAFields3D::HESS02 + index],
-                   vgh_output_ptr[field_stride * SoAFields3D::HESS11 + index],
-                   vgh_output_ptr[field_stride * SoAFields3D::HESS12 + index],
-                   vgh_output_ptr[field_stride * SoAFields3D::HESS22 + index], symGGt);
+      const size_t spline_index = first + index;
+      spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(spline_index), a, b,
+                                           c, da, db, dc, d2a, d2b, d2c, vgh_output_ptr + spline_index, field_stride);
+      vgh_output_ptr[field_stride * SoAFields3D::LAPL + spline_index] =
+          SymTrace(vgh_output_ptr[field_stride * SoAFields3D::HESS00 + spline_index],
+                   vgh_output_ptr[field_stride * SoAFields3D::HESS01 + spline_index],
+                   vgh_output_ptr[field_stride * SoAFields3D::HESS02 + spline_index],
+                   vgh_output_ptr[field_stride * SoAFields3D::HESS11 + spline_index],
+                   vgh_output_ptr[field_stride * SoAFields3D::HESS12 + spline_index],
+                   vgh_output_ptr[field_stride * SoAFields3D::HESS22 + spline_index], symGGt);
 
-      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(index), a, b, c, da,
-                                           db, dc, d2a, d2b, d2c, symGGt, vgl_output_ptr + index, field_stride,
-                                           field_stride * SoAFields3D::LAPL);
+      spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_coefs, ix, iy, iz, static_cast<int>(spline_index), a, b,
+                                           c, da, db, dc, d2a, d2b, d2c, symGGt, vgl_output_ptr + spline_index,
+                                           field_stride, field_stride * SoAFields3D::LAPL);
     }
   }
 
