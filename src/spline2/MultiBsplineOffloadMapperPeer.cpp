@@ -195,7 +195,7 @@ void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
   // descriptor so production kernels can dereference spline_m->coefs directly.
   for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ++ib)
   {
-    auto* spline_m     = &Base::host_bsplines_.getBlock(ib);
+    auto* spline_m     = &const_cast<HostBspline&>(Base::host_bsplines_).getBlock(ib);
     auto* device_coefs = static_cast<T*>(device_ptrs_[ib]);
     if (!device_coefs)
       continue;
