@@ -39,14 +39,13 @@ TEST_CASE("DMC device acceptance predicate", "[drivers][dmc]")
   Vector<char, OffloadPinnedAllocator<char>> accepted(num_walkers);
 
   const RealType epsilon = std::numeric_limits<RealType>::epsilon();
-  ratios                 = {PsiValue(2), PsiValue(2), PsiValue(0), PsiValue(std::sqrt(epsilon / 2)),
-                            PsiValue(0.5), PsiValue(0.5)};
-  log_gf                  = RealType(0);
-  log_gb                  = RealType(0);
-  variates                = {RealType(0.5), RealType(0), RealType(0), RealType(0), RealType(0.25),
-                             std::nextafter(RealType(0.25), RealType(0))};
-  are_valid               = {1, 0, 1, 1, 1, 1};
-  accepted                = char(-1);
+  ratios    = {PsiValue(2), PsiValue(2), PsiValue(0), PsiValue(std::sqrt(epsilon / 2)), PsiValue(0.5), PsiValue(0.5)};
+  log_gf    = RealType(0);
+  log_gb    = RealType(0);
+  variates  = {RealType(0.5), RealType(0),    RealType(0),
+               RealType(0),   RealType(0.25), std::nextafter(RealType(0.25), RealType(0))};
+  are_valid = {1, 0, 1, 1, 1, 1};
+  accepted  = char(-1);
 
   ratios.updateTo();
   log_gf.updateTo();

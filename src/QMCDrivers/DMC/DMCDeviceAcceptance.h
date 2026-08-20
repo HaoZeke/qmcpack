@@ -37,7 +37,7 @@ inline void computeDMCDeviceAcceptance(std::size_t num_walkers,
                   is_device_ptr(ratios, log_gf, log_gb, are_valid, variates, accepted)")
   for (std::size_t iw = 0; iw < num_walkers; ++iw)
   {
-    const RT probability = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
+    const RT probability     = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
     const bool should_accept = are_valid[iw] != 0 && ratios[iw] != PsiV(0) &&
         probability >= std::numeric_limits<RT>::epsilon() && variates[iw] < probability;
     accepted[iw] = should_accept ? 1 : 0;

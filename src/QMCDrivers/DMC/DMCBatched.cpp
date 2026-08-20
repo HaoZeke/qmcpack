@@ -242,8 +242,7 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         for (int iw = 0; iw < num_walkers; ++iw)
         {
-          const bool eligible =
-              are_valid[iw] && !rejects[iw] && prob[iw] >= std::numeric_limits<RealType>::epsilon();
+          const bool eligible = are_valid[iw] && !rejects[iw] && prob[iw] >= std::numeric_limits<RealType>::epsilon();
           const RealType variate = eligible ? step_context.get_random_gen()() : RealType(0);
           if (check_device_acceptance)
             device_variates[iw] = variate;
