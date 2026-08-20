@@ -582,22 +582,22 @@ public:
         reinterpret_cast<Value*>(accept_rejectRow_buffer_H2D.data() + sizeof(Value*) * num_ptrs_packed * nw);
     for (int iw = 0; iw < nw; iw++)
     {
-      DualMatrix<Value>& psiMinv = psiMinv_refs[iw];
-      const int lda              = psiMinv.cols();
-      This_t& engine             = engines[iw];
-      ptr_buffer[0][iw]  = psiMinv.device_data() + lda * rowchanged;
-      ptr_buffer[1][iw]  = engine.V_gpu.data();
-      ptr_buffer[2][iw]  = engine.U_gpu.data() + norb * delay_count;
-      ptr_buffer[3][iw]  = engine.p_gpu.data();
-      ptr_buffer[4][iw]  = engine.Binv_gpu.data();
-      ptr_buffer[5][iw]  = engine.Binv_gpu.data() + delay_count * lda_Binv;
-      ptr_buffer[6][iw]  = engine.Binv_gpu.data() + delay_count;
-      ptr_buffer[7][iw]  = reinterpret_cast<Value*>(engine.delay_list_gpu.data());
-      ptr_buffer[8][iw]  = engine.V_gpu.data() + norb * delay_count;
-      ptr_buffer[9][iw]  = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
-      ptr_buffer[10][iw] = psiM_g_list[iw];
-      ptr_buffer[11][iw] = psiM_l_list[iw];
-      c_ratio_inv[iw]    = isAccepted[iw] ? Value(1) / ratios[iw] : Value(0);
+      DualMatrix<Value>& psiMinv    = psiMinv_refs[iw];
+      const int lda                 = psiMinv.cols();
+      This_t& engine                = engines[iw];
+      ptr_buffer[0][iw]             = psiMinv.device_data() + lda * rowchanged;
+      ptr_buffer[1][iw]             = engine.V_gpu.data();
+      ptr_buffer[2][iw]             = engine.U_gpu.data() + norb * delay_count;
+      ptr_buffer[3][iw]             = engine.p_gpu.data();
+      ptr_buffer[4][iw]             = engine.Binv_gpu.data();
+      ptr_buffer[5][iw]             = engine.Binv_gpu.data() + delay_count * lda_Binv;
+      ptr_buffer[6][iw]             = engine.Binv_gpu.data() + delay_count;
+      ptr_buffer[7][iw]             = reinterpret_cast<Value*>(engine.delay_list_gpu.data());
+      ptr_buffer[8][iw]             = engine.V_gpu.data() + norb * delay_count;
+      ptr_buffer[9][iw]             = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
+      ptr_buffer[10][iw]            = psiM_g_list[iw];
+      ptr_buffer[11][iw]            = psiM_l_list[iw];
+      c_ratio_inv[iw]               = isAccepted[iw] ? Value(1) / ratios[iw] : Value(0);
       accept_rejectRow_mask_H2D[iw] = isAccepted[iw];
     }
 
