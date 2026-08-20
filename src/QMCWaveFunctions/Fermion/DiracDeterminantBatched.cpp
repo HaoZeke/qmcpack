@@ -67,6 +67,9 @@ struct DiracDeterminantBatched<PL, VT, FPVT>::DiracDeterminantBatchedMultiWalker
   OffloadMatrix<ComplexType> mw_dspin;
   /// reference to per DDB psiMinvs in a crowd
   RefVector<DualMatrix<Value>> psiMinv_refs;
+  /// Device pointer lists sized per accepted walkers and retained by the crowd resource.
+  std::vector<Value*> psiM_g_dev_ptr_list;
+  std::vector<Value*> psiM_l_dev_ptr_list;
   ///
   typename UpdateEngine::MultiWalkerResource engine_rsc;
 };
@@ -483,8 +486,10 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_accept_rejectMove(
 
   RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
   engine_list.reserve(nw);
-  std::vector<Value*> psiM_g_dev_ptr_list(n_accepted, nullptr);
-  std::vector<Value*> psiM_l_dev_ptr_list(n_accepted, nullptr);
+  auto& psiM_g_dev_ptr_list = mw_res.psiM_g_dev_ptr_list;
+  auto& psiM_l_dev_ptr_list = mw_res.psiM_l_dev_ptr_list;
+  psiM_g_dev_ptr_list.resize(n_accepted);
+  psiM_l_dev_ptr_list.resize(n_accepted);
 
   const int WorkingIndex = iat - FirstIndex;
   for (int iw = 0, count = 0; iw < nw; iw++)
