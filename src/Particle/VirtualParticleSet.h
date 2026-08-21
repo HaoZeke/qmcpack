@@ -55,6 +55,31 @@ private:
 public:
   /// Reference particle
   int refPtcl;
+
+  /** Which source particle each virtual particle belongs to, when one set carries the
+   *  quadrature knots of several ions for the same electron.
+   *
+   *  refSourcePtcl is a single int and HybridRepCenterOrbitals reads it as one, to test a
+   *  whole set against one atomic sphere. A set spanning several ions makes that test
+   *  wrong without making it fail, so multi_source_ exists to be refused there rather
+   *  than to be silently mishandled.
+   */
+  std::vector<int> source_ptcl_per_vp;
+  bool multi_source_ = false;
+
+  /** which job each virtual particle came from, counted within this set.
+   *
+   * The quadrature knots of a set arrive job by job, so a consumer that needs something
+   * per job rather than per set or per knot, an inverse row for the job's electron being
+   * the case in hand, can index by this instead of rediscovering the boundaries from the
+   * electron and source arrays.
+   */
+  std::vector<int> job_per_vp;
+
+  bool isMultiSource() const { return multi_source_; }
+
+  /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
+  bool getMultiWalkerRefPctlsHeld() const { return bool(mw_mem_handle_); }
   /// Reference source particle, used when onSphere=true
   int refSourcePtcl;
 

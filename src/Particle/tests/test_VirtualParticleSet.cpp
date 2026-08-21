@@ -144,6 +144,17 @@ TEST_CASE("VirtualParticleSet multi-source", "[particle]")
   // every job of a walker is the same electron
   CHECK(vp_two.refPtcl == 2);
 
+  // which job each knot came from, so a consumer needing something per job rather than
+  // per set or per knot can index by it
+  REQUIRE(vp_two.job_per_vp.size() == 4);
+  CHECK(vp_two.job_per_vp[0] == 0);
+  CHECK(vp_two.job_per_vp[1] == 0);
+  CHECK(vp_two.job_per_vp[2] == 1);
+  CHECK(vp_two.job_per_vp[3] == 1);
+  REQUIRE(vp_one.job_per_vp.size() == 2);
+  CHECK(vp_one.job_per_vp[0] == 0);
+  CHECK(vp_one.job_per_vp[1] == 0);
+
   // each job's own quadrature: the second job's knots are its own offsets from the same
   // electron, so a shared offset list would put R[2] at elecs_two.R[2] + {0.1,0.2,0.3}
   CHECK(Approx(vp_two.R[0][0]) == elecs_two.R[2][0] + 0.1);
