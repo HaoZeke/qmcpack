@@ -76,7 +76,17 @@ public:
    */
   std::vector<int> job_per_vp;
 
+  /** whether this set's jobs span more than one electron.
+   *
+   * refPtcl is a single int and consumers that pick a determinant row or an inverse row
+   * from it are wrong for such a set without failing. Like multi_source_, this exists to
+   * be refused rather than silently mishandled; getMultiWalkerRefPctls carries the
+   * electron per virtual particle for consumers that can use it.
+   */
+  bool multi_ref_ = false;
+
   bool isMultiSource() const { return multi_source_; }
+  bool isMultiRef() const { return multi_ref_; }
 
   /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
   bool getMultiWalkerRefPctlsHeld() const { return bool(mw_mem_handle_); }
