@@ -344,6 +344,12 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
    * maximum, so the loop runs at most twice.
    */
   size_t max_jobs = nelec_group * 2 + 8;
+  /* The growth path only runs when a region is dense enough to exceed the guess, which
+   * no small test case reaches. Forcing the starting capacity down runs it on any deck,
+   * so the comparison against the host scan covers it.
+   */
+  if (const char* c = std::getenv("QMCPACK_DEVICE_NLPP_JOB_CAPACITY0"); c && std::atoi(c) > 0)
+    max_jobs = static_cast<size_t>(std::atoi(c));
   res.job_counts.resize(nw);
 
   for (int attempt = 0; attempt < 2; attempt++)
