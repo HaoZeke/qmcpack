@@ -178,6 +178,14 @@ public:
                          const ValueVector& psiinv,
                          std::vector<TT>& ratios) override;
 
+
+  /** indexes invRow_ptr_list per job, but only on the offload path.
+   *
+   * Without offload mw_evaluateDetRatios hands the work to BsplineSet, which indexes by
+   * walker, so the per-job convention is not honoured there.
+   */
+  bool supportsMultiRefDetRatios() const override { return use_offload_; }
+
   void mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_list,
                             const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                             const RefVector<ValueVector>& psi_list,

@@ -227,26 +227,34 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   for (const VirtualParticleSet& VP : vp_list)
     mw_nVP += VP.getTotalNum();
 
-  const size_t packed_size = nw * sizeof(ValueType*) + mw_nVP * (4 * sizeof(ST) + sizeof(int));
+  /* invRow_ptr_list is one row per walker while every set carries a single electron, and
+   * one per job once a set spans several, which is what collapsing the NLPP electron loop
+   * produces. ref_id_ptr selects among them per virtual particle and does not care which
+   * convention is in force, so only what it counts changes.
+   */
+  const size_t n_inv_rows  = invRow_ptr_list.size();
+  const size_t packed_size = n_inv_rows * sizeof(ValueType*) + mw_nVP * (4 * sizeof(ST) + sizeof(int));
   det_ratios_buffer_H2D.resize(packed_size);
 
   // pack invRow_ptr_list to det_ratios_buffer_H2D
-  Vector<const ValueType*> ptr_buffer(reinterpret_cast<const ValueType**>(det_ratios_buffer_H2D.data()), nw);
-  for (size_t iw = 0; iw < nw; iw++)
-    ptr_buffer[iw] = invRow_ptr_list[iw];
+  Vector<const ValueType*> ptr_buffer(reinterpret_cast<const ValueType**>(det_ratios_buffer_H2D.data()),
+                                      n_inv_rows);
+  for (size_t i = 0; i < n_inv_rows; i++)
+    ptr_buffer[i] = invRow_ptr_list[i];
 
   // pack particle positions
-  auto* pos_ptr = reinterpret_cast<ST*>(det_ratios_buffer_H2D.data() + nw * sizeof(ValueType*));
+  auto* pos_ptr = reinterpret_cast<ST*>(det_ratios_buffer_H2D.data() + n_inv_rows * sizeof(ValueType*));
   auto* ref_id_ptr =
-      reinterpret_cast<int*>(det_ratios_buffer_H2D.data() + nw * sizeof(ValueType*) + mw_nVP * 4 * sizeof(ST));
-  size_t iVP = 0;
+      reinterpret_cast<int*>(det_ratios_buffer_H2D.data() + n_inv_rows * sizeof(ValueType*) + mw_nVP * 4 * sizeof(ST));
+  size_t iVP     = 0;
+  size_t row_off = 0; // where this walker's rows start in invRow_ptr_list
   for (size_t iw = 0; iw < nw; iw++)
   {
     const VirtualParticleSet& VP = vp_list[iw];
     assert(ratios_list[iw].size() == VP.getTotalNum());
     for (size_t iat = 0; iat < VP.getTotalNum(); ++iat, ++iVP)
     {
-      ref_id_ptr[iVP]    = iw;
+      ref_id_ptr[iVP]    = static_cast<int>(row_off + (VP.isMultiRef() ? VP.job_per_vp[iat] : 0));
       const PointType& r = VP.activeR(iat);
       PointType ru;
       const int bc_sign = phi_leader.convertPos(r, ru);
@@ -257,6 +265,7 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
       pos_ptr[3] = ru[2];
       pos_ptr += 4;
     }
+    row_off += VP.isMultiRef() ? VP.getNumJobs() : 1;
   }
 
   const size_t ChunkSizePerTeam = 512;
@@ -282,7 +291,7 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
         const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
         auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-        auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+        auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*));
 
         int ix, iy, iz;
         ST a[4], b[4], c[4];
@@ -305,9 +314,9 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
         const size_t reduce_last = omptarget::min(last, static_cast<size_t>(requested_orb_size));
 
         auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-        auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 4 * sizeof(ST));
+        auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*) + mw_nVP * 4 * sizeof(ST));
         auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
-        auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+        auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*));
 
         ValueType sum(0);
         PRAGMA_OFFLOAD("omp parallel for reduction(+:sum)")
