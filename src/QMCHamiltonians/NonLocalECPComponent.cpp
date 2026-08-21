@@ -173,6 +173,7 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
                                           std::vector<RealType>& pairpots,
                                           const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
                                           ResourceCollection& collection,
+                                          NLPPBatchScratch& scratch,
                                           bool use_DLA)
 {
   const bool use_TMDLA = (!tmove_xy_all_list.empty()) && use_DLA;
@@ -185,17 +186,23 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
   psiratios_list.reserve(ecp_component_list.size());
   psiratios_det_list.reserve(ecp_component_list.size());
 
+  /* Each entry works in its own arrays rather than the component's. Two entries of one
+   * batch can be the same component object once a call carries several jobs of a walker,
+   * and the object has one set of arrays.
+   */
+  scratch.resizeEntries(ecp_component_list.size());
   for (size_t i = 0; i < ecp_component_list.size(); i++)
   {
     NonLocalECPComponent& component(ecp_component_list[i]);
     const NLPPJob<RealType>& job = joblist[i];
 
-    component.buildQuadraturePointDeltaPosAndPartialPotential(job.ion_elec_dist, job.ion_elec_displ, component.deltaV_,
-                                                              component.knot_pots_);
+    scratch.resizeEntry(i, component.getNknot());
+    component.buildQuadraturePointDeltaPosAndPartialPotential(job.ion_elec_dist, job.ion_elec_displ, scratch.deltaV[i],
+                                                              scratch.knot_pots[i]);
 
-    deltaV_list.push_back(component.deltaV_);
-    psiratios_list.push_back(component.psiratio);
-    psiratios_det_list.push_back(component.psiratio_det);
+    deltaV_list.push_back(scratch.deltaV[i]);
+    psiratios_list.push_back(scratch.psiratio[i]);
+    psiratios_det_list.push_back(scratch.psiratio_det[i]);
   }
 
   RefVectorWithLeader<const VirtualParticleSet> const_vp_list(vp_list.getLeader());
@@ -234,11 +241,10 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
   {
     NonLocalECPComponent& component(ecp_component_list[i]);
     const NLPPJob<RealType>& job(joblist[i]);
-    pairpots[i] = component.calculatePotential(component.knot_pots_, component.psiratio,
-                                               component.psiratio_det, use_TMDLA);
+    pairpots[i] = component.calculatePotential(scratch.knot_pots[i], scratch.psiratio[i], scratch.psiratio_det[i],
+                                               use_TMDLA);
     if (!tmove_xy_all_list.empty())
-      component.contributeTxy(job.electron_id, component.knot_pots_, component.deltaV_,
-                              tmove_xy_all_list[i]);
+      component.contributeTxy(job.electron_id, scratch.knot_pots[i], scratch.deltaV[i], tmove_xy_all_list[i]);
   }
 }
 
