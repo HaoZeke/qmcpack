@@ -157,10 +157,10 @@ NonLocalECPComponent::RealType NonLocalECPComponent::evaluateOne(ParticleSet& W,
     }
   }
 
-  const auto pairpot = calculatePotential(knot_pots_, use_TMDLA);
+  const auto pairpot = calculatePotential(knot_pots_, psiratio, psiratio_det, use_TMDLA);
 
   if (tmove_xy)
-    contributeTxy(iel, *tmove_xy);
+    contributeTxy(iel, knot_pots_, deltaV_, *tmove_xy);
 
   return pairpot;
 }
@@ -234,9 +234,11 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
   {
     NonLocalECPComponent& component(ecp_component_list[i]);
     const NLPPJob<RealType>& job(joblist[i]);
-    pairpots[i] = component.calculatePotential(component.knot_pots_, use_TMDLA);
+    pairpots[i] = component.calculatePotential(component.knot_pots_, component.psiratio,
+                                               component.psiratio_det, use_TMDLA);
     if (!tmove_xy_all_list.empty())
-      component.contributeTxy(job.electron_id, tmove_xy_all_list[i]);
+      component.contributeTxy(job.electron_id, component.knot_pots_, component.deltaV_,
+                              tmove_xy_all_list[i]);
   }
 }
 
@@ -871,14 +873,16 @@ void NonLocalECPComponent::buildQuadraturePointDeltaPosAndPartialPotential(RealT
 }
 
 NonLocalECPComponent::RealType NonLocalECPComponent::calculatePotential(std::vector<RealType>& knot_pots,
+                                                                        const std::vector<ValueType>& psi_ratio,
+                                                                        const std::vector<ValueType>& psi_ratio_det,
                                                                         bool use_TMDLA) const
 {
   RealType pairpot(0);
   for (int j = 0; j < nknot; j++)
   {
-    const RealType knot_pot = knot_pots_[j] * std::real(psiratio[j]);
+    const RealType knot_pot = knot_pots[j] * std::real(psi_ratio[j]);
     if (use_TMDLA && knot_pot > 0)
-      knot_pots[j] *= std::real(psiratio_det[j]);
+      knot_pots[j] *= std::real(psi_ratio_det[j]);
     else
       knot_pots[j] = knot_pot;
     pairpot += knot_pots[j];
@@ -887,10 +891,13 @@ NonLocalECPComponent::RealType NonLocalECPComponent::calculatePotential(std::vec
   return pairpot;
 }
 
-void NonLocalECPComponent::contributeTxy(int iel, std::vector<NonLocalData>& Txy) const
+void NonLocalECPComponent::contributeTxy(int iel,
+                                         const std::vector<RealType>& knot_pots,
+                                         const std::vector<PosType>& deltaV,
+                                         std::vector<NonLocalData>& Txy) const
 {
   for (int j = 0; j < nknot; j++)
-    Txy.push_back(NonLocalData(iel, knot_pots_[j], deltaV_[j]));
+    Txy.push_back(NonLocalData(iel, knot_pots[j], deltaV[j]));
 }
 
 } // namespace qmcplusplus
