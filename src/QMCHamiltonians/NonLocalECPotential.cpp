@@ -15,6 +15,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <atomic>
@@ -56,6 +57,13 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
   Vector<int, OffloadPinnedAllocator<int>> job_elec;
   Vector<Real, OffloadPinnedAllocator<Real>> job_dist;
   Vector<Real, OffloadPinnedAllocator<Real>> job_displ;   // 3 per job
+  /** the per walker stride of the job arrays above.
+   *
+   * buildNeighborJobsOnDevice grows this past its initial guess when a dense region
+   * produces more candidates than the guess allowed, so a reader must take the stride
+   * from here rather than recomputing the guess.
+   */
+  size_t job_capacity = 0;
   /// a crowds worth of per particle nonlocal ecp potential values
   Matrix<Real> ve_samples;
   Matrix<Real> vi_samples;
@@ -326,48 +334,75 @@ bool NonLocalECPotential::buildNeighborJobsOnDevice(const RefVectorWithLeader<Op
     res.rmax_per_ion.updateTo();
   }
 
-  const size_t max_jobs = nelec_group * 2 + 8; // same assumption as the host reserve
+  /* The capacity starts at the host reserve's assumption, which is a guess about how
+   * many ions fall inside a cutoff of a given electron rather than a bound. A dense
+   * pseudopotential region can exceed it. The count below therefore tallies every
+   * candidate whether or not it fit, so an overflow is visible in the returned count
+   * instead of presenting a truncated list as a complete one, and the capacity is then
+   * grown to the largest count any walker actually produced and the scan repeated. The
+   * second pass cannot overflow because it runs against a capacity equal to the true
+   * maximum, so the loop runs at most twice.
+   */
+  size_t max_jobs = nelec_group * 2 + 8;
   res.job_counts.resize(nw);
-  res.job_ion.resize(nw * max_jobs);
-  res.job_elec.resize(nw * max_jobs);
-  res.job_dist.resize(nw * max_jobs);
-  res.job_displ.resize(nw * max_jobs * 3);
 
-  auto* counts_ptr = res.job_counts.data();
-  auto* ion_ptr    = res.job_ion.data();
-  auto* elec_ptr   = res.job_elec.data();
-  auto* dist_ptr   = res.job_dist.data();
-  auto* displ_ptr  = res.job_displ.data();
-  auto* rmax_ptr   = res.rmax_per_ion.data();
-
-  PRAGMA_OFFLOAD("omp target teams distribute num_teams(nw) \
-                  map(always, from: counts_ptr[:nw], ion_ptr[:nw*max_jobs], elec_ptr[:nw*max_jobs], \
-                                    dist_ptr[:nw*max_jobs], displ_ptr[:nw*max_jobs*3]) \
-                  is_device_ptr(mw_dist)")
-  for (size_t iw = 0; iw < nw; iw++)
+  for (int attempt = 0; attempt < 2; attempt++)
   {
-    int count = 0;
-    for (int jel = first_elec; jel < last_elec; jel++)
+    res.job_ion.resize(nw * max_jobs);
+    res.job_elec.resize(nw * max_jobs);
+    res.job_dist.resize(nw * max_jobs);
+    res.job_displ.resize(nw * max_jobs * 3);
+
+    auto* counts_ptr = res.job_counts.data();
+    auto* ion_ptr    = res.job_ion.data();
+    auto* elec_ptr   = res.job_elec.data();
+    auto* dist_ptr   = res.job_dist.data();
+    auto* displ_ptr  = res.job_displ.data();
+    auto* rmax_ptr   = res.rmax_per_ion.data();
+
+    PRAGMA_OFFLOAD("omp target teams distribute num_teams(nw) \
+                    map(always, from: counts_ptr[:nw], ion_ptr[:nw*max_jobs], elec_ptr[:nw*max_jobs], \
+                                      dist_ptr[:nw*max_jobs], displ_ptr[:nw*max_jobs*3]) \
+                    is_device_ptr(mw_dist)")
+    for (size_t iw = 0; iw < nw; iw++)
     {
-      const size_t t    = iw * nelec_total + jel;
-      const Real* dists = mw_dist + t * stride_size;
-      for (size_t iat = 0; iat < num_sources; iat++)
-        if (rmax_ptr[iat] > Real(0) && dists[iat] < rmax_ptr[iat] && count < static_cast<int>(max_jobs))
-        {
-          const size_t slot   = iw * max_jobs + count;
-          ion_ptr[slot]       = static_cast<int>(iat);
-          elec_ptr[slot]      = jel;
-          dist_ptr[slot]      = dists[iat];
-          // displacements are stored as the table's convention; the host scan negates
-          displ_ptr[slot * 3 + 0] = -dists[num_padded + iat];
-          displ_ptr[slot * 3 + 1] = -dists[2 * num_padded + iat];
-          displ_ptr[slot * 3 + 2] = -dists[3 * num_padded + iat];
-          count++;
-        }
+      int count = 0;
+      for (int jel = first_elec; jel < last_elec; jel++)
+      {
+        const size_t t    = iw * nelec_total + jel;
+        const Real* dists = mw_dist + t * stride_size;
+        for (size_t iat = 0; iat < num_sources; iat++)
+          if (rmax_ptr[iat] > Real(0) && dists[iat] < rmax_ptr[iat])
+          {
+            if (count < static_cast<int>(max_jobs))
+            {
+              const size_t slot   = iw * max_jobs + count;
+              ion_ptr[slot]       = static_cast<int>(iat);
+              elec_ptr[slot]      = jel;
+              dist_ptr[slot]      = dists[iat];
+              // displacements are stored as the table's convention; the host scan negates
+              displ_ptr[slot * 3 + 0] = -dists[num_padded + iat];
+              displ_ptr[slot * 3 + 1] = -dists[2 * num_padded + iat];
+              displ_ptr[slot * 3 + 2] = -dists[3 * num_padded + iat];
+            }
+            count++;
+          }
+      }
+      counts_ptr[iw] = count;
     }
-    counts_ptr[iw] = count;
+
+    size_t needed = 0;
+    for (size_t iw = 0; iw < nw; iw++)
+      needed = std::max(needed, static_cast<size_t>(res.job_counts[iw]));
+    if (needed <= max_jobs)
+    {
+      res.job_capacity = max_jobs;
+      return true;
+    }
+    max_jobs = needed;
   }
 
+  res.job_capacity = max_jobs;
   return true;
 }
 
@@ -463,7 +498,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         device_jobs = false; // no device table, every walker falls back together
         break;
       }
-      const size_t max_jobs = (pset_leader.last(ig) - pset_leader.first(ig)) * 2 + 8;
+      const size_t max_jobs = res.job_capacity;
       for (size_t iw = 0; iw < nw; iw++)
       {
         auto& O           = o_list.getCastedElement<NonLocalECPotential>(iw);
