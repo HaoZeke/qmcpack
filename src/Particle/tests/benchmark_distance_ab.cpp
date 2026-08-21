@@ -116,6 +116,32 @@ void collapsed(const RealType* src, RealType* out, int num_targets, int num_sour
     }
 }
 
+/** Collapsed, but with the team count named rather than left to the runtime.
+ *
+ * The collapsed shape can under-parallelise where the chunked one over-parallelises: a
+ * cell with two ions and a few hundred targets is only a thousand or so work items, and a
+ * runtime that puts a few hundred of them in each team covers a handful of multiprocessors.
+ * Naming a team count derived from the work keeps the grid wide in that corner while the
+ * collapse keeps the teams full in the others.
+ */
+void collapsed_teams(const RealType* src, RealType* out, int num_targets, int num_sources, int num_padded,
+                     const RealType* tpos)
+{
+  const long total = static_cast<long>(num_targets) * num_sources;
+  const int nteams = static_cast<int>(std::min<long>(std::max<long>(total / 64, 1), 65535));
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) num_teams(nteams)")
+  for (int iat = 0; iat < num_targets; ++iat)
+    for (int iel = 0; iel < num_sources; ++iel)
+    {
+      auto* r_ptr  = out + iat * num_padded * (D + 1);
+      auto* dr_ptr = r_ptr + num_padded;
+      RealType pos[D];
+      for (int idim = 0; idim < D; idim++)
+        pos[idim] = tpos[iat * D + idim];
+      distance_one(pos, src, num_padded, r_ptr, dr_ptr, num_padded, iel);
+    }
+}
+
 template<typename F>
 double measure(F&& f)
 {
@@ -140,7 +166,8 @@ int main(int argc, char** argv)
   const int num_targets = 512; // stands in for walkers times quadrature knots in one batch
 
   printf("# AB distance table loop shape, %d targets, %d repeats, chunk width %d\n", num_targets, nrepeat, ChunkSize);
-  printf("# %-8s %-12s %-12s %-10s %s\n", "sources", "chunked_ms", "collapsed_ms", "ratio", "agree");
+  printf("# %-8s %-11s %-11s %-11s %-9s %-9s %s\n", "sources", "chunked", "collapse", "collapse+nt", "ch/co",
+         "ch/co_nt", "agree");
 
   for (int num_sources : source_counts)
   {
@@ -183,9 +210,11 @@ int main(int argc, char** argv)
 
     const double ms_a = measure([&] { chunked(src_ptr, a_ptr, num_targets, num_sources, num_padded, tpos_ptr); });
     const double ms_b = measure([&] { collapsed(src_ptr, b_ptr, num_targets, num_sources, num_padded, tpos_ptr); });
+    const double ms_c =
+        measure([&] { collapsed_teams(src_ptr, b_ptr, num_targets, num_sources, num_padded, tpos_ptr); });
 
-    printf("  %-8d %-12.2f %-12.2f %-10.3f %s\n", num_sources, ms_a, ms_b, ms_a / ms_b,
-           worst == 0 ? "exact" : "DIFFER");
+    printf("  %-8d %-11.2f %-11.2f %-11.2f %-9.3f %-9.3f %s\n", num_sources, ms_a, ms_b, ms_c, ms_a / ms_b,
+           ms_a / ms_c, worst == 0 ? "exact" : "DIFFER");
     if (worst != 0)
       return 2;
   }
