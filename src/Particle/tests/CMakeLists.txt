@@ -47,3 +47,13 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+
+if(ENABLE_OFFLOAD)
+  # Not part of the test suite: it answers which loop shape the AB distance table should
+  # use across source counts, including the many-source case no available deck reaches.
+  add_executable(benchmark_distance_ab EXCLUDE_FROM_ALL benchmark_distance_ab.cpp)
+  target_link_libraries(benchmark_distance_ab qmcparticle qmcutil platform_runtime)
+  if(USE_OBJECT_TARGET)
+    target_link_libraries(benchmark_distance_ab qmcparticle_omptarget)
+  endif()
+endif()
