@@ -230,5 +230,10 @@ TEST_CASE("VirtualParticleSet multi-ref", "[particle]")
 
   CHECK(vp.job_per_vp[0] == 0);
   CHECK(vp.job_per_vp[1] == 1);
+
+  // and the electron per job, which is what selects an inverse row
+  REQUIRE(vp.getNumJobs() == 2);
+  CHECK(vp.job_electron[0] == 1);
+  CHECK(vp.job_electron[1] == 3);
 }
 } // namespace qmcplusplus

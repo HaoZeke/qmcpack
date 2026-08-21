@@ -85,8 +85,16 @@ public:
    */
   bool multi_ref_ = false;
 
+  /** the electron each job of this set belongs to, one entry per job.
+   *
+   * job_per_vp maps a knot to its job; this maps that job to its electron. A consumer
+   * needing one thing per job, an inverse row being the case in hand, wants both.
+   */
+  std::vector<int> job_electron;
+
   bool isMultiSource() const { return multi_source_; }
   bool isMultiRef() const { return multi_ref_; }
+  size_t getNumJobs() const { return job_electron.size(); }
 
   /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
   bool getMultiWalkerRefPctlsHeld() const { return bool(mw_mem_handle_); }
