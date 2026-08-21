@@ -64,6 +64,13 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
    * from here rather than recomputing the guess.
    */
   size_t job_capacity = 0;
+
+  /** per-entry working arrays for the batched pseudopotential call.
+   *
+   * Held here rather than allocated per call: mw_evaluateOne runs once per electron per
+   * step, and the arrays it needs are the same size every time.
+   */
+  NLPPBatchScratch nlpp_batch_scratch;
   /// a crowds worth of per particle nonlocal ecp potential values
   Matrix<Real> ve_samples;
   Matrix<Real> vi_samples;
@@ -687,7 +694,9 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
       if (O_leader.vp_)
         NonLocalECPComponent::mw_evaluateOne(ecp_component_list, pset_list, {*O_leader.vp_, std::move(vp_list)},
                                              psi_list, batch_list, pairpots, tmove_xy_all_batch_list,
-                                             O_leader.mw_res_handle_.getResource().collection, O_leader.use_DLA);
+                                             O_leader.mw_res_handle_.getResource().collection,
+                                             O_leader.mw_res_handle_.getResource().nlpp_batch_scratch,
+                                             O_leader.use_DLA);
       else
         // The batch lists are compacted: a walker with no job at this jobid
         // is absent, so they can be shorter than nw. Index by batch slot,
@@ -1055,7 +1064,9 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
         if (O_leader.vp_)
           NonLocalECPComponent::mw_evaluateOne(ecp_component_list, pset_list, {*O_leader.vp_, std::move(vp_list)},
                                                psi_list, batch_list, pairpots, tmove_xy_batch_list,
-                                               O_leader.mw_res_handle_.getResource().collection, O_leader.use_DLA);
+                                               O_leader.mw_res_handle_.getResource().collection,
+                                             O_leader.mw_res_handle_.getResource().nlpp_batch_scratch,
+                                             O_leader.use_DLA);
         else
           for (size_t j = 0; j < ecp_component_list.size(); j++)
             ecp_component_list[j].evaluateOne(pset_list[j], std::nullopt, batch_list[j].get().ion_id, psi_list[j],
