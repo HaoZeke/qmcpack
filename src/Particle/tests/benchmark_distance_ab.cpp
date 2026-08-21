@@ -157,18 +157,23 @@ double measure(F&& f)
 
 int main(int argc, char** argv)
 {
+  /* Both axes matter and they fail in opposite directions. Chunking wastes threads when
+   * the sources are few; collapsing narrows the grid when targets times sources is small
+   * whatever the split. A single target count cannot separate the two, so sweep the plane.
+   * Targets stands in for walkers times quadrature knots in one batch, sources for ions.
+   */
   std::vector<int> source_counts;
   for (int i = 1; i < argc; i++)
     source_counts.push_back(std::atoi(argv[i]));
   if (source_counts.empty())
-    source_counts = {2, 8, 33, 128, 512, 1024, 4096, 16384};
+    source_counts = {2, 8, 33, 128, 512, 4096};
+  const std::vector<int> target_counts = {128, 512, 4096};
 
-  const int num_targets = 512; // stands in for walkers times quadrature knots in one batch
+  printf("# AB distance table loop shape, %d repeats, chunk width %d\n", nrepeat, ChunkSize);
+  printf("# %-8s %-8s %-11s %-11s %-11s %-9s %-9s %s\n", "targets", "sources", "chunked", "collapse", "collapse+nt",
+         "ch/co", "ch/co_nt", "agree");
 
-  printf("# AB distance table loop shape, %d targets, %d repeats, chunk width %d\n", num_targets, nrepeat, ChunkSize);
-  printf("# %-8s %-11s %-11s %-11s %-9s %-9s %s\n", "sources", "chunked", "collapse", "collapse+nt", "ch/co",
-         "ch/co_nt", "agree");
-
+  for (int num_targets : target_counts)
   for (int num_sources : source_counts)
   {
     const int num_padded = getAlignedSize<RealType>(num_sources);
@@ -213,8 +218,8 @@ int main(int argc, char** argv)
     const double ms_c =
         measure([&] { collapsed_teams(src_ptr, b_ptr, num_targets, num_sources, num_padded, tpos_ptr); });
 
-    printf("  %-8d %-11.2f %-11.2f %-11.2f %-9.3f %-9.3f %s\n", num_sources, ms_a, ms_b, ms_c, ms_a / ms_b,
-           ms_a / ms_c, worst == 0 ? "exact" : "DIFFER");
+    printf("  %-8d %-8d %-11.2f %-11.2f %-11.2f %-9.3f %-9.3f %s\n", num_targets, num_sources, ms_a, ms_b, ms_c,
+           ms_a / ms_b, ms_a / ms_c, worst == 0 ? "exact" : "DIFFER");
     if (worst != 0)
       return 2;
   }
