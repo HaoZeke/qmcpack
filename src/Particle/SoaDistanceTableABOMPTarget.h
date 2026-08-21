@@ -83,8 +83,19 @@ private:
       auto& dt = dt_list.getCastedElement<SoaDistanceTableABOMPTarget>(iw);
       assert(num_sources == dt.num_sources_);
 
-      dt.distances_.resize(dt.targets());
-      dt.displacements_.resize(dt.targets());
+      /* Grow by clearing first. These elements are views attached into mw_r_dr, and a
+       * std::vector growing past its capacity copies what it holds; Vector's copy
+       * constructor allocates, so the survivors would come back owning memory and
+       * attachReference below rejects them. Target counts are constant in the usual
+       * paths, so this only bites when a walker's count changes between calls.
+       */
+      if (dt.distances_.size() != static_cast<size_t>(dt.targets()))
+      {
+        dt.distances_.clear();
+        dt.displacements_.clear();
+        dt.distances_.resize(dt.targets());
+        dt.displacements_.resize(dt.targets());
+      }
 
       for (int i = 0; i < dt.targets(); ++i)
       {

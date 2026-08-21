@@ -56,6 +56,12 @@ struct NLPPBatchScratch
   std::vector<std::vector<ValueType>> psiratio;
   std::vector<std::vector<ValueType>> psiratio_det;
 
+  /// ratios as the wavefunction returns them, one vector per walker with its jobs concatenated
+  std::vector<std::vector<ValueType>> walker_ratios;
+  std::vector<std::vector<ValueType>> walker_ratios_det;
+  /// per walker, per job, the quadrature offsets handed to mw_makeMovesMultiSource
+  std::vector<std::vector<std::vector<PosType>>> walker_deltaV;
+
   /// grow to hold n entries; existing capacity is kept so steady state does not allocate
   void resizeEntries(size_t n)
   {
@@ -266,6 +272,30 @@ public:
                              ResourceCollection& collection,
                              NLPPBatchScratch& scratch,
                              bool use_DLA);
+
+  /** Evaluate every job of every walker in one batch.
+   *
+   * mw_evaluateOne carries one job per walker, so a group of N electrons costs N calls and
+   * each call costs five kernel launches: two distance tables on the virtual set, two
+   * Jastrow value kernels and one determinant ratio. Batching the whole group into one
+   * call divides all five by the electron count, which is where the offload launches are.
+   *
+   * The lists are ragged by design. Components, jobs and results are per job; particle
+   * sets, wavefunctions and virtual sets are per walker, one virtual set carrying all of
+   * that walker's quadrature. job_walker maps a job back to its walker, which the caller
+   * needs because a batch slot is no longer a walker index.
+   */
+  static void mw_evaluateOneMultiJob(const RefVectorWithLeader<NonLocalECPComponent>& ecp_component_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+                                     const RefVectorWithLeader<TrialWaveFunction>& psi_list,
+                                     const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                     const std::vector<int>& job_walker,
+                                     std::vector<RealType>& pairpots,
+                                     const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
+                                     ResourceCollection& collection,
+                                     NLPPBatchScratch& scratch,
+                                     bool use_DLA);
 
   /** @brief Evaluate the nonlocal pp contribution via randomized quadrature grid
    * to total energy from ion "iat" and electron "iel".
