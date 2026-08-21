@@ -226,6 +226,7 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
     size_t vp_count = 0;
     for (const auto& dv : deltaVs)
       vp_count += dv.size();
+    vp.job_per_vp.resize(vp_count);
     vp.resize(vp_count);
     vp.source_ptcl_per_vp.resize(vp.R.size());
 
@@ -237,9 +238,10 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
       assert(job.electron_id == vp.refPtcl);
       for (size_t q = 0; q < deltaV.size(); q++, k++, ivp++)
       {
-        vp.R[k]                    = refp_list[iw].R[vp.refPtcl] + deltaV[q];
-        vp.source_ptcl_per_vp[k]   = job.ion_id;
-        mw_refPctls[ivp]           = vp.refPtcl;
+        vp.R[k]                  = refp_list[iw].R[vp.refPtcl] + deltaV[q];
+        vp.source_ptcl_per_vp[k] = job.ion_id;
+        vp.job_per_vp[k]         = static_cast<int>(j);
+        mw_refPctls[ivp]         = vp.refPtcl;
         if (vp_leader.isSpinor())
           vp.spins[k] = refp_list[iw].spins[vp.refPtcl];
       }
