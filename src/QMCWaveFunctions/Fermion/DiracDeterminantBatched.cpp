@@ -11,6 +11,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 
+#include <stdexcept>
 #include "DiracDeterminantBatched.h"
 #include <cassert>
 #include "Numerics/DeterminantOperators.h"
@@ -826,6 +827,15 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evaluateRatios(
     {
       auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
       const VirtualParticleSet& vp(vp_list[iw]);
+      /* One inverse row per walker, chosen by the set's single reference electron. A set
+       * whose jobs span several electrons needs one row per job, which this does not yet
+       * supply, and taking the first job's row for all of them is wrong without being
+       * visibly wrong. Refuse it here rather than return quiet nonsense.
+       */
+      if (vp.isMultiRef())
+        throw std::runtime_error("DiracDeterminantBatched::mw_evaluateRatios does not support a virtual "
+                                 "particle set spanning several electrons: it selects one inverse row per "
+                                 "walker from refPtcl, and such a set needs one per job.");
       const int WorkingIndex = vp.refPtcl - FirstIndex;
       // build lists
       phi_list.push_back(det.phi_);

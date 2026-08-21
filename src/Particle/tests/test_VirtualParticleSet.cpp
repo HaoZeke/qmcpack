@@ -161,5 +161,74 @@ TEST_CASE("VirtualParticleSet multi-source", "[particle]")
   CHECK(Approx(vp_two.R[2][0]) == elecs_two.R[2][0] + 0.3);
   CHECK(Approx(vp_two.R[2][1]) == elecs_two.R[2][1] + 0.1);
   CHECK(Approx(vp_two.R[3][2]) == elecs_two.R[2][2] + 0.1);
+
+  // both walkers here carry one electron each, whatever their ion count
+  CHECK_FALSE(vp_one.isMultiRef());
+  CHECK_FALSE(vp_two.isMultiRef());
+}
+
+/** A set whose jobs belong to different electrons.
+ *
+ * Collapsing the NLPP electron loop, which is where the offload launches are, puts every
+ * job of a group into one set, and those jobs are different electrons. Each knot must be
+ * placed against its own job's electron rather than the first job's, or the whole set is
+ * silently offset.
+ */
+TEST_CASE("VirtualParticleSet multi-ref", "[particle]")
+{
+  auto pset_pool = MinimalParticlePool::make_NiO_a4(OHMMS::Controller);
+
+  auto& ions  = *pset_pool.getParticleSet("i");
+  auto& elecs = *pset_pool.getParticleSet("e");
+
+  elecs.R[0] = {1, 2, 3};
+  elecs.R[1] = {2, 1, 3};
+  elecs.R[2] = {3, 1, 2};
+  elecs.R[3] = {3, 2, 1};
+
+  ions.addTable(ions);
+  ions.update();
+  elecs.addTable(ions);
+  elecs.addTable(elecs);
+  elecs.update();
+
+  VirtualParticleSet vp(elecs);
+  RefVectorWithLeader<VirtualParticleSet> vp_list(vp, {vp});
+  RefVectorWithLeader<ParticleSet> refp_list(elecs, {elecs});
+
+  using PosType  = VirtualParticleSet::PosType;
+  using RealType = VirtualParticleSet::RealType;
+
+  // one walker, two jobs, two different electrons
+  std::vector<std::vector<NLPPJob<RealType>>> joblists(1);
+  joblists[0].emplace_back(0, 1, RealType(1.5), PosType(0.1, 0.0, 0.0));
+  joblists[0].emplace_back(0, 3, RealType(2.0), PosType(0.0, 0.2, 0.0));
+
+  std::vector<std::vector<std::vector<PosType>>> deltaV_lists(1);
+  deltaV_lists[0] = {{{0.1, 0.2, 0.3}}, {{0.4, 0.5, 0.6}}};
+
+  ResourceCollection collection{"NLPPcollection"};
+  vp.createResource(collection);
+  ResourceCollectionTeamLock<VirtualParticleSet> vp_res_lock(collection, vp_list);
+
+  VirtualParticleSet::mw_makeMovesMultiSource(vp_list, refp_list, deltaV_lists, joblists, true);
+
+  CHECK(vp.isMultiRef());
+  REQUIRE(vp.getTotalNum() == 2);
+
+  // each knot sits on its own job's electron, 1 then 3, not on the first job's for both
+  CHECK(Approx(vp.R[0][0]) == elecs.R[1][0] + 0.1);
+  CHECK(Approx(vp.R[0][1]) == elecs.R[1][1] + 0.2);
+  CHECK(Approx(vp.R[1][0]) == elecs.R[3][0] + 0.4);
+  CHECK(Approx(vp.R[1][1]) == elecs.R[3][1] + 0.5);
+
+  const VirtualParticleSet& const_vp = vp; // the public accessor is the const one
+  const auto& refpctls               = const_vp.getMultiWalkerRefPctls();
+  REQUIRE(refpctls.size() == 2);
+  CHECK(refpctls[0] == 1);
+  CHECK(refpctls[1] == 3);
+
+  CHECK(vp.job_per_vp[0] == 0);
+  CHECK(vp.job_per_vp[1] == 1);
 }
 } // namespace qmcplusplus
