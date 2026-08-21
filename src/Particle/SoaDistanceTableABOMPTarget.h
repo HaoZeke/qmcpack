@@ -14,6 +14,7 @@
 #ifndef QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 #define QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 
+#include <algorithm>
 #include "Lattice/ParticleBConds3DSoa.h"
 #include "DistanceTable.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
@@ -283,9 +284,19 @@ public:
     auto* r_dr_ptr              = mw_r_dr.data();
     auto* input_ptr             = offload_input.data();
     const int num_sources_local = num_sources_;
+
+    /* Collapsing fills the teams but leaves the count to the runtime, which packs a
+     * moderate collapsed space into too few of them: measured against the chunking it runs
+     * at 0.92 and 0.97 of its speed at 512 targets by 128 and by 512 sources while winning
+     * the other ten cells of the sweep. Naming a count derived from the work keeps the grid
+     * wide there too.
+     */
+    const long total_work = static_cast<long>(total_targets) * num_sources_local;
+    const int num_teams   = static_cast<int>(std::min<long>(std::max<long>(total_work / 64, 1), 65535));
+
     {
       ScopedTimer offload(dt_leader.offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) num_teams(num_teams) \
                           map(always, to: input_ptr[:offload_input.size()]) \
                           depend(out:r_dr_ptr[:mw_r_dr.size()])")
       for (int iat = 0; iat < total_targets; ++iat)
