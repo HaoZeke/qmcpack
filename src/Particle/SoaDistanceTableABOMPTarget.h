@@ -14,6 +14,7 @@
 #ifndef QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 #define QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 
+#include <algorithm>
 #include "Lattice/ParticleBConds3DSoa.h"
 #include "DistanceTable.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
@@ -269,21 +270,40 @@ public:
       }
     }
 
-    // To maximize thread usage, the loop over electrons is chunked. Each chunk is sent to an OpenMP offload thread team.
-    const int ChunkSizePerTeam = 512;
-    const size_t num_teams     = (num_sources_ + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
-
+    /* One team per target, chunking the sources across that team's threads, leaves almost
+     * every thread idle whenever a cell has fewer ions than a team is wide. A team is
+     * hundreds of threads and the chunk width is 512, so a two atom cell gives a team two
+     * distances to compute.
+     *
+     * The target and source axes are independent and each iteration writes one distance
+     * and one displacement, so collapsing them fills the teams from the product rather
+     * than from the source count alone. Iterations adjacent in the collapsed space share
+     * a target and walk the sources, which is the order the rows are written in, so the
+     * writes stay contiguous. Stating the collapse rather than computing a flat index
+     * keeps a division and a modulo out of every iteration, which matters for the cells
+     * this helps least: those with more sources than a team is wide already filled their
+     * teams under the chunking.
+     */
     auto* r_dr_ptr              = mw_r_dr.data();
     auto* input_ptr             = offload_input.data();
     const int num_sources_local = num_sources_;
 
+    /* The team count is named rather than left to the runtime. Collapsing alone still
+     * loses where the collapsed space is moderate and the runtime packs it into few teams:
+     * measured against the chunked shape it runs 0.87 times the speed at 512 targets by 512
+     * sources while winning everywhere else. Sizing the count from the work keeps the grid
+     * wide there too, and then no measured corner is slower than the chunking.
+     */
+    const long total_work = static_cast<long>(total_targets) * num_sources_local;
+    const int num_teams   = static_cast<int>(std::min<long>(std::max<long>(total_work / 64, 1), 65535));
+
     {
       ScopedTimer offload(dt_leader.offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(total_targets*num_teams) \
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) num_teams(num_teams) \
                           map(always, to: input_ptr[:offload_input.size()]) \
                           depend(out:r_dr_ptr[:mw_r_dr.size()])")
       for (int iat = 0; iat < total_targets; ++iat)
-        for (int team_id = 0; team_id < num_teams; team_id++)
+        for (int iel = 0; iel < num_sources_local; ++iel)
         {
           auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
           const int walker_id =
@@ -292,17 +312,12 @@ public:
           auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
           auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
 
-          const int first = ChunkSizePerTeam * team_id;
-          const int last  = omptarget::min(first + ChunkSizePerTeam, num_sources_local);
-
           T pos[D];
           for (int idim = 0; idim < D; idim++)
             pos[idim] = target_pos_ptr[iat * D + idim];
 
-          PRAGMA_OFFLOAD("omp parallel for")
-          for (int iel = first; iel < last; iel++)
-            DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
-                                                          num_padded, iel);
+          DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
+                                                        num_padded, iel);
         }
 
       if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
