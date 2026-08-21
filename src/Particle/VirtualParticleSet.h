@@ -67,6 +67,15 @@ public:
   std::vector<int> source_ptcl_per_vp;
   bool multi_source_ = false;
 
+  /** which job each virtual particle came from, counted within this set.
+   *
+   * The quadrature knots of a set arrive job by job, so a consumer that needs something
+   * per job rather than per set or per knot, an inverse row for the job's electron being
+   * the case in hand, can index by this instead of rediscovering the boundaries from the
+   * electron and source arrays.
+   */
+  std::vector<int> job_per_vp;
+
   bool isMultiSource() const { return multi_source_; }
 
   /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
