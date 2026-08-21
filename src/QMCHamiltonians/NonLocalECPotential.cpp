@@ -319,6 +319,9 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   auto pp_component = std::find_if(O_leader.PPset.begin(), O_leader.PPset.end(), [](auto& ptr) { return bool(ptr); });
   assert(pp_component != std::end(O_leader.PPset));
 
+  const char* collapse_env      = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
+  const bool collapse_electron_loop = collapse_env && *collapse_env == '1';
+
   RefVector<NonLocalECPotential> ecp_potential_list;
   RefVectorWithLeader<NonLocalECPComponent> ecp_component_list(**pp_component);
   RefVectorWithLeader<ParticleSet> pset_list(pset_leader);
@@ -339,6 +342,102 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   for (int ig = 0; ig < pset_leader.groups(); ++ig) //loop over species
   {
     TrialWaveFunction::mw_prepareGroup(wf_list, p_list, ig);
+
+    /* One batch for the whole group, rather than one per job index.
+     *
+     * The jobid loop below calls mw_evaluateOne once per job, and jobs are about one per
+     * electron, so a group of N electrons costs N calls. Each call costs five kernel
+     * launches: two distance tables on the virtual set, two Jastrow value kernels and one
+     * determinant ratio. Batching the group divides all five by N, which is where the
+     * offload launches are.
+     *
+     * Opt-in while it is new. A batch slot is no longer a walker index here, which the
+     * accumulation below has to know, and the energy path is the last place to guess.
+     */
+    if (collapse_electron_loop && O_leader.vp_)
+    {
+      ecp_potential_list.clear();
+      ecp_component_list.clear();
+      pset_list.clear();
+      psi_list.clear();
+      tmove_xy_all_batch_list.clear();
+
+      RefVector<VirtualParticleSet> group_vp_list;
+      std::vector<std::vector<NLPPJob<Real>>> joblists(nw);
+      std::vector<int> job_walker, job_elec, job_ion;
+      std::vector<Real> job_dist;
+      std::vector<PosType> job_displ;
+      group_vp_list.reserve(nw);
+
+      for (size_t iw = 0; iw < nw; iw++)
+      {
+        auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+        pset_list.push_back(p_list[iw]);
+        psi_list.push_back(wf_list[iw]);
+        group_vp_list.push_back(*O.vp_);
+        // jobs of one walker stay consecutive, which is the order the batch is unpacked in
+        for (const auto& job : O.nlpp_jobs[ig])
+        {
+          joblists[iw].push_back(job);
+          ecp_component_list.push_back(*O.PP[job.ion_id]);
+          ecp_potential_list.push_back(O);
+          job_walker.push_back(static_cast<int>(iw));
+          job_elec.push_back(job.electron_id);
+          job_ion.push_back(job.ion_id);
+          job_dist.push_back(job.ion_elec_dist);
+          job_displ.push_back(job.ion_elec_displ);
+          if (compute_txy_all)
+            tmove_xy_all_batch_list.push_back(O.tmove_xy_all_);
+        }
+      }
+
+      const size_t njobs = ecp_component_list.size();
+      pairpots.resize(njobs);
+      if (njobs > 0)
+        NonLocalECPComponent::mw_evaluateOneMultiJob(ecp_component_list, pset_list,
+                                                     {*O_leader.vp_, std::move(group_vp_list)}, psi_list, joblists,
+                                                     job_walker, pairpots, tmove_xy_all_batch_list,
+                                                     O_leader.mw_res_handle_.getResource().collection,
+                                                     O_leader.mw_res_handle_.getResource().nlpp_batch_scratch,
+                                                     O_leader.use_DLA);
+
+      /* Check each collapsed job against the single-job host reference. The batched and
+       * collapsed paths consume randomness in the same order but a deck's trajectory
+       * diverges from any difference at all, so comparing energies after ten blocks cannot
+       * tell a wrong pairpot from a different walk. This compares the pairpots themselves,
+       * at the configuration in hand, against evaluateOne with no virtual set.
+       */
+      if (const char* c = std::getenv("QMCPACK_CHECK_NLPP_COLLAPSE"); c && *c == '1')
+      {
+        double worst = 0;
+        for (size_t jj = 0; jj < njobs; jj++)
+        {
+          const int iw = job_walker[jj];
+          std::vector<NonLocalData> txy_dummy;
+          const Real ref = ecp_component_list[jj].evaluateOne(pset_list[iw], std::nullopt, job_ion[jj], psi_list[iw],
+                                                             job_elec[jj], job_dist[jj], job_displ[jj],
+                                                             compute_txy_all
+                                                                 ? makeOptionalRef<std::vector<NonLocalData>>(txy_dummy)
+                                                                 : std::nullopt,
+                                                             O_leader.use_DLA);
+          worst = std::max(worst, std::abs(static_cast<double>(ref - pairpots[jj])));
+        }
+        std::cerr << "NLPPCOLLAPSE jobs=" << njobs << " worst |collapsed - reference| = " << worst << std::endl;
+      }
+
+      for (size_t jj = 0; jj < njobs; jj++)
+      {
+        ecp_potential_list[jj].get().value_ += pairpots[jj];
+        if (listeners)
+        {
+          auto& ve_samples = O_leader.mw_res_handle_.getResource().ve_samples;
+          auto& vi_samples = O_leader.mw_res_handle_.getResource().vi_samples;
+          ve_samples(job_walker[jj], job_elec[jj]) += 0.5 * pairpots[jj];
+          vi_samples(job_walker[jj], job_ion[jj]) += 0.5 * pairpots[jj];
+        }
+      }
+      continue;
+    }
 
     // find the max number of jobs of all the walkers
     size_t max_num_jobs = 0;
