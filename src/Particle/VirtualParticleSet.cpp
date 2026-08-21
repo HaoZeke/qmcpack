@@ -231,19 +231,24 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
     vp.source_ptcl_per_vp.resize(vp.R.size());
 
     size_t k = 0;
+    vp.multi_ref_ = false;
     for (size_t j = 0; j < jobs.size(); j++)
     {
-      const auto& job     = jobs[j];
-      const auto& deltaV  = deltaVs[j];
-      assert(job.electron_id == vp.refPtcl);
+      const auto& job    = jobs[j];
+      const auto& deltaV = deltaVs[j];
+      // Jobs of one set need not share an electron. Each knot is placed against its own
+      // job's electron and records it, so a set spanning several is correct rather than
+      // silently offset from the first job's position.
+      if (job.electron_id != vp.refPtcl)
+        vp.multi_ref_ = true;
       for (size_t q = 0; q < deltaV.size(); q++, k++, ivp++)
       {
-        vp.R[k]                  = refp_list[iw].R[vp.refPtcl] + deltaV[q];
+        vp.R[k]                  = refp_list[iw].R[job.electron_id] + deltaV[q];
         vp.source_ptcl_per_vp[k] = job.ion_id;
         vp.job_per_vp[k]         = static_cast<int>(j);
-        mw_refPctls[ivp]         = vp.refPtcl;
+        mw_refPctls[ivp]         = job.electron_id;
         if (vp_leader.isSpinor())
-          vp.spins[k] = refp_list[iw].spins[vp.refPtcl];
+          vp.spins[k] = refp_list[iw].spins[job.electron_id];
       }
     }
     p_list.push_back(vp);
