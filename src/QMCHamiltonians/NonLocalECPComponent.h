@@ -37,6 +37,47 @@ class TestNonLocalECPotential;
 
 /** Contains a set of radial grid potentials around a center.
 */
+/** Per-entry working arrays for one batched NLPP call.
+ *
+ * The component's own deltaV_, knot_pots_, psiratio and psiratio_det serve one job at a
+ * time. A batched call carrying several jobs of one walker can resolve two of them to the
+ * same component object, so each entry needs its own arrays. Held by the caller across
+ * calls rather than allocated per call: this path runs once per electron per step and has
+ * no allocation in it today.
+ */
+struct NLPPBatchScratch
+{
+  using RealType  = QMCTraits::RealType;
+  using ValueType = QMCTraits::ValueType;
+  using PosType   = QMCTraits::PosType;
+
+  std::vector<std::vector<PosType>> deltaV;
+  std::vector<std::vector<RealType>> knot_pots;
+  std::vector<std::vector<ValueType>> psiratio;
+  std::vector<std::vector<ValueType>> psiratio_det;
+
+  /// grow to hold n entries; existing capacity is kept so steady state does not allocate
+  void resizeEntries(size_t n)
+  {
+    if (deltaV.size() < n)
+    {
+      deltaV.resize(n);
+      knot_pots.resize(n);
+      psiratio.resize(n);
+      psiratio_det.resize(n);
+    }
+  }
+
+  /// give entry i room for nknot knots
+  void resizeEntry(size_t i, size_t nknot)
+  {
+    deltaV[i].resize(nknot);
+    knot_pots[i].resize(nknot);
+    psiratio[i].resize(nknot);
+    psiratio_det[i].resize(nknot);
+  }
+};
+
 class NonLocalECPComponent : public QMCTraits
 {
 private:
@@ -223,6 +264,7 @@ public:
                              std::vector<RealType>& pairpots,
                              const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
                              ResourceCollection& collection,
+                             NLPPBatchScratch& scratch,
                              bool use_DLA);
 
   /** @brief Evaluate the nonlocal pp contribution via randomized quadrature grid
