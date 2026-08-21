@@ -446,6 +446,16 @@ public:
     groups_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  /// worst |collapsed - reference| seen, accumulated for the same reason the rest is
+  void collapseChecked(size_t jobs, double worst)
+  {
+    collapse_jobs_.fetch_add(jobs, std::memory_order_relaxed);
+    collapse_batches_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (worst > collapse_worst_)
+      collapse_worst_ = worst;
+  }
+
   void countDisagreed(int ig, size_t host, int device)
   {
     disagreed_.fetch_add(1, std::memory_order_relaxed);
@@ -455,6 +465,11 @@ public:
 
   ~NLPPJobCheck()
   {
+    if (calls_.load() == 0 && collapse_batches_.load() == 0)
+      return;
+    if (collapse_batches_.load() > 0)
+      std::cerr << "NLPPCOLLAPSE summary: batches=" << collapse_batches_.load() << " jobs=" << collapse_jobs_.load()
+                << " worst |collapsed - reference|=" << collapse_worst_ << std::endl;
     if (calls_.load() == 0)
       return;
     std::cerr << "NLPPCHECK summary: mw_evaluateImpl calls=" << calls_.load() << " group scans=" << groups_.load()
@@ -466,6 +481,8 @@ public:
 private:
   NLPPJobCheck() = default;
   std::atomic<size_t> calls_{0}, groups_{0}, jobs_{0}, mismatches_{0}, disagreed_{0}, unavailable_{0};
+  std::atomic<size_t> collapse_jobs_{0}, collapse_batches_{0};
+  double collapse_worst_ = 0;
   std::mutex mutex_;
 };
 
@@ -738,7 +755,9 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
                                                              O_leader.use_DLA);
           worst = std::max(worst, std::abs(static_cast<double>(ref - pairpots[jj])));
         }
-        std::cerr << "NLPPCOLLAPSE jobs=" << njobs << " worst |collapsed - reference| = " << worst << std::endl;
+        // accumulated rather than printed per call: eight crowds printing concurrently tears
+        // the lines, and a torn line reads as neither a pass nor a failure
+        NLPPJobCheck::get().collapseChecked(njobs, worst);
       }
 
       for (size_t jj = 0; jj < njobs; jj++)
