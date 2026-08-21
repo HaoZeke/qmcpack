@@ -248,6 +248,107 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
   }
 }
 
+void NonLocalECPComponent::mw_evaluateOneMultiJob(
+    const RefVectorWithLeader<NonLocalECPComponent>& ecp_component_list,
+    const RefVectorWithLeader<ParticleSet>& p_list,
+    const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+    const RefVectorWithLeader<TrialWaveFunction>& psi_list,
+    const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+    const std::vector<int>& job_walker,
+    std::vector<RealType>& pairpots,
+    const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
+    ResourceCollection& collection,
+    NLPPBatchScratch& scratch,
+    bool use_DLA)
+{
+  const bool use_TMDLA = (!tmove_xy_all_list.empty()) && use_DLA;
+  const size_t nw      = p_list.size();
+  const size_t njobs   = ecp_component_list.size();
+  assert(job_walker.size() == njobs);
+  assert(joblists.size() == nw);
+
+  // each job's quadrature into its own scratch entry, then grouped per walker for the move
+  scratch.resizeEntries(njobs);
+  scratch.walker_deltaV.resize(nw);
+  for (size_t iw = 0; iw < nw; iw++)
+    scratch.walker_deltaV[iw].resize(joblists[iw].size());
+
+  std::vector<size_t> job_slot_of_walker(nw, 0);
+  for (size_t jj = 0; jj < njobs; jj++)
+  {
+    NonLocalECPComponent& component = ecp_component_list[jj];
+    const int iw                    = job_walker[jj];
+    const size_t j                  = job_slot_of_walker[iw]++;
+    const NLPPJob<RealType>& job    = joblists[iw][j];
+
+    scratch.resizeEntry(jj, component.getNknot());
+    component.buildQuadraturePointDeltaPosAndPartialPotential(job.ion_elec_dist, job.ion_elec_displ,
+                                                              scratch.deltaV[jj], scratch.knot_pots[jj]);
+    scratch.walker_deltaV[iw][j] = scratch.deltaV[jj];
+  }
+
+  ResourceCollectionTeamLock<VirtualParticleSet> vp_res_lock(collection, vp_list);
+  VirtualParticleSet::mw_makeMovesMultiSource(vp_list, p_list, scratch.walker_deltaV, joblists, true);
+
+  RefVectorWithLeader<const VirtualParticleSet> const_vp_list(vp_list.getLeader());
+  const_vp_list.reserve(nw);
+  for (VirtualParticleSet& vp_set : vp_list)
+    const_vp_list.push_back(vp_set);
+
+  // the wavefunction returns one vector per walker with that walker's jobs concatenated
+  scratch.walker_ratios.resize(nw);
+  scratch.walker_ratios_det.resize(nw);
+  RefVector<std::vector<ValueType>> wr_list, wrd_list;
+  wr_list.reserve(nw);
+  wrd_list.reserve(nw);
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    scratch.walker_ratios[iw].resize(vp_list[iw].getTotalNum());
+    scratch.walker_ratios_det[iw].resize(vp_list[iw].getTotalNum());
+    wr_list.push_back(scratch.walker_ratios[iw]);
+    wrd_list.push_back(scratch.walker_ratios_det[iw]);
+  }
+
+  if (use_TMDLA)
+  {
+    TrialWaveFunction::mw_evaluateRatios(psi_list, const_vp_list, wrd_list, TrialWaveFunction::ComputeType::FERMIONIC);
+    TrialWaveFunction::mw_evaluateRatios(psi_list, const_vp_list, wr_list,
+                                         TrialWaveFunction::ComputeType::NONFERMIONIC);
+    for (size_t iw = 0; iw < nw; iw++)
+      for (size_t k = 0; k < scratch.walker_ratios[iw].size(); k++)
+        scratch.walker_ratios[iw][k] *= scratch.walker_ratios_det[iw][k];
+  }
+  else if (use_DLA)
+    TrialWaveFunction::mw_evaluateRatios(psi_list, const_vp_list, wr_list, TrialWaveFunction::ComputeType::FERMIONIC);
+  else
+    TrialWaveFunction::mw_evaluateRatios(psi_list, const_vp_list, wr_list);
+
+  // split each walker's ratios back into the jobs that contributed them, in job order
+  std::fill(job_slot_of_walker.begin(), job_slot_of_walker.end(), 0);
+  std::vector<size_t> knot_offset(nw, 0);
+  for (size_t jj = 0; jj < njobs; jj++)
+  {
+    NonLocalECPComponent& component = ecp_component_list[jj];
+    const int iw                    = job_walker[jj];
+    const size_t j                  = job_slot_of_walker[iw]++;
+    const NLPPJob<RealType>& job    = joblists[iw][j];
+    const size_t nknot_j            = component.getNknot();
+    const size_t off                = knot_offset[iw];
+    knot_offset[iw] += nknot_j;
+
+    for (size_t k = 0; k < nknot_j; k++)
+    {
+      scratch.psiratio[jj][k]     = scratch.walker_ratios[iw][off + k];
+      scratch.psiratio_det[jj][k] = scratch.walker_ratios_det[iw][off + k];
+    }
+
+    pairpots[jj] = component.calculatePotential(scratch.knot_pots[jj], scratch.psiratio[jj], scratch.psiratio_det[jj],
+                                                use_TMDLA);
+    if (!tmove_xy_all_list.empty())
+      component.contributeTxy(job.electron_id, scratch.knot_pots[jj], scratch.deltaV[jj], tmove_xy_all_list[jj]);
+  }
+}
+
 NonLocalECPComponent::RealType NonLocalECPComponent::evaluateOneWithForces(ParticleSet& W,
                                                                            const OptionalRef<VirtualParticleSet> vp,
                                                                            int iat,
