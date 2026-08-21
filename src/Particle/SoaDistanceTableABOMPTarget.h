@@ -276,36 +276,35 @@ public:
      * into a single iteration space fills the teams from the product instead of from the
      * source count alone. Consecutive work items keep the same target and walk the
      * sources, which is the order the distance and displacement rows are written in.
+     * Stating the collapse rather than computing a flat index keeps a division and a
+     * modulo out of every iteration, which matters for cells with more sources than a
+     * team is wide, the ones that already filled their teams under the chunking.
      */
     auto* r_dr_ptr              = mw_r_dr.data();
     auto* input_ptr             = offload_input.data();
     const int num_sources_local = num_sources_;
-    const size_t total_work     = total_targets * static_cast<size_t>(num_sources_local);
-
     {
       ScopedTimer offload(dt_leader.offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
                           map(always, to: input_ptr[:offload_input.size()]) \
                           depend(out:r_dr_ptr[:mw_r_dr.size()])")
-      for (size_t work = 0; work < total_work; work++)
-      {
-        const int iat = static_cast<int>(work / num_sources_local);
-        const int iel = static_cast<int>(work % num_sources_local);
+      for (int iat = 0; iat < total_targets; ++iat)
+        for (int iel = 0; iel < num_sources_local; ++iel)
+        {
+          auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
+          const int walker_id =
+              reinterpret_cast<int*>(input_ptr + ptr_size * nw + total_targets * D * realtype_size)[iat];
+          auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[walker_id];
+          auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
+          auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
 
-        auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
-        const int walker_id =
-            reinterpret_cast<int*>(input_ptr + ptr_size * nw + total_targets * D * realtype_size)[iat];
-        auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[walker_id];
-        auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
-        auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
+          T pos[D];
+          for (int idim = 0; idim < D; idim++)
+            pos[idim] = target_pos_ptr[iat * D + idim];
 
-        T pos[D];
-        for (int idim = 0; idim < D; idim++)
-          pos[idim] = target_pos_ptr[iat * D + idim];
-
-        DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
-                                                      num_padded, iel);
-      }
+          DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
+                                                        num_padded, iel);
+        }
 
       if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
       {
