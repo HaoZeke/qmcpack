@@ -130,14 +130,28 @@ private:
                                                        std::vector<RealType>& knot_prods);
 
   /** finalize the calculation of $\frac{V\Psi_T}{\Psi_T}$
+   *
+   * The ratios are taken as arguments rather than read from psiratio and psiratio_det.
+   * Those are members, and a batched call that puts two jobs of one ion in the same batch,
+   * which collapsing the NLPP electron loop does, resolves both to one component object
+   * and one set of members. Naming the scratch at the call site is what lets each job
+   * carry its own.
    */
-  RealType calculatePotential(std::vector<RealType>& knot_pots, bool use_TMDLA) const;
+  RealType calculatePotential(std::vector<RealType>& knot_pots,
+                              const std::vector<ValueType>& psi_ratio,
+                              const std::vector<ValueType>& psi_ratio_det,
+                              bool use_TMDLA) const;
 
   /** contribute local non-local move data
    * @param iel reference electron id.
+   * @param knot_pots per knot potentials for this job.
+   * @param deltaV per knot position deltas for this job.
    * @param Txy nonlocal move data.
    */
-  void contributeTxy(int iel, std::vector<NonLocalData>& Txy) const;
+  void contributeTxy(int iel,
+                     const std::vector<RealType>& knot_pots,
+                     const std::vector<PosType>& deltaV,
+                     std::vector<NonLocalData>& Txy) const;
 
 public:
   NonLocalECPComponent();
