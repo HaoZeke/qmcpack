@@ -18,6 +18,7 @@
 // File created by: Ken Esler, kpesler@gmail.com, University of Illinois at Urbana-Champaign
 //////////////////////////////////////////////////////////////////////////////////////
 
+#include <algorithm>
 #include "BsplineFunctor.h"
 
 namespace qmcplusplus
@@ -172,7 +173,21 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
-  PRAGMA_OFFLOAD("omp target teams distribute map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
+  /* One team per pair, reducing over the sources inside it, leaves a team of hundreds of
+   * threads summing over as many values as the cell has sources: two for a one-body Jastrow
+   * on a two atom cell, eight for the two-body on eight electrons. The pairs are what there
+   * are many of, walkers times quadrature knots, so they are what should fill the machine.
+   *
+   * Give each thread a whole pair and let it carry its own sum. The cross-thread reduction
+   * disappears with the team-level split, and the work per thread grows with the source
+   * count rather than the parallelism shrinking with it. The team count is named from the
+   * pairs for the same reason it is named in the AB distance table: left to the runtime a
+   * moderate iteration space gets packed into too few teams.
+   */
+  const int num_teams = static_cast<int>(std::min(std::max(num_pairs / 64, 1), 65535));
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for num_teams(num_teams) \
+                    map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to:ref_at[:num_pairs], mw_dist[:dist_stride*num_pairs]) \
                     map(always, from:mw_vals[:num_pairs])")
@@ -184,7 +199,6 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
     REAL* mw_DeltaRInv     = reinterpret_cast<REAL*>(transfer_buffer_ptr + sizeof(REAL*) * num_groups);
     REAL* mw_cutoff_radius = mw_DeltaRInv + num_groups;
     int* mw_max_index = reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
-    PRAGMA_OFFLOAD("omp parallel for reduction(+: sum)")
     for (int j = 0; j < n_src; j++)
     {
       const int ig        = grp_ids[j];
