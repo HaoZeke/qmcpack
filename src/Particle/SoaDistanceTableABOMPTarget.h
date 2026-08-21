@@ -269,41 +269,43 @@ public:
       }
     }
 
-    // To maximize thread usage, the loop over electrons is chunked. Each chunk is sent to an OpenMP offload thread team.
-    const int ChunkSizePerTeam = 512;
-    const size_t num_teams     = (num_sources_ + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
-
+    /* One team per target, looping its threads over the sources, leaves almost every
+     * thread idle whenever a cell has few ions: a team is hundreds of threads wide and a
+     * virtual particle set against a two atom cell gives it two distances to compute. The
+     * target and source axes are independent, one output element each, so flattening them
+     * into a single iteration space fills the teams from the product instead of from the
+     * source count alone. Consecutive work items keep the same target and walk the
+     * sources, which is the order the distance and displacement rows are written in.
+     */
     auto* r_dr_ptr              = mw_r_dr.data();
     auto* input_ptr             = offload_input.data();
     const int num_sources_local = num_sources_;
+    const size_t total_work     = total_targets * static_cast<size_t>(num_sources_local);
 
     {
       ScopedTimer offload(dt_leader.offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(total_targets*num_teams) \
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for \
                           map(always, to: input_ptr[:offload_input.size()]) \
                           depend(out:r_dr_ptr[:mw_r_dr.size()])")
-      for (int iat = 0; iat < total_targets; ++iat)
-        for (int team_id = 0; team_id < num_teams; team_id++)
-        {
-          auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
-          const int walker_id =
-              reinterpret_cast<int*>(input_ptr + ptr_size * nw + total_targets * D * realtype_size)[iat];
-          auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[walker_id];
-          auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
-          auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
+      for (size_t work = 0; work < total_work; work++)
+      {
+        const int iat = static_cast<int>(work / num_sources_local);
+        const int iel = static_cast<int>(work % num_sources_local);
 
-          const int first = ChunkSizePerTeam * team_id;
-          const int last  = omptarget::min(first + ChunkSizePerTeam, num_sources_local);
+        auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
+        const int walker_id =
+            reinterpret_cast<int*>(input_ptr + ptr_size * nw + total_targets * D * realtype_size)[iat];
+        auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[walker_id];
+        auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
+        auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
 
-          T pos[D];
-          for (int idim = 0; idim < D; idim++)
-            pos[idim] = target_pos_ptr[iat * D + idim];
+        T pos[D];
+        for (int idim = 0; idim < D; idim++)
+          pos[idim] = target_pos_ptr[iat * D + idim];
 
-          PRAGMA_OFFLOAD("omp parallel for")
-          for (int iel = first; iel < last; iel++)
-            DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
-                                                          num_padded, iel);
-        }
+        DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
+                                                      num_padded, iel);
+      }
 
       if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
       {
