@@ -254,6 +254,15 @@ public:
    * @param invRow_ptr_list a list of pointers to the rows of inverse slater matrix corresponding to the particles moved virtually
    * @param ratios_list a list of returning determinant ratios
    */
+  /** whether mw_evaluateDetRatios indexes invRow_ptr_list per job rather than per walker.
+   *
+   * A virtual particle set spanning several electrons, which collapsing the NLPP electron
+   * loop produces, needs one inverse row per job. DiracDeterminantBatched supplies them that
+   * way and the orbital set has to agree; one still indexing by walker would read the wrong
+   * row without failing. Only implementations taught the per-job convention return true.
+   */
+  virtual bool supportsMultiRefDetRatios() const { return false; }
+
   virtual void mw_evaluateDetRatios(const RefVectorWithLeader<SPOSetT>& spo_list,
                                     const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                     const RefVector<ValueVector>& psi_list,

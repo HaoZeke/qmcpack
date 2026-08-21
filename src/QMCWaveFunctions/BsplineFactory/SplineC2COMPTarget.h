@@ -201,6 +201,9 @@ public:
                                  const ValueVector& psiinv,
                                  std::vector<ValueType>& ratios) override;
 
+  /// indexes invRow_ptr_list per job; see mw_evaluateDetRatios
+  bool supportsMultiRefDetRatios() const override { return true; }
+
   virtual void mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_list,
                                     const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                     const RefVector<ValueVector>& psi_list,
