@@ -25,9 +25,11 @@
 #include <cmath>
 #include <vector>
 #include <string>
+#include <omp.h>
 
 #include "Configuration.h"
 #include "spline2/MultiBspline.hpp"
+#include "spline2/MultiBsplineOffloadMapper.hpp"
 #include "spline2/MultiBsplineVGLH_OMPoffload.hpp"
 #include "einspline/bspline_create.h"
 #include "OhmmsPETE/OhmmsVector.h"
@@ -98,6 +100,15 @@ int main(int argc, char** argv)
       mb.set_spline(*aspline, i);
     destroy_Bspline(aspline);
 
+    // Map the coefficients with the production mapper. Without this the coefficient table
+    // stays host memory and the target region dereferences an unmapped pointer, which does
+    // not fail loudly but does put every coefficient load across the bus. Timing that
+    // exaggerates the value of removing loads, so the mapping is what makes the numbers mean
+    // anything.
+    MultiBsplineOffloadMapper<RealType> mapper(mb);
+    mapper.mapToDevice();
+    mapper.updateToDevice();
+
     auto* spline_ptr          = mb.getSplinePtr();
     const size_t scratch_size = padded * 11; // VAL, 3 grads, 6 hessian, LAPL
 
@@ -105,7 +116,61 @@ int main(int argc, char** argv)
     scratch.updateTo();
     auto* scratch_ptr = scratch.data();
 
-    const RealType symGGt[6] = {1.0, 0.0, 0.0, 1.0, 0.0, 1.0};
+    // a non-diagonal metric, so a wrong contraction cannot hide behind symmetry
+    const RealType symGGt[6] = {1.07, 0.13, -0.21, 0.94, 0.08, 1.11};
+
+    // confirm the kernel really runs on the device rather than falling back
+    int on_device = -1;
+    PRAGMA_OFFLOAD("omp target map(from: on_device)")
+    on_device = omp_is_initial_device() ? 0 : 1;
+    if (on_device != 1)
+    {
+      printf("  ERROR: kernel did not run on the device (omp_is_initial_device reported %d)\n", on_device);
+      return 2;
+    }
+
+    // both paths, same inputs, compared before anything is timed
+    {
+      Vector<RealType, OffloadPinnedAllocator<RealType>> ref(scratch_size), got(scratch_size);
+      ref.updateTo();
+      got.updateTo();
+      auto* ref_ptr = ref.data();
+      auto* got_ptr = got.data();
+      PRAGMA_OFFLOAD("omp target teams distribute map(always, from: ref_ptr[0:scratch_size], got_ptr[0:scratch_size])")
+      for (int one = 0; one < 1; one++)
+      {
+        int ix, iy, iz;
+        RealType a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
+        spline2::computeLocationAndFractional(spline_ptr, RealType(0.31), RealType(0.57), RealType(0.13), ix, iy, iz, a,
+                                              b, c, da, db, dc, d2a, d2b, d2c);
+        PRAGMA_OFFLOAD("omp parallel for")
+        for (size_t sp = 0; sp < padded; sp++)
+        {
+          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(sp), a, b, c,
+                                               da, db, dc, d2a, d2b, d2c, ref_ptr + sp, padded);
+          ref_ptr[padded * 10 + sp] = ref_ptr[padded * 4 + sp] * symGGt[0] + ref_ptr[padded * 5 + sp] * symGGt[1] +
+              ref_ptr[padded * 6 + sp] * symGGt[2] + ref_ptr[padded * 7 + sp] * symGGt[3] +
+              ref_ptr[padded * 8 + sp] * symGGt[4] + ref_ptr[padded * 9 + sp] * symGGt[5];
+          spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, static_cast<int>(sp), a, b, c,
+                                               da, db, dc, d2a, d2b, d2c, symGGt, got_ptr + sp, padded, padded * 10);
+        }
+      }
+      const int fields[5] = {0, 1, 2, 3, 10}; // value, three gradients, laplacian
+      double worst        = 0;
+      for (int f : fields)
+        for (int sp = 0; sp < num_splines; sp++) // unpadded orbitals only
+        {
+          const double r = ref[padded * f + sp], g = got[padded * f + sp];
+          const double d = std::abs(r - g) / std::max(1.0, std::abs(r));
+          if (d > worst)
+            worst = d;
+        }
+      const double tol = sizeof(RealType) == 4 ? 1e-5 : 1e-12;
+      printf("  # orbitals=%d worst relative difference old vs new = %.3e (tol %.0e) %s\n", num_splines, worst, tol,
+             worst <= tol ? "OK" : "MISMATCH");
+      if (worst > tol)
+        return 3;
+    }
 
     // the old path: write ten fields, then read the six hessian components back to contract
     auto t0old = std::chrono::steady_clock::now();
