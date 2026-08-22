@@ -89,6 +89,15 @@ public:
   }
 
   std::string getClassName() const final { return "Hybrid" + SPLINEBASE::getClassName(); }
+  /** false: the batching that produces multi-reference sets also spans source ions.
+   *
+   * HybridRepCenterOrbitals reads refSourcePtcl as the one ion whose sphere a set is
+   * tested against, so it refuses a set spanning several rather than answering wrongly.
+   * Declining here means a deck asking for electron-group batching is told once and gets
+   * per-electron sets, instead of reaching that refusal and aborting.
+   */
+  bool supportsMultiRefDetRatios() const override { return false; }
+
   std::string getKeyword() const final { return "Hybrid" + SPLINEBASE::getKeyword(); }
   bool isOMPoffload() const final { return false; }
 
