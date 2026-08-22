@@ -96,6 +96,16 @@ public:
                         int iat,
                         const RefVector<ValueVector>& psi_v_list) const final;
 
+  /** values at every virtual particle position, the batch evaluated in one call
+   *
+   * The basis is evaluated for all positions at once and contracted with one GEMM, the
+   * route mw_evaluateDetRatios already takes; this form keeps the values instead of
+   * reducing them to a ratio, and brings them to the host for the caller.
+   */
+  void mw_evaluateValueVPs(const RefVectorWithLeader<SPOSet>& spo_list,
+                           const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                           OffloadMWVArray& phi_vps) const final;
+
   void mw_evaluateVGL(const RefVectorWithLeader<SPOSet>& spo_list,
                       const RefVectorWithLeader<ParticleSet>& P_list,
                       int iat,
