@@ -195,6 +195,9 @@ void applyW_batched(Queue<PlatformKind::OMPTARGET>& queue,
 }
 
 
+/// walkers a crowd must hold before packing the spans repays its kernel launch
+inline constexpr int gather_min_batch = 2;
+
 /** copy the same span of every walker's container to the host in one transfer
  *
  * @param items    one dual space container per walker
@@ -206,6 +209,11 @@ void applyW_batched(Queue<PlatformKind::OMPTARGET>& queue,
  * An update carries the cost of a round trip rather than the cost of its bytes, so a
  * span of a few hundred bytes per walker costs the crowd one round trip each. Packing
  * the spans on the device leaves one transfer to carry all of them.
+ *
+ * Packing only pays once there are round trips to merge. It adds a kernel launch, an
+ * upload of the address list and a host side copy out of the staging buffer, all of
+ * which the direct path avoids, so a crowd holding one walker transfers the same bytes
+ * and pays the extra. Below @ref gather_min_batch walkers the spans go directly.
  */
 template<class CONTAINER, class PTRVEC, class STAGEVEC>
 void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
@@ -218,6 +226,14 @@ void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
   const int batch_count = items.size();
   if (batch_count == 0 || n == 0)
     return;
+
+  if (batch_count < gather_min_batch)
+  {
+    for (int iw = 0; iw < batch_count; iw++)
+      queue.enqueueD2H(items[iw].get(), n, offset);
+    queue.sync();
+    return;
+  }
 
   ptrs.resize(batch_count);
   staging.resize(n * batch_count);
