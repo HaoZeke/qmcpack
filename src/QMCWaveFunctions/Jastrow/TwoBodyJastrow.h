@@ -230,7 +230,8 @@ public:
                           int iat,
                           std::vector<PsiValue>& ratios,
                           std::vector<GradType>& grad_new,
-                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const override;
+                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
 
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override;
   void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,

@@ -579,11 +579,13 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
                                            int iat,
                                            std::vector<PsiValue>& ratios,
                                            std::vector<GradType>& grad_new,
-                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
+                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
 {
   if (!use_offload_)
   {
-    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod);
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
+                                              grads_device_sum);
     return;
   }
 
@@ -601,11 +603,19 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
   const size_t vstr  = mw_res.mw_vgl.cols();
   const auto* uat_ptr = mw_res.mw_allUat.device_data();
   const auto* vgl_ptr = mw_res.mw_vgl.device_data();
-  auto* rd_ptr = ratios_device_prod.device_data();
+  auto* rd_ptr      = ratios_device_prod.device_data();
+  auto* gs_ptr      = grads_device_sum.device_data();
+  constexpr int dim = OHMMS_DIM;
+  // the host form adds ndim components, which is not DIM in a reduced dimension run
+  const int nd = static_cast<int>(wfc_leader.ndim);
 
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, vgl_ptr, rd_ptr)")
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, vgl_ptr, rd_ptr, gs_ptr)")
   for (int iw = 0; iw < nw; iw++)
+  {
     rd_ptr[iw] *= static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
+    for (int id = 0; id < nd; id++)
+      gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+  }
 }
 
 template<typename FT>

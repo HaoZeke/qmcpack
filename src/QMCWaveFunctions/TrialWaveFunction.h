@@ -410,7 +410,8 @@ public:
                                      int iat,
                                      std::vector<PsiValue>& ratios,
                                      std::vector<GradType>& grad_new,
-                                     Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod);
+                                     Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                     Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum);
 
   /** Prepare internal data for updating WFC correspond to a particle group
    *  Particle groups usually correspond to determinants of different spins.

@@ -374,7 +374,8 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
     int iat,
     std::vector<PsiValue>& ratios,
     std::vector<Grad>& grad_new,
-    Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
+    Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
 {
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader     = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
@@ -420,11 +421,19 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
 
   // the orbital set writes its own value type, which need not be the type the product
   // over components is formed in, so the widening happens where the values already are
-  const auto* src_ptr = mw_res.ratios_device_local.device_data();
-  auto* dst_ptr       = ratios_device_prod.device_data();
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
+  const auto* src_ptr  = mw_res.ratios_device_local.device_data();
+  const auto* sgrad_ptr = mw_res.grads_device_local.device_data();
+  auto* dst_ptr        = ratios_device_prod.device_data();
+  auto* gsum_ptr       = grads_device_sum.device_data();
+  constexpr int dim    = OHMMS_DIM;
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                  is_device_ptr(src_ptr, sgrad_ptr, dst_ptr, gsum_ptr)")
   for (int iw = 0; iw < nw; iw++)
+  {
     dst_ptr[iw] *= static_cast<PsiValue>(src_ptr[iw]);
+    for (int id = 0; id < dim; id++)
+      gsum_ptr[iw * dim + id] += static_cast<ValueType>(sgrad_ptr[iw * dim + id]);
+  }
 }
 
 template<PlatformKind PL, typename VT, typename FPVT>

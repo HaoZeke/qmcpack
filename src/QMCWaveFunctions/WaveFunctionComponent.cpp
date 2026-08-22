@@ -158,23 +158,43 @@ void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFun
                                                int iat,
                                                std::vector<PsiValue>& ratios,
                                                std::vector<GradType>& grad_new,
-                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
+                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                               Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
 {
-  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
-
-  // a component without a device path still owes the caller its factor in the product, so
-  // the host result goes down and is folded in there
+  // the component's own contribution, before the caller's running values are touched
   const int nw = wfc_list.size();
+  std::vector<GradType> grad_z(nw, GradType(0));
+  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_z);
+
+  // a component without a device path still owes the caller its factor and its term, so
+  // the host results go down and are folded in there
+  constexpr int dim = OHMMS_DIM;
   host_ratio_staging_.resize(nw);
+  host_grad_staging_.resize(nw * dim);
   for (int iw = 0; iw < nw; iw++)
+  {
     host_ratio_staging_[iw] = ratios[iw];
+    for (int id = 0; id < dim; id++)
+      host_grad_staging_[iw * dim + id] = grad_z[iw][id];
+  }
   host_ratio_staging_.updateTo();
+  host_grad_staging_.updateTo();
 
   const auto* z_ptr = host_ratio_staging_.device_data();
+  const auto* g_ptr = host_grad_staging_.device_data();
   auto* prod_ptr    = ratios_device_prod.device_data();
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(z_ptr, prod_ptr)")
+  auto* gsum_ptr    = grads_device_sum.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(z_ptr, g_ptr, prod_ptr, gsum_ptr)")
   for (int iw = 0; iw < nw; iw++)
+  {
     prod_ptr[iw] *= z_ptr[iw];
+    for (int id = 0; id < dim; id++)
+      gsum_ptr[iw * dim + id] += g_ptr[iw * dim + id];
+  }
+
+  // the caller's host gradient accumulates the same way the non device form does
+  for (int iw = 0; iw < nw; iw++)
+    grad_new[iw] += grad_z[iw];
 }
 
 void WaveFunctionComponent::mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
