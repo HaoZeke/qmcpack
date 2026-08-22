@@ -48,7 +48,8 @@ public:
                       ParticleSet& els,
                       bool enable_DLA,
                       bool use_VP,
-                      bool batch_electron_groups = false);
+                      bool batch_electron_groups = false,
+                      bool device_jobs_  = false);
   NonLocalECPotential(const NonLocalECPotential& nlpp, ParticleSet& els);
   ~NonLocalECPotential() override;
 
@@ -192,6 +193,15 @@ protected:
    * so the request is checked against the wavefunction before it is honoured.
    */
   bool batch_electron_groups;
+  /** true, build the pseudopotential neighbour list on the device.
+   *
+   * The host scan reads every electron against every ion for every walker every step
+   * to keep the pairs inside Rmax, which are a small fraction of what it reads. The
+   * device filter applies the same test where the table already is and brings back
+   * only the survivors. It needs the electron-ion table to be the offload one, and
+   * falls back for every walker together when it is not.
+   */
+  bool device_jobs_;
 
 private:
   ///virtual particle set

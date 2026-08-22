@@ -85,12 +85,14 @@ NonLocalECPotential::NonLocalECPotential(ParticleSet& ions,
                                          ParticleSet& els,
                                          bool enable_DLA,
                                          bool use_VP,
-                                         bool batch_electron_groups_in)
+                                         bool batch_electron_groups_in,
+                                         bool device_jobs_in)
     : ForceBase(ions, els),
       myRNG(nullptr),
       IonConfig(ions),
       use_DLA(enable_DLA),
       batch_electron_groups(batch_electron_groups_in),
+      device_jobs_(device_jobs_in),
       vp_(use_VP ? std::make_unique<VirtualParticleSet>(els) : nullptr),
       Peln(els),
       neighbor_lists(els.getTotalNum(), ions.getTotalNum(), PP)
@@ -118,6 +120,7 @@ NonLocalECPotential::NonLocalECPotential(const NonLocalECPotential& nlpp, Partic
       IonConfig(nlpp.IonConfig),
       use_DLA(nlpp.use_DLA),
       batch_electron_groups(nlpp.batch_electron_groups),
+      device_jobs_(nlpp.device_jobs_),
       vp_(nlpp.vp_ ? std::make_unique<VirtualParticleSet>(els, nlpp.vp_->getNumDistTables()) : nullptr),
       Peln(els),
       neighbor_lists(nlpp.neighbor_lists)
@@ -517,8 +520,12 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   // J1OrbitalSoA reads through getDistRow and getDisplRow, so the table cannot carry
   // MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST while a one-body Jastrow shares it. What is
   // removed here is the O(nelec * nions) host traversal per walker per step.
-  bool device_jobs = false;
-  if (const char* c = std::getenv("QMCPACK_DEVICE_NLPP_JOBS"); c && *c == '1')
+  /* The deck asks through device_jobs_ on the pseudopotential; the environment
+   * overrides either way, 1 to ask where the deck did not and 0 to decline what it did.
+   */
+  const char* dnj_env = std::getenv("QMCPACK_DEVICE_NLPP_JOBS");
+  bool device_jobs    = false;
+  if (!(dnj_env && *dnj_env == '0') && (O_leader.device_jobs_ || (dnj_env && *dnj_env == '1')))
   {
     device_jobs = true;
     for (size_t iw = 0; iw < nw && device_jobs; iw++)
