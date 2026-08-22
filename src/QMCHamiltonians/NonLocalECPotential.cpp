@@ -686,6 +686,16 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
      *
      * Opt-in while it is new. A batch slot is no longer a walker index here, which the
      * accumulation below has to know, and the energy path is the last place to guess.
+     *
+     * Not compatible with hybrid representation orbitals. A walker's jobs span ions as
+     * well as electrons, so the set is multi-source, and HybridRepCenterOrbitals reads
+     * refSourcePtcl as one ion to test a set against one atomic sphere. It refuses such a
+     * set by name rather than answering wrongly, which is the right outcome but is an
+     * abort: short-diamondC_2x1x1_hybridrep_pp passes with this off and aborts with it on.
+     *
+     * Batching per ion as well as per group would keep the set single-source and stay
+     * compatible, at the cost of most of the collapse: jobs per group divided by ions
+     * rather than by one, which is about three on CO2/Cu(110) against about a hundred.
      */
     if (collapse_electron_loop && O_leader.vp_)
     {
