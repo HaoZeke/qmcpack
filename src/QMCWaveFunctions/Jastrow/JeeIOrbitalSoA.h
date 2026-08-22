@@ -285,7 +285,15 @@ public:
   ///alias FuncType
   using FuncType = FT;
 
-  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs)
+  /** @param use_offload take the device ratio path
+   *
+   * The builder decides this from the deck's gpu attribute, defaulting to the
+   * coordinate kind, which is how the one- and two-body Jastrows are told. The device
+   * path reads the virtual-particle tables through getMultiWalkerDataPtr, which only
+   * the offload tables provide, so it also needs offload coordinates and is refused
+   * here without them.
+   */
+  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false)
       : WaveFunctionComponent(obj_name),
         ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
@@ -293,11 +301,7 @@ public:
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
-    // the batched ratio path reads the virtual-particle tables through
-    // getMultiWalkerDataPtr, which only the offload tables provide
-    const char* off = std::getenv("QMCPACK_DISABLE_J3_OFFLOAD");
-    use_offload_    = elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD &&
-        !(off && *off == '1');
+    use_offload_ = use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
     init(elecs);
   }
 
@@ -324,7 +328,7 @@ public:
 
   std::unique_ptr<WaveFunctionComponent> makeClone(ParticleSet& elecs) const override
   {
-    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs);
+    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs, use_offload_);
     std::map<const FT*, FT*> fcmap;
     for (int iG = 0; iG < iGroups; iG++)
       for (int eG1 = 0; eG1 < eGroups; eG1++)
