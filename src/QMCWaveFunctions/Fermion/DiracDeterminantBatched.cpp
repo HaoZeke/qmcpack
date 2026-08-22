@@ -22,7 +22,6 @@
 #ifndef QMC_COMPLEX
 #include "QMCWaveFunctions/RotatedSPOs.h"
 #endif
-#include <cstdlib>
 #include "CPU/SIMD/inner_product.hpp"
 #include "DiracMatrixInverterOMPTarget.hpp"
 #if defined(ENABLE_CUDA) && defined(ENABLE_OFFLOAD)
@@ -571,9 +570,6 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_completeUpdates(
     UpdateEngine::mw_updateInvMat(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs);
   }
 
-  // ABLATION PROBE, NOT A FEATURE: skipping the transfer leaves the host copies stale and
-  // the answers wrong. It exists to price the transfer and is removed with this comment.
-  if (std::getenv("QMCPACK_ABLATE_AINV_D2H") == nullptr)
   { // transfer dpsiM, d2psiM, psiMinv to host
     ScopedTimer d2h(D2HTimer);
 
