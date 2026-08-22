@@ -700,6 +700,20 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
   const size_t num_pos          = psi_v_list.size();
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+  /* Same reasoning as mw_evaluateDetRatios: a team's work is myV.size() spline values
+   * for one position, and left to the runtime the team is far wider than that.
+   */
+  const int team_width = [&] {
+    const size_t work = std::min(myV.size(), ChunkSizePerTeam);
+    int width         = 32;
+    while (width < static_cast<int>(work) && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
   offload_scratch.resize(spline_padded_size * num_pos * SoAFields3D::NUM_FIELDS);
@@ -777,7 +791,7 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
 
     // every block has written offload_scratch by now, so the orbital-range assignment
     // can run once over the whole set
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) thread_limit(team_width) \
                     map(always, to: pos_copy_ptr[0:num_pos*6]) \
                     map(always, from: results_scratch_ptr[0:sposet_padded_size*num_pos*5])")
     for (int iw = 0; iw < num_pos; iw++)
@@ -945,6 +959,20 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
   const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+  /* Same reasoning as mw_evaluateDetRatios: a team's work is myV.size() spline values
+   * for one position, and left to the runtime the team is far wider than that.
+   */
+  const int team_width = [&] {
+    const size_t work = std::min(myV.size(), ChunkSizePerTeam);
+    int width         = 32;
+    while (width < static_cast<int>(work) && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
   mw_offload_scratch.resize(spline_padded_size * num_pos * SoAFields3D::NUM_FIELDS);
   // for V(1)G(3)L(1) final result
   mw_results_scratch.resize(sposet_padded_size * num_pos * 5);
@@ -991,7 +1019,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
     {
       const auto* spline_ptr = &SplineInst->getBlock(0);
 
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) thread_limit(team_width) \
                       map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
                       map(always, from: rg_private_ptr[0:rg_private.size()])")
       for (int iw = 0; iw < num_pos; iw++)
@@ -1145,7 +1173,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         }
     }
 
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) thread_limit(team_width) \
                     map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
                     map(always, from: rg_private_ptr[0:rg_private.size()])")
     for (int iw = 0; iw < num_pos; iw++)
