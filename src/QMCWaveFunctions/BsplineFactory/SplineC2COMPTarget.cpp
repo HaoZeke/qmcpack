@@ -11,6 +11,7 @@
 
 
 #include <stdexcept>
+#include <cstdlib>
 #include "SplineC2COMPTarget.h"
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
@@ -332,6 +333,22 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
 
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+  /* How wide a team may be.
+   *
+   * A team here reduces spline_padded_size values for one virtual particle, which is 8
+   * on a four orbital deck, and a team is hundreds of threads wide by default, so nearly
+   * every lane idles. Capping the width lets a multiprocessor host more of them. The
+   * default keeps whatever the runtime would have chosen; the variable exists so the two
+   * can be compared in one binary rather than two.
+   */
+  static const int team_width = [] {
+    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        return v;
+    return 1024;
+  }();
+
   mw_ratios_private.resize(mw_nVP, NumTeams);
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
@@ -373,6 +390,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
       const auto* spline_ptr = &SplineInst->getBlock(0);
 
       PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                  thread_limit(team_width) \
                   map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                   map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
       for (int iat = 0; iat < mw_nVP; iat++)
@@ -446,6 +464,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
     }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                  thread_limit(team_width) \
                 map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
     for (int iat = 0; iat < mw_nVP; iat++)
