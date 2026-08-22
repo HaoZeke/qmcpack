@@ -326,6 +326,8 @@ attributes:
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``batch_electrons``:math:`^o`| text         | yes/no                | no                     | One NLPP batch per electron group                |
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
+  | ``device_jobs``:math:`^o`    | text         | yes/no                | no                     | Build the NLPP neighbour list on the device      |
+  +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``DLA``:math:`^o`            | text         | yes/no                | no                     | Use determinant localization approximation       |
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``physicalSO``:math:`^o`     | boolean      | yes/no                | yes                    | Include the SO contribution in the local energy  |
@@ -367,6 +369,13 @@ Additional information:
    representation has an extra optimization enabled when using the
    batched algorithm. When OpenMP offload build is enabled, the default
    value is ``batched``. Otherwise, ``non-batched`` is the default.
+
+-  **device_jobs** Apply the ``Rmax`` cutoff that selects
+   electron-ion pairs on the device, where the distance table already is,
+   returning only the pairs that survive it, instead of reading the whole
+   table on the host every step. It requires the electron-ion distance table
+   to be the offload implementation; where it is not, every walker falls back
+   to the host scan together.
 
 -  **batch_electrons** Evaluate a whole electron group in one batch
    rather than one batch per electron. A group's quadrature points then
