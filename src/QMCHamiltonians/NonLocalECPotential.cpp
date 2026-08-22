@@ -656,28 +656,30 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   assert(pp_component != std::end(O_leader.PPset));
 
   /* 1 batches a whole group, spanning electrons and ions. 2 batches one electron at a
-   * time, spanning ions only, which is the bisection: it exercises the multi-source
-   * packing without the per-job inverse rows, so which of the two is at fault becomes a
-   * question the deck can answer.
+   * time, spanning ions only, so its sets carry a single reference electron and it needs
+   * nothing of the wavefunction beyond what the per-job path already asks for.
    */
-  const char* collapse_env          = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
-  const bool collapse_electron_loop = collapse_env && (*collapse_env == '1' || *collapse_env == '2');
-  const bool collapse_per_electron  = collapse_env && *collapse_env == '2';
+  const char* collapse_env         = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
+  const bool collapse_requested    = collapse_env && (*collapse_env == '1' || *collapse_env == '2');
+  const bool collapse_per_electron = collapse_env && *collapse_env == '2';
 
-  /* This path is known to compute wrong pseudopotential energies on decks larger than the
-   * one it was developed against, and is kept only so the fault can be bisected. It is not
-   * a performance option. Say so every time it is switched on rather than letting a number
-   * come back that looks plausible.
+  /* Batching a whole group puts several electrons in one virtual particle set, and a
+   * component reading one reference electron per set would give every quadrature point
+   * the first electron's ratio. Legacy DiracDeterminant is such a component: it has no
+   * multi-walker ratio path, so it serialises to the single-walker call, which is what
+   * `<slaterdeterminant batch="no">` selects. Ask the wavefunction rather than assume,
+   * and keep the per-electron sets where the answer is no.
    */
-  if (collapse_electron_loop)
+  const bool multi_ref_ok = collapse_per_electron || wf_list.getLeader().supportsMultiRefRatios();
+  const bool collapse_electron_loop = collapse_requested && multi_ref_ok;
+
+  if (collapse_requested && !multi_ref_ok)
   {
-    static std::once_flag warned;
-    std::call_once(warned, [] {
-      std::cerr << "WARNING QMCPACK_NLPP_COLLAPSE_ELECTRONS is set. This path is under "
-                   "investigation and computes wrong nonlocal pseudopotential energies on "
-                   "multi-walker decks: it disagrees with the single-job reference by order 10 "
-                   "on diamondC_2x1x1 while agreeing to 1e-14 on diamondC_1x1x1. Do not use it "
-                   "for results."
+    static std::once_flag declined;
+    std::call_once(declined, [] {
+      std::cerr << "WARNING QMCPACK_NLPP_COLLAPSE_ELECTRONS asked for one batch per electron "
+                   "group, but a wavefunction component evaluates one reference electron per "
+                   "virtual particle set. Batching one electron at a time instead."
                 << std::endl;
     });
   }
@@ -796,7 +798,13 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         std::cerr << "SIZES ig=" << ig << " njobs=" << njobs << " joblists=" << joblists.size()
                   << " pset=" << pset_list.size() << " psi=" << psi_list.size() << " vp=" << group_vp_list.size()
                   << " ecp_pot=" << ecp_potential_list.size() << " tmove=" << tmove_xy_all_batch_list.size()
-                  << " slots=" << job_batch_slot.size() << std::endl;
+                  << " slots=" << job_batch_slot.size();
+        for (size_t s = 0; s < group_vp_list.size() && s < 3; s++)
+          std::cerr << " | vp" << s << " n=" << group_vp_list[s].get().getTotalNum()
+                    << " jobs=" << joblists[s].size() << " multi_ref=" << group_vp_list[s].get().isMultiRef()
+                    << " multi_src=" << group_vp_list[s].get().isMultiSource()
+                    << " njobs_field=" << group_vp_list[s].get().getNumJobs();
+        std::cerr << std::endl;
       }
       if (njobs > 0)
         NonLocalECPComponent::mw_evaluateOneMultiJob(ecp_component_list, pset_list,

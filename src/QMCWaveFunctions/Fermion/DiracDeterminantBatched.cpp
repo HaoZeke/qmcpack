@@ -855,7 +855,7 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evaluateRatios(
       const size_t njobs = vp.isMultiRef() ? vp.getNumJobs() : 1;
       for (size_t j = 0; j < njobs; j++)
       {
-        const int elec         = vp.isMultiRef() ? vp.job_electron[j] : vp.refPtcl;
+        const int elec = vp.isMultiRef() ? vp.job_electron[j] : vp.refPtcl;
         const int WorkingIndex = elec - FirstIndex;
         if (phi_.isOMPoffload())
           invRow_ptr_list.push_back(det.psiMinv_.device_data() + WorkingIndex * psiMinv_.cols());
