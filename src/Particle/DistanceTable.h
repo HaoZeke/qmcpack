@@ -455,6 +455,17 @@ public:
   {
     throw std::runtime_error(name_ + " getPerTargetPctlStrideSize not supported");
   }
+
+  /** return the multi walker temporary distance table data pointer
+   *
+   * The AA form declares its own; a consumer reducing over sources for a moved target
+   * needs the same from the AB form, and a table without a device side path says so
+   * rather than returning something stale.
+   */
+  [[noreturn]] virtual const RealType* getMultiWalkerTempDataPtr() const
+  {
+    throw std::runtime_error(name_ + " multi walker data pointer for temp not supported");
+  }
 };
 } // namespace qmcplusplus
 #endif

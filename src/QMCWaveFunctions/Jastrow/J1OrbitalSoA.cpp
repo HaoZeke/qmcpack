@@ -11,12 +11,28 @@
 // -*- C++ -*-
 
 
+#include <type_traits>
+#include <cstdlib>
+#include <iostream>
 #include "J1OrbitalSoA.h"
 #include "SoaDistanceTableABOMPTarget.h"
 #include "ResourceCollection.h"
 
 namespace qmcplusplus
 {
+
+/** whether a functor offers the batched value and gradient form
+ *
+ * Only some of the functors a one-body Jastrow is instantiated for provide it, so the
+ * batched reduction is taken where it exists and the base loop serves the rest.
+ */
+template<typename T, typename = void>
+struct HasMwEvaluateVGL : std::false_type
+{};
+template<typename T>
+struct HasMwEvaluateVGL<T, std::void_t<decltype(&T::mw_evaluateVGL)>> : std::true_type
+{};
+
 
 template<typename T>
 struct J1OrbitalSoAMultiWalkerMem : public Resource
@@ -27,6 +43,12 @@ struct J1OrbitalSoAMultiWalkerMem : public Resource
   Vector<T, OffloadPinnedAllocator<T>> mw_vals;
   // multi walker -1
   Vector<int, OffloadPinnedAllocator<int>> mw_minus_one;
+  // multi walker value and gradient for a proposed move, [nw][DIM+2]
+  Matrix<T, OffloadPinnedAllocator<T>> mw_vgl;
+  // per source scratch the value and gradient kernel writes, [nw][3][n_padded]
+  Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
+  // fused buffer for the value and gradient kernel
+  Vector<char, OffloadPinnedAllocator<char>> mw_ratiograd_buffer;
 
   void resize_minus_one(size_t size)
   {
@@ -102,6 +124,77 @@ void J1OrbitalSoA<FT>::releaseResource(ResourceCollection& collection,
 {
   auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
   collection.takebackResource(wfc_leader.mw_mem_handle_);
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                    const RefVectorWithLeader<ParticleSet>& p_list,
+                                    int iat,
+                                    std::vector<PsiValue>& ratios,
+                                    std::vector<GradType>& grad_new) const
+{
+  if constexpr (!HasMwEvaluateVGL<FT>::value)
+  {
+    WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+    return;
+  }
+  else
+  {
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+    return;
+  }
+
+  /* The single walker form reduces over the ions on the host, once per walker. The same
+   * reduction for the whole batch is one kernel, the one the two-body Jastrow already
+   * uses, given the moved electron's distances to every ion on the device. Nothing here
+   * is excluded from the sum, unlike the two-body case, so the index it skips is set past
+   * the end.
+   */
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader      = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  auto& p_leader        = p_list.getLeader();
+  const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+  const int nw          = wfc_list.size();
+
+  /* The batched form trades a pair of kernel launches per move for the host's reduction
+   * over ions, once per walker. Below some amount of work the launches cost more than the
+   * loop they replace. A two ion cell at 64 walkers measures 5.1 percent slower, 2 of 8
+   * pairs, which puts the crossover near that product, so the host loop serves the small
+   * end with a margin over the one point available to anchor it.
+   */
+  if (static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  {
+    WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+    return;
+  }
+
+  auto& mw_mem      = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_vgl      = mw_mem.mw_vgl;
+  auto& mw_cur_allu = mw_mem.mw_cur_allu;
+  const size_t n_padded = getAlignedSize<valT>(wfc_leader.Nions);
+  mw_vgl.resize(nw, DIM + 2);
+  mw_cur_allu.resize(n_padded * 3 * nw);
+
+  FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.data(),
+                     n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
+                     mw_mem.mw_ratiograd_buffer);
+
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& wfc = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+    wfc.UpdateMode = ORB_PBYP_PARTIAL;
+    wfc.curAt      = mw_vgl[iw][0];
+    // the kernel stores the negated laplacian, which is what the two-body path wants;
+    // accumulateGL returns it unnegated, so this matches the single walker form
+    wfc.curLap     = -mw_vgl[iw][DIM + 1];
+    for (int idim = 0; idim < DIM; idim++)
+      wfc.curGrad[idim] = mw_vgl[iw][idim + 1];
+    ratios[iw] = std::exp(static_cast<PsiValue>(wfc.Vat[iat] - wfc.curAt));
+    grad_new[iw] += wfc.curGrad;
+  }
+  }
 }
 
 template<typename FT>

@@ -439,6 +439,18 @@ public:
    *
    * Using getTempDists(). curAt, curGrad and curLap are computed.
    */
+  /** the batch's reduction over ions in one kernel
+   *
+   * The base form loops the single walker version, which reduces over ions on the host
+   * once per walker. Nothing is excluded from a one-body sum, so the batched kernel is
+   * told to skip an index past the end.
+   */
+  void mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                    const RefVectorWithLeader<ParticleSet>& p_list,
+                    int iat,
+                    std::vector<PsiValue>& ratios,
+                    std::vector<GradType>& grad_new) const override;
+
   PsiValue ratioGrad(ParticleSet& P, int iat, GradType& grad_iat) override
   {
     UpdateMode = ORB_PBYP_PARTIAL;
