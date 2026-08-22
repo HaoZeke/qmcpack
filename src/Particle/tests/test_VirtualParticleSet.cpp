@@ -235,5 +235,44 @@ TEST_CASE("VirtualParticleSet multi-ref", "[particle]")
   REQUIRE(vp.getNumJobs() == 2);
   CHECK(vp.job_electron[0] == 1);
   CHECK(vp.job_electron[1] == 3);
+
+  /* The distance tables matter as much as the positions and are what a reader comparing
+   * this function against mw_makeMoves cannot see. Build the same first job through
+   * mw_makeMoves and require the table rows to agree: a set carrying two jobs must give
+   * its first job's knots the same distances as a set carrying only that job.
+   */
+  const size_t ntables = vp.getNumDistTables();
+  REQUIRE(ntables >= 1);
+  std::vector<std::vector<double>> multi_rows(ntables);
+  for (size_t t = 0; t < ntables; t++)
+  {
+    const auto& dt = vp.getDistTableAB(t);
+    for (size_t k = 0; k < vp.getTotalNum(); k++)
+      for (size_t s = 0; s < dt.sources(); s++)
+        multi_rows[t].push_back(dt.getDistRow(k)[s]);
+  }
+
+  VirtualParticleSet vp_one_job(elecs);
+  RefVectorWithLeader<VirtualParticleSet> one_list(vp_one_job, {vp_one_job});
+  RefVectorWithLeader<ParticleSet> one_refp(elecs, {elecs});
+  ResourceCollection one_collection{"NLPPcollection"};
+  vp_one_job.createResource(one_collection);
+  {
+    ResourceCollectionTeamLock<VirtualParticleSet> lock(one_collection, one_list);
+    const std::vector<PosType>& dv0 = deltaV_lists[0][0];
+    RefVector<const std::vector<PosType>> dv_list{dv0};
+    RefVector<const NLPPJob<RealType>> jl{joblists[0][0]};
+    VirtualParticleSet::mw_makeMoves(one_list, one_refp, dv_list, jl, true);
+
+    REQUIRE(vp_one_job.getTotalNum() == dv0.size());
+    REQUIRE(vp_one_job.getNumDistTables() == ntables);
+    for (size_t t = 0; t < ntables; t++)
+    {
+      const auto& dt1 = vp_one_job.getDistTableAB(t);
+      for (size_t k = 0; k < vp_one_job.getTotalNum(); k++)
+        for (size_t s = 0; s < dt1.sources(); s++)
+          CHECK(Approx(dt1.getDistRow(k)[s]) == multi_rows[t][k * dt1.sources() + s]);
+    }
+  }
 }
 } // namespace qmcplusplus

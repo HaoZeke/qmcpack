@@ -14,6 +14,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 
+#include <atomic>
 #include "Particle/DistanceTable.h"
 #include "NonLocalECPComponent.h"
 #include "NLPPJob.h"
@@ -313,7 +314,16 @@ void NonLocalECPComponent::mw_evaluateOneMultiJob(
     VirtualParticleSet::mw_makeMoves(vp_list, p_list, deltaV_list, single_joblist, true);
   }
   else
+  {
+    if (const char* c = std::getenv("QMCPACK_NLPP_COUNT_MULTISOURCE"); c && *c == '1')
+    {
+      static std::atomic<size_t> n{0};
+      const size_t seen = ++n;
+      if (seen == 1 || seen % 100 == 0)
+        std::cerr << "MULTISOURCE batches so far=" << seen << std::endl;
+    }
     VirtualParticleSet::mw_makeMovesMultiSource(vp_list, p_list, scratch.walker_deltaV, joblists, true);
+  }
 
   RefVectorWithLeader<const VirtualParticleSet> const_vp_list(vp_list.getLeader());
   const_vp_list.reserve(nw);
