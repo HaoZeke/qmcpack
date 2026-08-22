@@ -313,10 +313,21 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     if (myName == psrc.getName())
       DistTables.push_back(createDistanceTable(*this, description));
     else
-      // the dispatcher, so an offload source selects SoaDistanceTableABOMPTarget. That
-      // class now implements move() and update() on the host, as the AA offload table
-      // does, which is what particle-by-particle DMC needs from it.
-      DistTables.push_back(createDistanceTable(psrc, myName, description));
+      /* createDistanceTableAB, not the createDistanceTable dispatcher.
+       *
+       * SoaDistanceTableABOMPTarget now implements move() and update(), so it no longer
+       * aborts on the particle-by-particle path, but implementing them is not enough to
+       * make it equivalent to the host table there. Selecting it for every offload
+       * source breaks He_ae-opt_vmc-batch: series 2 local energy reads 3.64497307
+       * against a reference of -2.82592127, and the three checks pass again the moment
+       * this line names the host table.
+       *
+       * Its distances_ and displacements_ are views onto the crowd's shared mw_r_dr, and
+       * mw_evaluate ends with an asynchronous device-to-host update that single-walker
+       * consumers have no way to wait on, so what getDistRow returns depends on when it
+       * is asked. Making the class fit for this path is its own change.
+       */
+      DistTables.push_back(createDistanceTableAB(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
     myDistTableMap[psrc.getName()] = tid;
     app_debug() << "  ... ParticleSet::addTable Create Table #" << tid << " " << DistTables[tid]->getName()
