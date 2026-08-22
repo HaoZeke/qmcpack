@@ -442,37 +442,35 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
     }
     else
     {
-    for (size_t ib = 0; ib < num_blocks; ib++)
-    {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
-      const size_t block_splines = spline_ptr->num_splines;
-      if (block_splines == 0)
-        continue;
-      const size_t block_offset = block_offsets[ib];
-      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+    /* Every (block, team) pair is one record of block_teams_, so the whole table is one
+     * team grid and one launch rather than a launch per block. The blocks share a grid,
+     * which is what lets a record carry only the coefficients, the strides and its range.
+     */
+    const auto* spline_ptr    = &SplineInst->getBlock(0);
+    const auto* teams_ptr     = block_teams_->data();
+    const int num_block_teams = block_teams_->size();
 
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
-                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
-      for (int iat = 0; iat < mw_nVP; iat++)
-        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
-        {
-          const size_t first = ChunkSizePerTeam * team_id;
-          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(num_block_teams*mw_nVP) \
+                map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+    for (int iat = 0; iat < mw_nVP; iat++)
+      for (int t = 0; t < num_block_teams; t++)
+      {
+        const auto& team = teams_ptr[t];
 
-          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-          auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*));
+        auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+        auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*));
 
-          int ix, iy, iz;
-          ST a[4], b[4], c[4];
-          spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
-                                                pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
+        int ix, iy, iz;
+        ST a[4], b[4], c[4];
+        spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
+                                              pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
 
-          PRAGMA_OFFLOAD("omp parallel for")
-          for (int index = 0; index < last - first; index++)
-            spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                               offload_scratch_iat_ptr + block_offset + first + index);
-        }
-    }
+        PRAGMA_OFFLOAD("omp parallel for")
+        for (int index = 0; index < team.last - team.first; index++)
+          spline2offload::evaluate_v_impl_v2(team.coefs, team.x_stride, team.y_stride, team.z_stride, ix, iy, iz,
+                                             team.first + index, a, b, c,
+                                             offload_scratch_iat_ptr + team.out_offset + team.first + index);
+      }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
                   thread_limit(team_width) \

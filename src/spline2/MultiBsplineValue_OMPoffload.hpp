@@ -68,6 +68,38 @@ inline void evaluate_v_impl(const typename qmcplusplus::bspline_traits<T, 3>::Sp
  * @param c interpolation parameter in z
  * @param vals value output location
  */
+/** the same, given the strides rather than the descriptor holding them
+ *
+ * A kernel covering the blocks of a distributed table carries their strides in a flat
+ * list, one record per team, so it has the three values without a descriptor to read
+ * them from.
+ */
+template<typename T>
+inline void evaluate_v_impl_v2(const T* restrict spline_coefs,
+                               const intptr_t xs,
+                               const intptr_t ys,
+                               const intptr_t zs,
+                               int ix,
+                               int iy,
+                               int iz,
+                               const int index,
+                               const T a[4],
+                               const T b[4],
+                               const T c[4],
+                               T* restrict vals)
+{
+  T val = T();
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+    {
+      const T* restrict coefs = spline_coefs + ((ix + i) * xs + (iy + j) * ys + iz * zs);
+      val += a[i] * b[j] *
+          (c[0] * coefs[index] + c[1] * coefs[index + zs] + c[2] * coefs[index + zs * 2] +
+           c[3] * coefs[index + zs * 3]);
+    }
+  *vals = val;
+}
+
 template<typename T>
 inline void evaluate_v_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
                                const T* restrict spline_coefs,
