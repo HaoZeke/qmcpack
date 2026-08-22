@@ -14,6 +14,8 @@
 
 
 #include "SplineR2R.h"
+#include <algorithm>
+#include <cstdlib>
 #include "Concurrency/OpenMP.h"
 #include "spline2/MultiBspline.hpp"
 #include "spline2/MultiBsplineOffload.hpp"
@@ -270,6 +272,23 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
 
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+  /* How wide a team may be, taken from the work it has; see SplineC2COMPTarget for the
+   * measurement. A team reduces the spline values of one virtual particle, at most
+   * ChunkSizePerTeam of them and fewer where myV.size() is smaller, so left to the
+   * runtime a several-hundred-thread team can have eight values to reduce.
+   */
+  const int team_width = [&] {
+    const size_t work = std::min(myV.size(), ChunkSizePerTeam);
+    int width         = 32;
+    while (width < static_cast<int>(work) && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
+
   mw_ratios_private.resize(mw_nVP, NumTeams);
   const auto spline_padded_size = myV.size();
   mw_offload_scratch.resize(spline_padded_size * mw_nVP);
@@ -282,7 +301,7 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
 
   {
     ScopedTimer offload(offload_timer_);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) thread_limit(team_width) \
                     map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
     for (int iat = 0; iat < mw_nVP; iat++)
       for (int team_id = 0; team_id < NumTeams; team_id++)
@@ -304,7 +323,7 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
                                              offload_scratch_iat_ptr + first + index);
       }
 
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) thread_limit(team_width) \
                     map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
     for (int iat = 0; iat < mw_nVP; iat++)
       for (int team_id = 0; team_id < NumTeams; team_id++)

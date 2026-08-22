@@ -11,6 +11,8 @@
 
 
 #include "SplineC2ROMPTarget.h"
+#include <algorithm>
+#include <cstdlib>
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
@@ -167,6 +169,23 @@ void SplineC2ROMPTarget<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
 
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+
+  /* How wide a team may be, taken from the work it has; see SplineC2COMPTarget for the
+   * measurement. A team reduces the spline values of one virtual particle, at most
+   * ChunkSizePerTeam of them and fewer where myV.size() is smaller, so left to the
+   * runtime a several-hundred-thread team can have eight values to reduce.
+   */
+  const int team_width = [&] {
+    const size_t work = std::min(myV.size(), ChunkSizePerTeam);
+    int width         = 32;
+    while (width < static_cast<int>(work) && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
+
   ratios_private.resize(nVP, NumTeams);
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<TT>(OrbitalSetSize);
@@ -187,7 +206,7 @@ void SplineC2ROMPTarget<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
 
   {
     ScopedTimer offload(offload_timer_);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*nVP) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*nVP) thread_limit(team_width) \
                 map(always, to: psiinv_ptr[0:psiinv_pos_copy.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*nVP])")
     for (int iat = 0; iat < nVP; iat++)
