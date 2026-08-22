@@ -21,6 +21,24 @@
 namespace qmcplusplus
 {
 
+namespace
+{
+/** ask the table for the batch's temporary distances on the device and report readiness
+ *
+ * The table produces them for a consumer that has asked, because the kernel that makes
+ * them grows with the number of sources and buys nothing on its own. The batch that asks
+ * first finds them absent and reads the host distances for that move.
+ */
+bool deviceTempDistancesReady(const ParticleSet& p_leader, int table_id)
+{
+  const auto& dt = p_leader.getDistTableAB(table_id);
+  if (dt.hasTempDataOnDevice())
+    return true;
+  dt.requireTempDataOnDevice();
+  return false;
+}
+} // namespace
+
 /** whether a functor offers the batched value and gradient form
  *
  * Only some of the functors a one-body Jastrow is instantiated for provide it, so the
@@ -148,7 +166,8 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
   const bool needs_recompute = wfc_leader.UpdateMode == ORB_PBYP_RATIO;
   if constexpr (HasMwEvaluateVGL<FT>::value)
   {
-    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= 512)
+    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= 512 &&
+        deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
     {
       auto& p_leader        = p_list.getLeader();
       const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
@@ -196,7 +215,8 @@ void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionCompon
   /* Same trade as mw_ratioGrad, and the same gate: a launch against the host's reduction
    * over ions for every walker.
    */
-  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+      !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_calcRatio(wfc_list, p_list, iat, ratios);
     return;
@@ -263,7 +283,8 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
    * pairs, which puts the crossover near that product, so the host loop serves the small
    * end with a margin over the one point available to anchor it.
    */
-  if (static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  if (static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+      !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
     return;

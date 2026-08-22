@@ -466,6 +466,17 @@ public:
   {
     throw std::runtime_error(name_ + " multi walker data pointer for temp not supported");
   }
+
+  /** announce that a device side consumer reads the temporary distances of a batch
+   *
+   * Producing them costs a kernel whose work grows with the number of sources, and it
+   * buys nothing unless something on the device reads the result. A table produces them
+   * for a consumer that has asked and otherwise leaves the device out of a move.
+   */
+  virtual void requireTempDataOnDevice() const {}
+
+  /// the temporary distances of a batch are being produced on the device
+  virtual bool hasTempDataOnDevice() const { return false; }
 };
 } // namespace qmcplusplus
 #endif
