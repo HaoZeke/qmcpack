@@ -103,6 +103,19 @@ public:
                       const RefVector<GradVector>& dpsi_v_list,
                       const RefVector<ValueVector>& d2psi_v_list) const final;
 
+  /** indexes invRow_ptr_list per job, but only on the offload path.
+
+   *
+
+   * The other branch defers to SPOSet, whose generic loop hands one row to the
+
+   * single-walker evaluateDetRatios and so cannot express a row per job.
+
+   */
+
+  bool supportsMultiRefDetRatios() const override { return isOMPoffload(); }
+
+
   void mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_list,
                             const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                             const RefVector<ValueVector>& psi_list,

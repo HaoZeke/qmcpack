@@ -36,6 +36,8 @@ public:
   std::string getClassName() const override { return "RotatedSPOs"; }
   bool isOptimizable() const override { return true; }
   bool isOMPoffload() const override { return Phi_->isOMPoffload(); }
+  /// mw_evaluateDetRatios forwards to Phi_, so the convention is whatever Phi_ follows
+  bool supportsMultiRefDetRatios() const override { return Phi_->supportsMultiRefDetRatios(); }
   bool hasIonDerivs() const override { return Phi_->hasIonDerivs(); }
 
   // Vector of rotation matrix indices
