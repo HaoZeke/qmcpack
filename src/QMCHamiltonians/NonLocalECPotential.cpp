@@ -787,32 +787,17 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         joblists.push_back(std::move(mine));
       }
 
-      for (size_t iw = 0; iw < nw; iw++)
-      {
-        auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
-        pset_list.push_back(p_list[iw]);
-        psi_list.push_back(wf_list[iw]);
-        group_vp_list.push_back(*O.vp_);
-        // jobs of one walker stay consecutive, which is the order the batch is unpacked in
-        for (const auto& job : O.nlpp_jobs[ig])
-        {
-          if (only_elec >= 0 && job.electron_id != only_elec)
-            continue;
-          joblists[iw].push_back(job);
-          ecp_component_list.push_back(*O.PP[job.ion_id]);
-          ecp_potential_list.push_back(O);
-          job_walker.push_back(static_cast<int>(iw));
-          job_elec.push_back(job.electron_id);
-          job_ion.push_back(job.ion_id);
-          job_dist.push_back(job.ion_elec_dist);
-          job_displ.push_back(job.ion_elec_displ);
-          if (compute_txy_all)
-            tmove_xy_all_batch_list.push_back(O.tmove_xy_all_);
-        }
-      }
 
       const size_t njobs = ecp_component_list.size();
       pairpots.resize(njobs);
+      if (const char* c = std::getenv("QMCPACK_NLPP_COLLAPSE_SIZES"); c && *c == '1')
+      {
+        std::lock_guard<std::mutex> lock(collapse_report_mutex);
+        std::cerr << "SIZES ig=" << ig << " njobs=" << njobs << " joblists=" << joblists.size()
+                  << " pset=" << pset_list.size() << " psi=" << psi_list.size() << " vp=" << group_vp_list.size()
+                  << " ecp_pot=" << ecp_potential_list.size() << " tmove=" << tmove_xy_all_batch_list.size()
+                  << " slots=" << job_batch_slot.size() << std::endl;
+      }
       if (njobs > 0)
         NonLocalECPComponent::mw_evaluateOneMultiJob(ecp_component_list, pset_list,
                                                      {*O_leader.vp_, std::move(group_vp_list)}, psi_list, joblists,

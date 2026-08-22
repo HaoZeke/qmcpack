@@ -288,7 +288,32 @@ void NonLocalECPComponent::mw_evaluateOneMultiJob(
   }
 
   ResourceCollectionTeamLock<VirtualParticleSet> vp_res_lock(collection, vp_list);
-  VirtualParticleSet::mw_makeMovesMultiSource(vp_list, p_list, scratch.walker_deltaV, joblists, true);
+
+  /* Where every walker contributes exactly one job the batch has the shape mw_makeMoves
+   * was written for, so use it. That path has run in production since the batched drivers
+   * existed; mw_makeMovesMultiSource had never been called before this work, and taking
+   * the proven one wherever it applies keeps the new one off the common case.
+   */
+  bool single_job_each = true;
+  for (size_t iw = 0; iw < nw; iw++)
+    if (joblists[iw].size() != 1)
+      single_job_each = false;
+
+  if (single_job_each)
+  {
+    RefVector<const std::vector<PosType>> deltaV_list;
+    RefVector<const NLPPJob<RealType>> single_joblist;
+    deltaV_list.reserve(nw);
+    single_joblist.reserve(nw);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      deltaV_list.push_back(scratch.walker_deltaV[iw][0]);
+      single_joblist.push_back(joblists[iw][0]);
+    }
+    VirtualParticleSet::mw_makeMoves(vp_list, p_list, deltaV_list, single_joblist, true);
+  }
+  else
+    VirtualParticleSet::mw_makeMovesMultiSource(vp_list, p_list, scratch.walker_deltaV, joblists, true);
 
   RefVectorWithLeader<const VirtualParticleSet> const_vp_list(vp_list.getLeader());
   const_vp_list.reserve(nw);
