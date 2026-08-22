@@ -198,6 +198,16 @@ void applyW_batched(Queue<PlatformKind::OMPTARGET>& queue,
 /// walkers a crowd must hold before packing the spans repays its kernel launch
 inline constexpr int gather_min_batch = 2;
 
+/** span size above which packing costs more than the round trips it merges
+ *
+ * Round trips saved grow with the walkers in the crowd, while the copy out of the
+ * staging buffer grows with walkers times span, so a large enough span turns the trade
+ * around whatever the crowd size. A standalone comparison of the two paths on this
+ * device places the crossover between 256 and 384 KiB per span, at 8, 16 and 64 walkers
+ * alike, which is what the growth rates predict: the crowd size cancels.
+ */
+inline constexpr size_t gather_max_span_bytes = 256 * 1024;
+
 /** copy the same span of every walker's container to the host in one transfer
  *
  * @param items    one dual space container per walker
@@ -213,7 +223,8 @@ inline constexpr int gather_min_batch = 2;
  * Packing only pays once there are round trips to merge. It adds a kernel launch, an
  * upload of the address list and a host side copy out of the staging buffer, all of
  * which the direct path avoids, so a crowd holding one walker transfers the same bytes
- * and pays the extra. Below @ref gather_min_batch walkers the spans go directly.
+ * and pays the extra. Below @ref gather_min_batch walkers, and above
+ * @ref gather_max_span_bytes per span, the spans go directly.
  */
 template<class CONTAINER, class PTRVEC, class STAGEVEC>
 void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
@@ -227,7 +238,7 @@ void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
   if (batch_count == 0 || n == 0)
     return;
 
-  if (batch_count < gather_min_batch)
+  if (batch_count < gather_min_batch || n * sizeof(typename CONTAINER::value_type) > gather_max_span_bytes)
   {
     for (int iw = 0; iw < batch_count; iw++)
       queue.enqueueD2H(items[iw].get(), n, offset);
