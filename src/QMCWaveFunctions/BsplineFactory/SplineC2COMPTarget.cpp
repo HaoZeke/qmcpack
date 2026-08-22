@@ -342,11 +342,14 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
    * default keeps whatever the runtime would have chosen; the variable exists so the two
    * can be compared in one binary rather than two.
    */
-  static const int team_width = [] {
-    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
-      if (const int v = std::atoi(c); v > 0)
-        return v;
-    return 1024;
+  const int team_width = [] {
+    static const int cached = [] {
+      if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+        if (const int v = std::atoi(c); v > 0)
+          return v;
+      return 1024;
+    }();
+    return cached;
   }();
 
   mw_ratios_private.resize(mw_nVP, NumTeams);
