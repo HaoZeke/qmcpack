@@ -107,15 +107,33 @@ std::pair<int, int> EinsplineSetBuilder::obtainMemoryAttributes(const xmlNodePtr
 {
   int distributed_ranks = 0;
   int shared_ranks      = 0;
+  bool found_here       = false;
   processChildren(cur, [&](const std::string& cname, const xmlNodePtr element) {
     if (cname == "coefs_mem")
     {
+      found_here = true;
       OhmmsAttributeSet mem_attr;
       mem_attr.add(distributed_ranks, "distributed_ranks");
       mem_attr.add(shared_ranks, "shared_ranks");
       mem_attr.put(element);
     }
   });
+
+  /* This reads the sposet element, so a coefs_mem placed on the collection around it
+   * describes nothing and leaves both counts at their defaults. Nothing else notices:
+   * the run proceeds on one copy per rank and differs from an intended one only by a
+   * line of output. Say so rather than let the request disappear.
+   */
+  if (!found_here && cur != nullptr)
+    for (xmlNodePtr sibling = cur->parent ? cur->parent->children : nullptr; sibling != nullptr;
+         sibling            = sibling->next)
+      if (getNodeName(sibling) == "coefs_mem")
+      {
+        app_warning() << "coefs_mem found beside the sposet rather than inside it. It is read from the sposet "
+                         "element, so this one has no effect. Move it inside <sposet>."
+                      << std::endl;
+        break;
+      }
 
   if (distributed_ranks < 1)
     distributed_ranks = 1;

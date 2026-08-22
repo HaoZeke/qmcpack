@@ -36,12 +36,12 @@ namespace qmcplusplus
  * copy per group of ranks, but has no route to a device. MultiBsplineOffloadMapper
  * already maps an arbitrary host spline onto devices. This joins the two.
  *
- * Sharing is what the SPO evaluation can consume today, and it is what the reader asks
- * for. Distributing is accepted by the constructor because the machinery underneath
- * supports it, MultiBsplineMPIShared divides the orbitals into blocks and
- * MultiBsplineOffloadMapper maps and evaluates every block, but it is not yet reachable
- * from a deck: several evaluation paths in SplineC2COMPTarget and SplineC2ROMPTarget
- * still call getSplinePtr(), which throws unless there is exactly one block.
+ * Sharing is what every SPO evaluation can consume. Distributing is reachable from a
+ * deck for the complex offload SPO, whose evaluation paths all walk the blocks; the
+ * reader restricts it for the real one, which still reaches the coefficients through
+ * getSplinePtr() and so needs exactly one block. Orbital rotation needs one block in
+ * either case, because rotation mixes every orbital with every other and each output
+ * block would need input from all of them.
  *
  * With one block, device memory is unchanged: each rank maps the whole table onto its
  * own device, and what shrinks is host memory, by the size of the sharing group. Device
@@ -60,12 +60,10 @@ private:
 public:
   /** @param distributed_ranks how many blocks to divide the orbitals into.
    *
-   * 1 shares one copy of every orbital across the group, which is all the SPO
-   * evaluation can consume today. Larger values divide the orbitals into that many
-   * blocks, which is what would let a multi-device node stop holding the whole table
-   * on every device, and the mapper and the base class already handle it. The reader
-   * still refuses to ask for more than 1 until every evaluation path stops calling
-   * getSplinePtr(), so this parameter exists to be tested rather than deployed.
+   * 1 shares one copy of every orbital across the group. Larger values divide the
+   * orbitals into that many blocks, which is what lets a multi-device node stop holding
+   * the whole table on every device. The reader accepts more than 1 for complex
+   * orbitals and overrides it to 1 for real ones.
    */
   template<typename BCT>
   MultiBsplineMPISharedOffload(const Ugrid grid[3],
