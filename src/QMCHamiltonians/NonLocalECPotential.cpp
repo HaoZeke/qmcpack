@@ -669,8 +669,13 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
    * multi-walker ratio path, so it serialises to the single-walker call, which is what
    * `<slaterdeterminant batch="no">` selects. Ask the wavefunction rather than assume,
    * and keep the per-electron sets where the answer is no.
+   *
+   * A spinor deck is excluded outright: it takes the spinor ratio path, which is
+   * serialised per walker and reads one reference electron per set whatever the
+   * components can otherwise do.
    */
-  const bool multi_ref_ok = collapse_per_electron || wf_list.getLeader().supportsMultiRefRatios();
+  const bool multi_ref_ok =
+      collapse_per_electron || (!pset_leader.isSpinor() && wf_list.getLeader().supportsMultiRefRatios());
   const bool collapse_electron_loop = collapse_requested && multi_ref_ok;
 
   if (collapse_requested && !multi_ref_ok)

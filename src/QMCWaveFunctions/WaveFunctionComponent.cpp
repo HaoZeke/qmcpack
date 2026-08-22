@@ -297,7 +297,14 @@ void WaveFunctionComponent::mw_evaluateSpinorRatios_serialized(
 {
   assert(this == &wfc_list.getLeader());
   for (int iw = 0; iw < wfc_list.size(); iw++)
+  {
+    // one reference electron per set, as in mw_evaluateRatios above
+    if (vp_list[iw].isMultiRef())
+      throw std::runtime_error(getClassName() +
+                               " evaluates spinor ratios one walker at a time, so it takes one reference "
+                               "electron per virtual particle set. It was handed a set spanning several.");
     wfc_list[iw].evaluateSpinorRatios(vp_list[iw], spinor_multiplier_list[iw], ratios[iw]);
+  }
 }
 
 void WaveFunctionComponent::evaluateDerivRatios(const VirtualParticleSet& VP,
