@@ -268,7 +268,18 @@ void WaveFunctionComponent::mw_evaluateRatios(const RefVectorWithLeader<WaveFunc
 {
   assert(this == &wfc_list.getLeader());
   for (int iw = 0; iw < wfc_list.size(); iw++)
+  {
+    /* Serialising to the single-walker call carries one reference electron per set, so a
+     * set spanning several would take the first one's ratio for every quadrature point.
+     * supportsMultiRefRatios() exists so callers can avoid building such a set; refuse it
+     * here as well, because the wrong answer is otherwise silent.
+     */
+    if (vp_list[iw].isMultiRef())
+      throw std::runtime_error(getClassName() +
+                               " has no multi-walker ratio path, so it evaluates one reference electron per "
+                               "virtual particle set. It was handed a set spanning several.");
     wfc_list[iw].evaluateRatios(vp_list[iw], ratios[iw]);
+  }
 }
 
 void WaveFunctionComponent::mw_evaluateSpinorRatios(

@@ -507,6 +507,15 @@ public:
                                  const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                  std::vector<std::vector<ValueType>>& ratios) const;
 
+  /** whether mw_evaluateRatios honours one reference electron per quadrature point.
+   *
+   * A virtual particle set ordinarily carries a single reference electron, VP.refPtcl, and
+   * a component may read it once for the whole set. Sets spanning several electrons instead
+   * name one per point through getMultiWalkerRefPctls(), which only the multi-walker paths
+   * consult. The default is false: serialising to the single-walker call cannot express it.
+   */
+  virtual bool supportsMultiRefRatios() const { return false; }
+
   // Batched version of evaluateSpinorRatios
   virtual void mw_evaluateSpinorRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                        const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
