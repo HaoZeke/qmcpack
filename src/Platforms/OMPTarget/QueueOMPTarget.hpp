@@ -42,26 +42,24 @@ public:
     }
   }
 
-  /** device to host transfer of a dual space container
-   *
-   * The transfer is deferred and the data is on the host once sync() returns, which is
-   * what the CUDA and SYCL queues give: there the copy goes to a stream and sync waits
-   * on it. A caller that hands over several containers before syncing therefore has
-   * them in flight together rather than one at a time.
-   */
   template<class DSC>
   void enqueueD2H(DSC& dataset, typename DSC::size_type size = 0, typename DSC::size_type offset = 0)
   {
     if (dataset.data() == dataset.device_data())
       return;
 
-    auto host_ptr    = dataset.data();
-    const auto count = size == 0 ? dataset.size() : size;
-    PRAGMA_OFFLOAD("omp target update from(host_ptr[offset:count]) nowait")
+    auto host_ptr = dataset.data();
+    if (size == 0)
+    {
+      PRAGMA_OFFLOAD("omp target update from(host_ptr[offset:dataset.size()])")
+    }
+    else
+    {
+      PRAGMA_OFFLOAD("omp target update from(host_ptr[offset:size])")
+    }
   }
 
-  /// wait for the transfers handed over since the last wait
-  void sync() { PRAGMA_OFFLOAD("omp taskwait") }
+  void sync() {}
 };
 
 } // namespace compute
