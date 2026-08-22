@@ -91,6 +91,17 @@ TEST_CASE("Hybridrep SPO from HDF diamond_1x1x1", "[wavefunction]")
   auto spo = einSet.createSPOSetFromXML(ein1);
   REQUIRE(spo);
 
+  /* A hybrid representation set must decline per-job inverse rows.
+   *
+   * The pseudopotential can batch an electron group into one virtual particle set, and
+   * such a set spans source ions as well as electrons. HybridRepCenterOrbitals reads
+   * refSourcePtcl as the one ion whose sphere the set is tested against and refuses a
+   * set spanning several. The wrappers inherit this from the spline they wrap, which
+   * answers true for the offload sets, so without an override the batching would be
+   * allowed and the refusal would abort the run instead of the deck being declined.
+   */
+  CHECK_FALSE(spo->supportsMultiRefDetRatios());
+
   ions_.update();
   elec_.update();
 
@@ -251,6 +262,17 @@ TEST_CASE("Hybridrep SPO from HDF diamond_2x1x1", "[wavefunction]")
   EinsplineSetBuilder einSet(elec_, ptcl.getPool(), c, root);
   auto spo = einSet.createSPOSetFromXML(ein1);
   REQUIRE(spo);
+
+  /* A hybrid representation set must decline per-job inverse rows.
+   *
+   * The pseudopotential can batch an electron group into one virtual particle set, and
+   * such a set spans source ions as well as electrons. HybridRepCenterOrbitals reads
+   * refSourcePtcl as the one ion whose sphere the set is tested against and refuses a
+   * set spanning several. The wrappers inherit this from the spline they wrap, which
+   * answers true for the offload sets, so without an override the batching would be
+   * allowed and the refusal would abort the run instead of the deck being declined.
+   */
+  CHECK_FALSE(spo->supportsMultiRefDetRatios());
 
   ions_.update();
   elec_.update();
