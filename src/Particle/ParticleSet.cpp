@@ -343,23 +343,16 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     if (myName == psrc.getName())
       DistTables.push_back(createDistanceTable(*this, description));
     else
-      /* createDistanceTableAB, not the createDistanceTable dispatcher.
+      /* the dispatcher, so an offload source selects SoaDistanceTableABOMPTarget.
        *
-       * SoaDistanceTableABOMPTarget now implements move() and update(), so it no longer
-       * aborts on the particle-by-particle path, but implementing them is not enough to
-       * make it equivalent to the host table there. Selecting it for every offload
-       * source breaks He_ae-opt_vmc-batch: series 2 local energy reads 3.64497307
-       * against a reference of -2.82592127, and the three checks pass again the moment
-       * this line names the host table.
-       *
-       * Where the two classes differ is storage: the host table owns a padded array per
-       * target, while the offload one holds views that associateResource re-attaches onto
-       * the crowd's shared mw_r_dr, and its full table is written by a device kernel
-       * rather than by the host routine move() and update() use. Which of those the
-       * failure comes through is not yet established; the reproducer above is. Making the
-       * class fit for this path is its own change.
+       * Held off in f4cb9bc97 because that class broke the particle-by-particle path.
+       * The cause was in the class, not in selecting it: acquireResource and
+       * releaseResource zeroed num_targets_, which is what targets() reports, so a
+       * single-walker consumer between a release and the next batched section was told
+       * the table had no targets. CoulombPotential::evaluateAB loops to that count and
+       * summed over nothing, so the electron-ion energy came out exactly zero.
        */
-      DistTables.push_back(createDistanceTableAB(psrc, myName, description));
+      DistTables.push_back(createDistanceTable(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
     myDistTableMap[psrc.getName()] = tid;
     app_debug() << "  ... ParticleSet::addTable Create Table #" << tid << " " << DistTables[tid]->getName()
