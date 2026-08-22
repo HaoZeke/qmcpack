@@ -668,8 +668,8 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_completeUpdates(
       for (const DualVGLVector& psiM_vgl : psiM_vgl_list)
         assert(psiM_vgl.capacity() == stride);
       // transfer device to host, total size 4, g(3) + l(1), skipping v
-      compute::copyEachToHost(queue, psiM_vgl_list, stride * 4, stride, mw_res.engine_rsc.gather_ptrs,
-                              mw_res.engine_rsc.gather_staging);
+      compute::copyEachToHost(queue, psiM_vgl_list, stride * 4, stride, mw_res.engine_rsc.gather_ptrs_vgl,
+                              mw_res.engine_rsc.gather_staging_vgl);
     }
   }
 }
