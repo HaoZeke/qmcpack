@@ -343,7 +343,14 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     if (myName == psrc.getName())
       DistTables.push_back(createDistanceTable(*this, description));
     else
-      DistTables.push_back(createDistanceTableAB(psrc, myName, description));
+      /* the dispatcher, so an offload source selects SoaDistanceTableABOMPTarget.
+       *
+       * That class has to keep num_targets_ across acquire and release, because targets()
+       * reports it and a single-walker consumer between a release and the next batched
+       * section would otherwise be told the table is empty. CoulombPotential::evaluateAB
+       * loops to that count, so the electron-ion energy would come out exactly zero.
+       */
+      DistTables.push_back(createDistanceTable(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
     myDistTableMap[psrc.getName()] = tid;
     app_debug() << "  ... ParticleSet::addTable Create Table #" << tid << " " << DistTables[tid]->getName()
