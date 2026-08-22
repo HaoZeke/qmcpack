@@ -82,15 +82,11 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
     return width;
   }();
 
-  /* cur_allu is scratch shared with mw_updateVGL, which reads it on the device. Its
-   * storage is already resident, so the section is mapped for presence alone and the
-   * values stay where the consumer wants them.
-   */
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
                     map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
-                    map(alloc: mw_cur_allu[:n_padded*3*nw]) \
+                    map(from: mw_cur_allu[:n_padded*3*nw]) \
                     map(always, from: mw_vgl[:(DIM+2)*nw])")
   for (int ip = 0; ip < nw; ip++)
   {
