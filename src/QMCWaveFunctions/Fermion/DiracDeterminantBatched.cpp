@@ -62,6 +62,13 @@ struct DiracDeterminantBatched<PL, VT, FPVT>::DiracDeterminantBatchedMultiWalker
   std::vector<Value> ratios_local;
   /// multi walker of grads
   std::vector<Grad> grad_new_local;
+  /** the same ratio and grads, left where the device can read them
+   *
+   * The orbital set writes these in its own value type, which need not be the type the
+   * product over components is formed in, so they are kept separate from that product.
+   */
+  SPOSet::OffloadValueVector ratios_device_local;
+  SPOSet::OffloadValueVector grads_device_local;
   /// multi walker of spingrads
   std::vector<Value> spingrad_new_local;
   /// mw spin gradients of orbitals, matrix is [nw][norb]
@@ -358,6 +365,66 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGrad(const RefVectorWithLead
     ratios[iw] = det.curRatio = ratios_local[iw];
     grad_new[iw] += grad_new_local[iw];
   }
+}
+
+template<PlatformKind PL, typename VT, typename FPVT>
+void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
+    const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+    const RefVectorWithLeader<ParticleSet>& p_list,
+    int iat,
+    std::vector<PsiValue>& ratios,
+    std::vector<Grad>& grad_new,
+    Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader     = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  auto& mw_res         = wfc_leader.mw_res_handle_.getResource();
+  auto& phi_vgl_v      = mw_res.phi_vgl_v;
+  auto& ratios_local   = mw_res.ratios_local;
+  auto& grad_new_local = mw_res.grad_new_local;
+  const int nw         = wfc_list.size();
+  {
+    ScopedTimer local_timer(SPOVGLTimer);
+    RefVectorWithLeader<SPOSet> phi_list(phi_);
+    phi_list.reserve(nw);
+    RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
+    engine_list.reserve(nw);
+    const int WorkingIndex = iat - FirstIndex;
+    for (int iw = 0; iw < nw; iw++)
+    {
+      auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+      phi_list.push_back(det.phi_);
+      engine_list.push_back(det.det_engine_);
+    }
+
+    auto psiMinv_row_dev_ptr_list = UpdateEngine::mw_getInvRow(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs,
+                                                               WorkingIndex, !phi_.isOMPoffload());
+
+    phi_vgl_v.resize(SPOSet::DIM_VGL, nw, NumOrbitals);
+    ratios_local.resize(nw);
+    grad_new_local.resize(nw);
+
+    wfc_leader.phi_.mw_evaluateVGLandDetRatioGradsDevice(phi_list, p_list, iat, psiMinv_row_dev_ptr_list, phi_vgl_v,
+                                                         ratios_local, grad_new_local, mw_res.ratios_device_local,
+                                                         mw_res.grads_device_local);
+  }
+
+  wfc_leader.UpdateMode = ORB_PBYP_PARTIAL;
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& det      = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+    det.UpdateMode = ORB_PBYP_PARTIAL;
+    ratios[iw] = det.curRatio = ratios_local[iw];
+    grad_new[iw] += grad_new_local[iw];
+  }
+
+  // the orbital set writes its own value type, which need not be the type the product
+  // over components is formed in, so the widening happens where the values already are
+  const auto* src_ptr = mw_res.ratios_device_local.device_data();
+  auto* dst_ptr       = ratios_device_prod.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    dst_ptr[iw] *= static_cast<PsiValue>(src_ptr[iw]);
 }
 
 template<PlatformKind PL, typename VT, typename FPVT>

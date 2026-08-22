@@ -396,6 +396,22 @@ public:
                                std::vector<PsiValue>& ratios,
                                TWFGrads<CT>& grads);
 
+  /** as mw_calcRatioGrad, and also forms the product of the component ratios on the device
+   *
+   * @param ratios_device_prod one product per walker, in device memory
+   *
+   * The product is seeded with one and each component multiplies its own factor in where
+   * that factor already is, so an acceptance test can read the value without the host
+   * having finished the product first. The host result is still produced, so a caller can
+   * compare the two.
+   */
+  static void mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     int iat,
+                                     std::vector<PsiValue>& ratios,
+                                     std::vector<GradType>& grad_new,
+                                     Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod);
+
   /** Prepare internal data for updating WFC correspond to a particle group
    *  Particle groups usually correspond to determinants of different spins.
    *  This call can be used to handle precomputation for PbyP moves.

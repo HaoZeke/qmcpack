@@ -161,6 +161,16 @@ public:
                     std::vector<PsiValue>& ratios,
                     std::vector<Grad>& grad_new) const override;
 
+  /** the orbital set reduces the ratio on the device, so it is taken from there rather
+   *  than sent back down after the host has read it
+   */
+  void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                          const RefVectorWithLeader<ParticleSet>& p_list,
+                          int iat,
+                          std::vector<PsiValue>& ratios,
+                          std::vector<Grad>& grad_new,
+                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const override;
+
   void mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
                             int iat,

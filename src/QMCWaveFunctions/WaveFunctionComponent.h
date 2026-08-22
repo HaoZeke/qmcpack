@@ -104,6 +104,13 @@ protected:
    */
   LogValue log_value_;
 
+  /** staging for the default device ratio path
+   *
+   * A component without a device path has to send its factor down, and the buffer is kept
+   * here so that is not an allocation per particle per move.
+   */
+  mutable Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> host_ratio_staging_;
+
 public:
   const LogValue& get_log_value() const { return log_value_; }
 
@@ -303,21 +310,24 @@ public:
                             std::vector<PsiValue>& ratios,
                             std::vector<GradType>& grad_new) const;
 
-  /** as mw_ratioGrad, and also leaves this component's ratio in device memory
+  /** as mw_ratioGrad, and also multiplies this component's ratio into a device accumulator
    *
-   * @param ratios_device one ratio per walker, where a device kernel can read it
+   * @param ratios_device_prod one running product per walker, in device memory
    *
-   * A component whose ratio already exists on the device can hand it over without a
-   * transfer, which is what lets the product over components and the acceptance test be
-   * formed there. The default form computes on the host and sends the result down, so a
-   * component with no device path stays correct and merely gains nothing.
+   * The caller seeds the accumulator with one and hands it to each component in turn, so
+   * the product the acceptance test needs is built where the values already are. Folding
+   * the multiply into the component's own kernel is what keeps this free: a component
+   * that assigned instead would cost the caller a kernel per component per move.
+   *
+   * The default form computes on the host and folds the result in, so a component with no
+   * device path stays correct and merely costs one small transfer.
    */
   virtual void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                   const RefVectorWithLeader<ParticleSet>& p_list,
                                   int iat,
                                   std::vector<PsiValue>& ratios,
                                   std::vector<GradType>& grad_new,
-                                  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const;
+                                  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const;
 
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet

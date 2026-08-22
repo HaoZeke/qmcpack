@@ -579,11 +579,11 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
                                            int iat,
                                            std::vector<PsiValue>& ratios,
                                            std::vector<GradType>& grad_new,
-                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const
+                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
 {
   if (!use_offload_)
   {
-    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device);
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod);
     return;
   }
 
@@ -601,12 +601,11 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
   const size_t vstr  = mw_res.mw_vgl.cols();
   const auto* uat_ptr = mw_res.mw_allUat.device_data();
   const auto* vgl_ptr = mw_res.mw_vgl.device_data();
-  ratios_device.resize(nw);
-  auto* rd_ptr = ratios_device.device_data();
+  auto* rd_ptr = ratios_device_prod.device_data();
 
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, vgl_ptr, rd_ptr)")
   for (int iw = 0; iw < nw; iw++)
-    rd_ptr[iw] = static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
+    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
 }
 
 template<typename FT>

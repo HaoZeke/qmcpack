@@ -161,6 +161,10 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   Vector<RealType, OffloadPinnedAllocator<RealType>> accept_rands(num_walkers * num_particles);
   Vector<char, OffloadPinnedAllocator<char>> dev_valid, dev_accepted;
   size_t device_accept_mismatches = 0;
+  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratio_prod;
+  std::vector<PsiValue> dev_ratios;
+  std::vector<TrialWaveFunction::GradType> dev_grads;
+  size_t device_ratio_mismatches = 0;
   for (size_t i = 0; i < accept_rands.size(); i++)
     accept_rands[i] = step_context.get_random_gen()();
   accept_rands.updateTo();
@@ -238,6 +242,27 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         ps_dispatcher.flex_makeMove(walker_elecs, iat, drifts, are_valid);
 
         twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
+
+        /* Cross-check the device product against the host one before anything relies on
+         * it. The device form recomputes the same component ratios and multiplies them
+         * where they already are, so a disagreement is a bug in that path rather than
+         * something to average away. Spinor coordinates carry a second gradient the
+         * device form does not produce, so they are left out.
+         */
+        if constexpr (CT == CoordsType::POS)
+          if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
+          {
+            TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, dev_ratios, dev_grads,
+                                                      device_ratio_prod);
+            device_ratio_prod.updateFrom();
+            for (int iw = 0; iw < num_walkers; iw++)
+            {
+              const RealType mag  = std::abs(ratios[iw]);
+              const RealType diff = std::abs(device_ratio_prod[iw] - ratios[iw]);
+              if (diff > RealType(1e-9) * std::max(mag, RealType(1)))
+                device_ratio_mismatches++;
+            }
+          }
 
         computeLogGreensFunction(deltas, taus, log_gf);
 
@@ -317,6 +342,10 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
   if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_ACCEPT"); d && *d == '1')
     std::cerr << "DEVACCEPT mismatches=" << device_accept_mismatches << " over " << num_particles << " electrons and "
+              << num_walkers << " walkers" << std::endl;
+
+  if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
+    std::cerr << "DEVRATIO mismatches=" << device_ratio_mismatches << " over " << num_particles << " electrons and "
               << num_walkers << " walkers" << std::endl;
 
   { // collect GL for KE.

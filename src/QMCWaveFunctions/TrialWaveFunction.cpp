@@ -740,6 +740,45 @@ void TrialWaveFunction::mw_calcRatioGrad(const RefVectorWithLeader<TrialWaveFunc
   }
 }
 
+void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                               const RefVectorWithLeader<ParticleSet>& p_list,
+                                               int iat,
+                                               std::vector<PsiValue>& ratios,
+                                               std::vector<GradType>& grad_new,
+                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod)
+{
+  const int num_wf = wf_list.size();
+  ratios.resize(num_wf);
+  std::fill(ratios.begin(), ratios.end(), PsiValue(1));
+  grad_new.resize(num_wf);
+  std::fill(grad_new.begin(), grad_new.end(), GradType(0));
+
+  auto& wf_leader = wf_list.getLeader();
+  ScopedTimer local_timer(wf_leader.TWF_timers_[VGL_TIMER]);
+  auto& wavefunction_components = wf_leader.Z;
+  const int num_wfc             = wavefunction_components.size();
+
+  // the components multiply into this, so it starts at one rather than being assigned by
+  // the first of them; that is what lets a component fold the multiply into its own kernel
+  ratios_device_prod.resize(num_wf);
+  {
+    auto* seed_ptr = ratios_device_prod.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(seed_ptr)")
+    for (int iw = 0; iw < num_wf; iw++)
+      seed_ptr[iw] = PsiValue(1);
+  }
+
+  std::vector<PsiValue> ratios_z(num_wf);
+  for (int i = 0; i < num_wfc; ++i)
+  {
+    ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER + TIMER_SKIP * i]);
+    const auto wfc_list(extractWFCRefList(wf_list, i));
+    wavefunction_components[i]->mw_ratioGradDevice(wfc_list, p_list, iat, ratios_z, grad_new, ratios_device_prod);
+    for (int iw = 0; iw < num_wf; iw++)
+      ratios[iw] *= ratios_z[iw];
+  }
+}
+
 void TrialWaveFunction::printGL(ParticleSet::ParticleGradient& G, ParticleSet::ParticleLaplacian& L, std::string tag)
 {
   std::ostringstream o;
