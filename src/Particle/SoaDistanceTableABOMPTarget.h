@@ -141,17 +141,18 @@ public:
   {
     auto& dt_leader          = dt_list.getCastedLeader<SoaDistanceTableABOMPTarget>();
     dt_leader.mw_mem_handle_ = collection.lendResource<DTABMultiWalkerMem>();
-    dt_leader.num_targets_   = 0;
   }
 
   void releaseResource(ResourceCollection& collection, const RefVectorWithLeader<DistanceTable>& dt_list) const override
   {
-    auto& dt_leader        = dt_list.getCastedLeader<SoaDistanceTableABOMPTarget>();
-    dt_leader.num_targets_ = 0;
+    /* num_targets_ is what targets() reports, so it is not scratch to invalidate here.
+     * associateResource assigns it from the coordinates on every multi-walker
+     * evaluation, which is where the count is established. Zeroing it on acquire and
+     * release only made the table report no targets to anything asking between a
+     * release and the next batched section, which a single-walker consumer does.
+     */
+    auto& dt_leader = dt_list.getCastedLeader<SoaDistanceTableABOMPTarget>();
     collection.takebackResource(dt_leader.mw_mem_handle_);
-
-    for (size_t iw = 0; iw < dt_list.size(); iw++)
-      dt_list.getCastedElement<SoaDistanceTableABOMPTarget>(iw).num_targets_ = 0;
   }
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
