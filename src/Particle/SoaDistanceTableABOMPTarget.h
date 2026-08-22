@@ -171,6 +171,10 @@ public:
   const RealType* getMultiWalkerTempDataPtr() const override
   { return mw_mem_handle_.getResource().mw_new_old_dist_displ.data(); }
 
+  void requireTempDataOnDevice() const override { temp_data_on_device_ = true; }
+
+  bool hasTempDataOnDevice() const override { return temp_data_on_device_; }
+
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
   /** evaluate the full table */
@@ -430,6 +434,8 @@ public:
     const int num_sources_local = num_sources_;
     const int nw_local          = nw;
 
+    // nothing on the device reads these unless a consumer has asked for them
+    if (temp_data_on_device_)
     {
       ScopedTimer offload(offload_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2)                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
@@ -498,6 +504,12 @@ private:
 
   /// timer for offload portion
   NewTimer& offload_timer_;
+  /** a device side consumer reads the temporary distances of a batch
+   *
+   * Set by the consumer rather than by configuration, so a run whose components all read
+   * the distances on the host leaves the device out of a move entirely.
+   */
+  mutable bool temp_data_on_device_ = false;
   /// timer for evaluate()
   NewTimer& evaluate_timer_;
 };
