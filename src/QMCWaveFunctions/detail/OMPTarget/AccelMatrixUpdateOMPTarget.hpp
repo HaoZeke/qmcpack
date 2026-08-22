@@ -13,7 +13,9 @@
 #ifndef QMCPLUSPLUS_COMPUTE_MATRIX_UPDATE_OMPTARGET_H
 #define QMCPLUSPLUS_COMPUTE_MATRIX_UPDATE_OMPTARGET_H
 
+#include <algorithm>
 #include <QueueAliases.hpp>
+#include "type_traits/template_types.hpp"
 
 namespace qmcplusplus
 {
@@ -188,6 +190,56 @@ void applyW_batched(Queue<PlatformKind::OMPTARGET>& queue,
   }
 }
 
+
+/** copy the same span of every walker's container to the host in one transfer
+ *
+ * @param items    one dual space container per walker
+ * @param n        elements to copy from each
+ * @param offset   where the span starts in each
+ * @param ptrs     crowd scratch, device addresses of the spans
+ * @param staging  crowd scratch, the spans packed back to back
+ *
+ * An update carries the cost of a round trip rather than the cost of its bytes, so a
+ * span of a few hundred bytes per walker costs the crowd one round trip each. Packing
+ * the spans on the device leaves one transfer to carry all of them.
+ */
+template<class CONTAINER, class PTRVEC, class STAGEVEC>
+void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
+                    const RefVector<CONTAINER>& items,
+                    const size_t n,
+                    const size_t offset,
+                    PTRVEC& ptrs,
+                    STAGEVEC& staging)
+{
+  const int batch_count = items.size();
+  if (batch_count == 0 || n == 0)
+    return;
+
+  ptrs.resize(batch_count);
+  staging.resize(n * batch_count);
+  for (int iw = 0; iw < batch_count; iw++)
+    ptrs[iw] = items[iw].get().device_data() + offset;
+  ptrs.updateTo();
+
+  auto* src_list = ptrs.device_data();
+  auto* packed   = staging.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute is_device_ptr(src_list, packed)")
+  for (int iw = 0; iw < batch_count; iw++)
+  {
+    const auto* __restrict__ src = src_list[iw];
+    auto* __restrict__ dest      = packed + static_cast<size_t>(iw) * n;
+
+    PRAGMA_OFFLOAD("omp parallel for")
+    for (size_t i = 0; i < n; i++)
+      dest[i] = src[i];
+  }
+
+  queue.enqueueD2H(staging);
+  queue.sync();
+
+  for (int iw = 0; iw < batch_count; iw++)
+    std::copy_n(staging.data() + static_cast<size_t>(iw) * n, n, items[iw].get().data() + offset);
+}
 
 } // namespace compute
 } // namespace qmcplusplus

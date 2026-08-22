@@ -564,7 +564,7 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_completeUpdates(
     // this call also completes all the device copying of dpsiM, d2psiM before the target update
     UpdateEngine::mw_transferAinv_D2H(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs);
 
-    if (UpdateMode == ORB_PBYP_PARTIAL)
+    if (UpdateMode == ORB_PBYP_PARTIAL && nw > 0)
     {
       RefVector<DualVGLVector> psiM_vgl_list;
       psiM_vgl_list.reserve(nw);
@@ -575,13 +575,13 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_completeUpdates(
       }
 
       auto& queue = mw_res.engine_rsc.queue;
-      for (DualVGLVector& psiM_vgl : psiM_vgl_list)
-      {
-        const size_t stride = psiM_vgl.capacity();
-        // transfer device to host, total size 4, g(3) + l(1), skipping v
-        queue.enqueueD2H(psiM_vgl, stride * 4, stride);
-      }
-      queue.sync();
+      // every walker's psiM_vgl carries the same orbital count, so one span serves the crowd
+      const size_t stride = psiM_vgl_list[0].get().capacity();
+      for (const DualVGLVector& psiM_vgl : psiM_vgl_list)
+        assert(psiM_vgl.capacity() == stride);
+      // transfer device to host, total size 4, g(3) + l(1), skipping v
+      compute::copyEachToHost(queue, psiM_vgl_list, stride * 4, stride, mw_res.engine_rsc.gather_ptrs,
+                              mw_res.engine_rsc.gather_staging);
     }
   }
 }

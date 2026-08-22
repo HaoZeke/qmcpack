@@ -14,6 +14,7 @@
 #define QMCPLUSPLUS_COMPUTE_MATRIX_UPDATE_SYCL_H
 
 #include <QueueAliases.hpp>
+#include "type_traits/template_types.hpp"
 #include "matrix_update_helper.hpp"
 #include "sycl_determinant_helper.hpp"
 
@@ -132,6 +133,25 @@ void applyW_stageV(Queue<PlatformKind::SYCL>& queue,
   {
     throw std::runtime_error(std::string("SYCL::applyW_stageV exception: ") + e.what());
   }
+}
+
+/** copy the same span of every walker's container to the host
+ *
+ * The queue carries the copies on its stream and sync waits for the stream, so handing
+ * each container over in turn already leaves them in flight together. The scratch
+ * arguments are what the OpenMP form needs to pack the spans and go unused here.
+ */
+template<class CONTAINER, class PTRVEC, class STAGEVEC>
+void copyEachToHost(Queue<PlatformKind::SYCL>& queue,
+                    const RefVector<CONTAINER>& items,
+                    const size_t n,
+                    const size_t offset,
+                    PTRVEC&,
+                    STAGEVEC&)
+{
+  for (CONTAINER& item : items)
+    queue.enqueueD2H(item, n, offset);
+  queue.sync();
 }
 
 } // namespace compute
