@@ -276,7 +276,13 @@ public:
    *@param iat the index of the moved electron
    *@param refPtcl if given, the id of the reference particle in virtual moves
    */
-  void evaluateDetsForPtclMove(const ParticleSet& P, int iat, int refPtcl = -1);
+  /** @param psiV_precomputed if given, the orbital values for this position, already
+   *         evaluated by the caller, so the orbital set is not entered here
+   */
+  void evaluateDetsForPtclMove(const ParticleSet& P,
+                               int iat,
+                               int refPtcl                       = -1,
+                               const ValueType* psiV_precomputed = nullptr);
   /// multi walker version of evaluateDetsForPtclMove
   void static mw_evaluateDetsForPtclMove(const RefVectorWithLeader<MultiDiracDeterminant>& det_list,
                                          const RefVectorWithLeader<ParticleSet>& P_list,

@@ -620,6 +620,26 @@ void LCAOrbitalSet::mw_evaluateValue(const RefVectorWithLeader<SPOSet>& spo_list
     std::copy_n(phi_v.data_at(iw, 0), output_size, psi_v_list[iw].get().data());
 }
 
+void LCAOrbitalSet::mw_evaluateValueVPs(const RefVectorWithLeader<SPOSet>& spo_list,
+                                       const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                       OffloadMWVArray& phi_vps) const
+{
+  assert(this == &spo_list.getLeader());
+  if (!useOMPoffload_)
+  {
+    SPOSet::mw_evaluateValueVPs(spo_list, vp_list, phi_vps);
+    return;
+  }
+
+  size_t nVPs = 0;
+  for (size_t iw = 0; iw < vp_list.size(); iw++)
+    nVPs += vp_list[iw].getTotalNum();
+  phi_vps.resize(nVPs, OrbitalSetSize);
+  mw_evaluateValueVPsImplGEMM(spo_list, vp_list, phi_vps);
+  // the caller's arithmetic is on the host
+  phi_vps.updateFrom();
+}
+
 void LCAOrbitalSet::mw_evaluateValueImplGEMM(const RefVectorWithLeader<SPOSet>& spo_list,
                                              const RefVectorWithLeader<ParticleSet>& P_list,
                                              int iat,

@@ -179,6 +179,17 @@ public:
 
   void evaluateRatios(const VirtualParticleSet& VP, std::vector<ValueType>& ratios) override;
 
+  /** the batch's knots handed to the orbital set in one call
+   *
+   * The base form loops the single walker version, which asks the orbital set for one
+   * position at a time. On a Gaussian basis that per position evaluation is where the run
+   * goes, so the whole batch is handed over at once and only the table arithmetic stays
+   * per knot.
+   */
+  void mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                         std::vector<std::vector<ValueType>>& ratios) const override;
+
   void evaluateSpinorRatios(const VirtualParticleSet& VP,
                             const std::pair<ValueVector, ValueVector>& spinor_multiplier,
                             std::vector<ValueType>& ratios) override;
@@ -350,6 +361,8 @@ private:
 
   struct MultiSlaterDetTableMethodMultiWalkerResource;
   ResourceHandle<MultiSlaterDetTableMethodMultiWalkerResource> mw_res_handle_;
+  /// orbital values at every knot of the batch, [sum of nVP][OrbitalSetSize]
+  mutable SPOSet::OffloadMWVArray phi_vps_;
 
   // helper function for extracting a list of WaveFunctionComponent from a list of TrialWaveFunction
   RefVectorWithLeader<MultiDiracDeterminant> extract_DetRef_list(
