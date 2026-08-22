@@ -1146,6 +1146,13 @@ void TrialWaveFunction::evaluateDerivRatios(const VirtualParticleSet& VP,
                                             std::vector<ValueType>& ratios,
                                             Matrix<ValueType>& dratio)
 {
+  /* The derivative path is single-walker throughout and reads VP.refPtcl once per set,
+   * so it cannot express a set naming an electron per quadrature point.
+   */
+  if (VP.isMultiRef())
+    throw std::runtime_error("TrialWaveFunction::evaluateDerivRatios takes one reference electron per virtual "
+                             "particle set. It was handed a set spanning several.");
+
   std::fill(ratios.begin(), ratios.end(), 1.0);
   std::fill(dratio.begin(), dratio.end(), 0.0);
   std::vector<ValueType> t(ratios.size());
