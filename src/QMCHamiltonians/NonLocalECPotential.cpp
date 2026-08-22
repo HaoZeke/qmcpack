@@ -797,20 +797,6 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
 
       const size_t njobs = ecp_component_list.size();
       pairpots.resize(njobs);
-      if (const char* c = std::getenv("QMCPACK_NLPP_COLLAPSE_SIZES"); c && *c == '1')
-      {
-        std::lock_guard<std::mutex> lock(collapse_report_mutex);
-        std::cerr << "SIZES ig=" << ig << " njobs=" << njobs << " joblists=" << joblists.size()
-                  << " pset=" << pset_list.size() << " psi=" << psi_list.size() << " vp=" << group_vp_list.size()
-                  << " ecp_pot=" << ecp_potential_list.size() << " tmove=" << tmove_xy_all_batch_list.size()
-                  << " slots=" << job_batch_slot.size();
-        for (size_t s = 0; s < group_vp_list.size() && s < 3; s++)
-          std::cerr << " | vp" << s << " n=" << group_vp_list[s].get().getTotalNum()
-                    << " jobs=" << joblists[s].size() << " multi_ref=" << group_vp_list[s].get().isMultiRef()
-                    << " multi_src=" << group_vp_list[s].get().isMultiSource()
-                    << " njobs_field=" << group_vp_list[s].get().getNumJobs();
-        std::cerr << std::endl;
-      }
       if (njobs > 0)
         NonLocalECPComponent::mw_evaluateOneMultiJob(ecp_component_list, pset_list,
                                                      {*O_leader.vp_, std::move(group_vp_list)}, psi_list, joblists,

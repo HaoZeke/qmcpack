@@ -315,13 +315,6 @@ void NonLocalECPComponent::mw_evaluateOneMultiJob(
   }
   else
   {
-    if (const char* c = std::getenv("QMCPACK_NLPP_COUNT_MULTISOURCE"); c && *c == '1')
-    {
-      static std::atomic<size_t> n{0};
-      const size_t seen = ++n;
-      if (seen == 1 || seen % 100 == 0)
-        std::cerr << "MULTISOURCE batches so far=" << seen << std::endl;
-    }
     VirtualParticleSet::mw_makeMovesMultiSource(vp_list, p_list, scratch.walker_deltaV, joblists, true);
   }
 
