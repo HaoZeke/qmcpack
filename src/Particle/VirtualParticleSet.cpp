@@ -147,10 +147,8 @@ void VirtualParticleSet::makeMoves(const ParticleSet& refp,
         "VirtualParticleSet::makeMoves is invoked incorrectly, the flag sphere=true requires iat specified!");
   onSphere      = sphere;
   refPS         = refp;
-  refPtcl       = jel;
-  refSourcePtcl = iat;
-
   resize(deltaV.size());
+  setSingleReference(jel, iat);
   for (size_t ivp = 0; ivp < R.size(); ivp++)
     R[ivp] = refp.R[jel] + deltaV[ivp];
   if (refp.isSpinor())
@@ -173,10 +171,8 @@ void VirtualParticleSet::makeMovesWithSpin(const ParticleSet& refp,
         "VirtualParticleSet::makeMovesWithSpin is invoked incorrectly, the flag sphere=true requires iat specified!");
   onSphere      = sphere;
   refPS         = refp;
-  refPtcl       = jel;
-  refSourcePtcl = iat;
-
   resize(deltaV.size());
+  setSingleReference(jel, iat);
   assert(deltaV.size() == deltaS.size());
   for (size_t ivp = 0; ivp < R.size(); ivp++)
   {
@@ -184,6 +180,17 @@ void VirtualParticleSet::makeMovesWithSpin(const ParticleSet& refp,
     spins[ivp] = refp.spins[jel] + deltaS[ivp];
   }
   update();
+}
+
+void VirtualParticleSet::setSingleReference(int electron_id, int ion_id)
+{
+  refPtcl       = electron_id;
+  refSourcePtcl = ion_id;
+  multi_source_ = false;
+  multi_ref_    = false;
+  job_electron.assign(1, electron_id);
+  job_per_vp.assign(R.size(), 0);
+  source_ptcl_per_vp.assign(R.size(), ion_id);
 }
 
 void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
@@ -289,10 +296,8 @@ void VirtualParticleSet::mw_makeMoves(const RefVectorWithLeader<VirtualParticleS
 
     vp.onSphere      = sphere;
     vp.refPS         = refp_list[iw];
-    vp.refPtcl       = job.electron_id;
-    vp.refSourcePtcl = job.ion_id;
-
     vp.resize(deltaV.size());
+    vp.setSingleReference(job.electron_id, job.ion_id);
     for (size_t k = 0; k < vp.R.size(); k++, ivp++)
     {
       vp.R[k] = refp_list[iw].R[vp.refPtcl] + deltaV[k];
@@ -341,10 +346,8 @@ void VirtualParticleSet::mw_makeMovesWithSpin(const RefVectorWithLeader<VirtualP
 
     vp.onSphere      = sphere;
     vp.refPS         = refp_list[iw];
-    vp.refPtcl       = job.electron_id;
-    vp.refSourcePtcl = job.ion_id;
-
     vp.resize(deltaV.size());
+    vp.setSingleReference(job.electron_id, job.ion_id);
     assert(deltaV.size() == deltaS.size());
     for (size_t k = 0; k < vp.R.size(); k++, ivp++)
     {
