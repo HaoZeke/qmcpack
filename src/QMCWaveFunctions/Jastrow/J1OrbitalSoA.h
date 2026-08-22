@@ -293,6 +293,13 @@ public:
                     int iat,
                     std::vector<PsiValue>& ratios) const override;
 
+  /** batch the recompute a ratio-only accept would otherwise do per walker */
+  void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                            const RefVectorWithLeader<ParticleSet>& p_list,
+                            int iat,
+                            const std::vector<bool>& isAccepted,
+                            bool safe_to_delay = false) const override;
+
   PsiValue ratio(ParticleSet& P, int iat) override
   {
     UpdateMode = ORB_PBYP_RATIO;
