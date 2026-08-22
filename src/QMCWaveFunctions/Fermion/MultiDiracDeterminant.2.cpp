@@ -739,16 +739,40 @@ void MultiDiracDeterminant::mw_evaluateDetsAndGradsForPtclMove(
 
   {
     ScopedTimer local_timer(det_leader.evalOrbVGL_timer);
+
+    /* One call for the batch rather than one per walker. An orbital set with a batched
+     * path evaluates the basis for every walker at once and contracts with one GEMM;
+     * without one the default loops these same single walker calls, so nothing is lost.
+     */
+    std::vector<SPOSet::ValueVector> psi_views, d2psi_views;
+    std::vector<SPOSet::GradVector> dpsi_views;
+    psi_views.reserve(nw);
+    dpsi_views.reserve(nw);
+    d2psi_views.reserve(nw);
+    RefVector<SPOSet::ValueVector> psi_v_list, d2psi_v_list;
+    RefVector<SPOSet::GradVector> dpsi_v_list;
+    psi_v_list.reserve(nw);
+    dpsi_v_list.reserve(nw);
+    d2psi_v_list.reserve(nw);
+
     for (size_t iw = 0; iw < nw; iw++)
     {
-      MultiDiracDeterminant& det = (det_list[iw]);
-      Vector<ValueType> psiV_list_host_view(psiV_list[iw].get().data(), psiV_list[iw].get().size());
-      Vector<GradType> dpsiV_list_host_view(dpsiV_list[iw].get().data(), dpsiV_list[iw].get().size());
-      Vector<ValueType> d2psiV_list_host_view(d2psiV_list[iw].get().data(), d2psiV_list[iw].get().size());
-      det.Phi->evaluateVGL(P_list[iw], iat, psiV_list_host_view, dpsiV_list_host_view, d2psiV_list_host_view);
+      // phi_list is already filled above; only the views are needed here
+      // non owning views onto the dual space storage the rest of this function uses
+      psi_views.emplace_back(psiV_list[iw].get().data(), psiV_list[iw].get().size());
+      dpsi_views.emplace_back(dpsiV_list[iw].get().data(), dpsiV_list[iw].get().size());
+      d2psi_views.emplace_back(d2psiV_list[iw].get().data(), d2psiV_list[iw].get().size());
+      psi_v_list.push_back(psi_views.back());
+      dpsi_v_list.push_back(dpsi_views.back());
+      d2psi_v_list.push_back(d2psi_views.back());
+    }
 
+    det_leader.Phi->mw_evaluateVGL(phi_list, P_list, iat, psi_v_list, dpsi_v_list, d2psi_v_list);
+
+    {
+      ScopedTimer local_timer(det_leader.transferH2D_timer);
+      for (size_t iw = 0; iw < nw; iw++)
       {
-        ScopedTimer local_timer(det_leader.transferH2D_timer);
         psiV_list[iw].get().updateTo();
         dpsiV_list[iw].get().updateTo();
       }
