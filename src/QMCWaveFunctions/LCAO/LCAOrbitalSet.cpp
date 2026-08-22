@@ -709,11 +709,22 @@ void LCAOrbitalSet::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
     invRow_deviceptr_list.resize(nVPs);
     rg_buffer.resize(4, nVPs);
 
-    for (size_t iw = 0, istart = 0; iw < nw; iw++)
+    /* One inverse row per virtual particle already, so a set spanning several electrons
+     * only changes which row each gets. invRow_ptr_list is one row per walker while every
+     * set carries a single electron and one per job once one does not, and job_per_vp says
+     * which job a knot came from.
+     */
+    for (size_t iw = 0, istart = 0, row_off = 0; iw < nw; iw++)
     {
-      const size_t nvp_i = vp_list[iw].getTotalNum();
-      std::fill_n(invRow_deviceptr_list.begin() + istart, nvp_i, invRow_ptr_list[iw]);
+      const VirtualParticleSet& VP = vp_list[iw];
+      const size_t nvp_i           = VP.getTotalNum();
+      if (VP.isMultiRef())
+        for (size_t k = 0; k < nvp_i; k++)
+          invRow_deviceptr_list[istart + k] = invRow_ptr_list[row_off + VP.job_per_vp[k]];
+      else
+        std::fill_n(invRow_deviceptr_list.begin() + istart, nvp_i, invRow_ptr_list[row_off]);
       istart += nvp_i;
+      row_off += VP.isMultiRef() ? VP.getNumJobs() : 1;
     }
     auto* invRow_deviceptr_list_ptr = invRow_deviceptr_list.data();
     auto* vp_phi_v_ptr              = vp_phi_v.data();

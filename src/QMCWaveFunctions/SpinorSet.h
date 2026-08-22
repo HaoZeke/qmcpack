@@ -31,6 +31,13 @@ public:
   std::string getClassName() const override { return "SpinorSet"; }
   bool isOptimizable() const override { return spo_up->isOptimizable() || spo_dn->isOptimizable(); }
   bool isOMPoffload() const override { return spo_up->isOMPoffload() || spo_dn->isOMPoffload(); }
+  /** mw_evaluateDetRatios hands the same invRow_ptr_list to both halves.
+   *
+   * Both must follow the per-job convention for the set to, hence the conjunction where
+   * the other predicates here take a disjunction.
+   */
+  bool supportsMultiRefDetRatios() const override
+  { return spo_up->supportsMultiRefDetRatios() && spo_dn->supportsMultiRefDetRatios(); }
   bool hasIonDerivs() const override { return spo_up->hasIonDerivs() || spo_dn->hasIonDerivs(); }
   bool isRotationSupported() const override { return spo_up->isRotationSupported() && spo_dn->isRotationSupported(); }
 
