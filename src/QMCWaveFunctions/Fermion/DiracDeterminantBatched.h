@@ -134,6 +134,9 @@ public:
                          const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                          std::vector<std::vector<Value>>& ratios) const override;
 
+  /// per-job inverse rows are only honoured where the orbital set indexes them per job
+  bool supportsMultiRefRatios() const override { return phi_.supportsMultiRefDetRatios(); }
+
   void mw_evaluateSpinorRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                const RefVector<std::pair<ValueVector, ValueVector>>& spinor_multiplier_list,

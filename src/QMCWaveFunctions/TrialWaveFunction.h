@@ -520,6 +520,20 @@ public:
 
   std::vector<std::unique_ptr<WaveFunctionComponent>> const& getOrbitals() { return Z; }
 
+  /** whether every component names a reference electron per quadrature point.
+   *
+   * A caller batching several electrons into one virtual particle set has to ask before
+   * building it: a component without a multi-walker ratio path reads one reference
+   * electron for the whole set, so the extra electrons would take the first one's ratio.
+   */
+  bool supportsMultiRefRatios() const
+  {
+    for (const auto& component : Z)
+      if (!component->supportsMultiRefRatios())
+        return false;
+    return true;
+  }
+
   void evaluateRatiosAlltoOne(ParticleSet& P, std::vector<ValueType>& ratios);
 
   void setTwist(const std::vector<RealType>& t) { myTwist = t; }

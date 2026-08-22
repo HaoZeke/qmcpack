@@ -827,23 +827,30 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evaluateRatios(
     {
       auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
       const VirtualParticleSet& vp(vp_list[iw]);
-      /* One inverse row per walker, chosen by the set's single reference electron. A set
-       * whose jobs span several electrons needs one row per job, which this does not yet
-       * supply, and taking the first job's row for all of them is wrong without being
-       * visibly wrong. Refuse it here rather than return quiet nonsense.
-       */
-      if (vp.isMultiRef())
-        throw std::runtime_error("DiracDeterminantBatched::mw_evaluateRatios does not support a virtual "
-                                 "particle set spanning several electrons: it selects one inverse row per "
-                                 "walker from refPtcl, and such a set needs one per job.");
-      const int WorkingIndex = vp.refPtcl - FirstIndex;
       // build lists
       phi_list.push_back(det.phi_);
       psiV_list.push_back(det.psiV_host_view);
-      if (phi_.isOMPoffload())
-        invRow_ptr_list.push_back(det.psiMinv_.device_data() + WorkingIndex * psiMinv_.cols());
-      else
-        invRow_ptr_list.push_back(det.psiMinv_[WorkingIndex]);
+
+      /* One inverse row per walker is right only while a set carries one electron. A set
+       * whose jobs span several, which is what collapsing the NLPP electron loop produces,
+       * needs one row per job; the orbital set then indexes this array by job rather than
+       * by walker. Where the set is single-electron the two agree, one job per walker, and
+       * the array is what it always was.
+       */
+      if (vp.isMultiRef() && !phi_.supportsMultiRefDetRatios())
+        throw std::runtime_error("DiracDeterminantBatched::mw_evaluateRatios was handed a virtual particle set "
+                                 "spanning several electrons, but " + phi_.getClassName() +
+                                 " indexes inverse rows per walker. It would read the wrong row without failing.");
+      const size_t njobs = vp.isMultiRef() ? vp.getNumJobs() : 1;
+      for (size_t j = 0; j < njobs; j++)
+      {
+        const int elec         = vp.isMultiRef() ? vp.job_electron[j] : vp.refPtcl;
+        const int WorkingIndex = elec - FirstIndex;
+        if (phi_.isOMPoffload())
+          invRow_ptr_list.push_back(det.psiMinv_.device_data() + WorkingIndex * psiMinv_.cols());
+        else
+          invRow_ptr_list.push_back(det.psiMinv_[WorkingIndex]);
+      }
     }
   }
 

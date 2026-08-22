@@ -25,6 +25,7 @@
 #include "NonLocalECPComponent.h"
 #include "NonLocalTOperator.h"
 #include "NLPPJob.h"
+#include <mutex>
 
 namespace qmcplusplus
 {
@@ -319,8 +320,34 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   auto pp_component = std::find_if(O_leader.PPset.begin(), O_leader.PPset.end(), [](auto& ptr) { return bool(ptr); });
   assert(pp_component != std::end(O_leader.PPset));
 
-  const char* collapse_env      = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
-  const bool collapse_electron_loop = collapse_env && *collapse_env == '1';
+  /* 1 batches a whole group, spanning electrons and ions. 2 batches one electron at a
+   * time, spanning ions only, so its sets carry a single reference electron and it needs
+   * nothing of the wavefunction beyond what the per-job path already asks for.
+   */
+  const char* collapse_env         = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
+  const bool collapse_requested    = collapse_env && (*collapse_env == '1' || *collapse_env == '2');
+  const bool collapse_per_electron = collapse_env && *collapse_env == '2';
+
+  /* Batching a whole group puts several electrons in one virtual particle set, and a
+   * component reading one reference electron per set would give every quadrature point
+   * the first electron's ratio. Legacy DiracDeterminant is such a component: it has no
+   * multi-walker ratio path, so it serialises to the single-walker call, which is what
+   * `<slaterdeterminant batch="no">` selects. Ask the wavefunction rather than assume,
+   * and keep the per-electron sets where the answer is no.
+   */
+  const bool multi_ref_ok = collapse_per_electron || wf_list.getLeader().supportsMultiRefRatios();
+  const bool collapse_electron_loop = collapse_requested && multi_ref_ok;
+
+  if (collapse_requested && !multi_ref_ok)
+  {
+    static std::once_flag declined;
+    std::call_once(declined, [] {
+      std::cerr << "WARNING QMCPACK_NLPP_COLLAPSE_ELECTRONS asked for one batch per electron "
+                   "group, but a wavefunction component evaluates one reference electron per "
+                   "virtual particle set. Batching one electron at a time instead."
+                << std::endl;
+    });
+  }
 
   RefVector<NonLocalECPotential> ecp_potential_list;
   RefVectorWithLeader<NonLocalECPComponent> ecp_component_list(**pp_component);

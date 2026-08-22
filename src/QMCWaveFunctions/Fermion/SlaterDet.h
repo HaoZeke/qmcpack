@@ -123,6 +123,15 @@ public:
     }
   }
 
+  /// a set spanning several electrons is only safe where every determinant can index per job
+  inline bool supportsMultiRefRatios() const override
+  {
+    for (const auto& det : Dets)
+      if (!det->supportsMultiRefRatios())
+        return false;
+    return true;
+  }
+
   inline void mw_evaluateSpinorRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                       const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                       const RefVector<std::pair<ValueVector, ValueVector>>& spinor_multiplier_list,
