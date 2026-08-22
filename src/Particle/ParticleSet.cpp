@@ -322,10 +322,12 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
        * against a reference of -2.82592127, and the three checks pass again the moment
        * this line names the host table.
        *
-       * Its distances_ and displacements_ are views onto the crowd's shared mw_r_dr, and
-       * mw_evaluate ends with an asynchronous device-to-host update that single-walker
-       * consumers have no way to wait on, so what getDistRow returns depends on when it
-       * is asked. Making the class fit for this path is its own change.
+       * Where the two classes differ is storage: the host table owns a padded array per
+       * target, while the offload one holds views that associateResource re-attaches onto
+       * the crowd's shared mw_r_dr, and its full table is written by a device kernel
+       * rather than by the host routine move() and update() use. Which of those the
+       * failure comes through is not yet established; the reproducer above is. Making the
+       * class fit for this path is its own change.
        */
       DistTables.push_back(createDistanceTableAB(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
