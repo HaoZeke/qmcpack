@@ -648,6 +648,57 @@ void MultiSlaterDetTableMethod::evaluateRatios(const VirtualParticleSet& VP, std
   }
 }
 
+void MultiSlaterDetTableMethod::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                                  const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                                  std::vector<std::vector<ValueType>>& ratios) const
+{
+  if (wfc_list.size() == 0)
+    return;
+
+  auto& wfc_leader = wfc_list.getCastedLeader<MultiSlaterDetTableMethod>();
+  const int det_id = wfc_leader.getDetID(vp_list[0].refPtcl);
+
+  /* One batched call covers one orbital set, so every walker's reference electron has to
+   * sit in the same determinant. A walker's pseudopotential job carries its own electron,
+   * so that does not always hold, and where it does not the base form is the correct one.
+   */
+  for (size_t iw = 1; iw < vp_list.size(); iw++)
+    if (wfc_leader.getDetID(vp_list[iw].refPtcl) != det_id)
+    {
+      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
+      return;
+    }
+
+  ScopedTimer local_timer(wfc_leader.RatioTimer);
+
+  auto& phi_leader = *wfc_leader.Dets[det_id]->getPhi();
+  RefVectorWithLeader<SPOSet> phi_list(phi_leader);
+  phi_list.reserve(wfc_list.size());
+  for (size_t iw = 0; iw < wfc_list.size(); iw++)
+    phi_list.push_back(*wfc_list.getCastedElement<MultiSlaterDetTableMethod>(iw).Dets[det_id]->getPhi());
+
+  auto& phi_vps = wfc_leader.phi_vps_;
+  phi_leader.mw_evaluateValueVPs(phi_list, vp_list, phi_vps);
+
+  // the rows are read straight into psiV, so the widths have to agree
+  assert(phi_vps.size(1) == static_cast<size_t>(wfc_leader.Dets[det_id]->getNumOrbitals()));
+
+  size_t ivp = 0;
+  for (size_t iw = 0; iw < wfc_list.size(); iw++)
+  {
+    auto& wfc      = wfc_list.getCastedElement<MultiSlaterDetTableMethod>(iw);
+    const auto& VP = vp_list[iw];
+    for (size_t k = 0; k < VP.getTotalNum(); ++k, ++ivp)
+    {
+      wfc.Dets[det_id]->evaluateDetsForPtclMove(VP, k, VP.refPtcl, phi_vps.data_at(ivp, 0));
+      const PsiValue psiNew = wfc.computeRatio_NewMultiDet_to_NewRefDet(det_id);
+      ratios[iw][k]         = wfc.Dets[det_id]->getRefDetRatio();
+      if (ratios[iw][k] != ValueType(0))
+        ratios[iw][k] *= psiNew / wfc.psi_ratio_to_ref_det_;
+    }
+  }
+}
+
 void MultiSlaterDetTableMethod::evaluateSpinorRatios(const VirtualParticleSet& VP,
                                                      const std::pair<ValueVector, ValueVector>& spinor_multiplier,
                                                      std::vector<ValueType>& ratios)

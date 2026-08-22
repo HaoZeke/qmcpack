@@ -311,6 +311,19 @@ public:
                                 int iat,
                                 const RefVector<ValueVector>& psi_v_list) const;
 
+  /** values of this orbital set at every position of a batch of virtual particle sets
+   *
+   * @param phi_vps [sum of nVP over the batch][OrbitalSetSize], host data up to date
+   *
+   * A caller needing the values themselves rather than a determinant ratio, which is what
+   * a multi determinant expansion needs to build its table, would otherwise ask one
+   * position at a time. The default form does exactly that, so an orbital set without a
+   * batched path is correct here and merely gains nothing.
+   */
+  virtual void mw_evaluateValueVPs(const RefVectorWithLeader<SPOSetT>& spo_list,
+                                   const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                   OffloadMWVArray& phi_vps) const;
+
   /** evaluate the values, gradients and laplacians of this single-particle orbital sets of multiple walkers
    * @param spo_list the list of SPOSet pointers in a walker batch
    * @param P_list the list of ParticleSet pointers in a walker batch

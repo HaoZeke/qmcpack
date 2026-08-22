@@ -492,15 +492,23 @@ void MultiDiracDeterminant::mw_evaluateDetsForPtclMove(const RefVectorWithLeader
   }
 }
 
-void MultiDiracDeterminant::evaluateDetsForPtclMove(const ParticleSet& P, int iat, int refPtcl)
+void MultiDiracDeterminant::evaluateDetsForPtclMove(const ParticleSet& P,
+                                                    int iat,
+                                                    int refPtcl,
+                                                    const ValueType* psiV_precomputed)
 {
   ScopedTimer local_timer(evaluateDetsForPtclMove_timer);
 
   UpdateMode = ORB_PBYP_RATIO;
   {
     ScopedTimer orb_timer(evalOrbValue_timer);
-    Vector<ValueType> psiV_host_view(psiV.data(), psiV.size());
-    Phi->evaluateValue(P, iat, psiV_host_view);
+    if (psiV_precomputed)
+      std::copy_n(psiV_precomputed, psiV.size(), psiV.data());
+    else
+    {
+      Vector<ValueType> psiV_host_view(psiV.data(), psiV.size());
+      Phi->evaluateValue(P, iat, psiV_host_view);
+    }
   }
   const int WorkingIndex = (refPtcl < 0 ? iat : refPtcl) - FirstIndex;
   assert(WorkingIndex >= 0 && WorkingIndex < LastIndex - FirstIndex);

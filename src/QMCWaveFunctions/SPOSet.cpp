@@ -137,6 +137,28 @@ void SPOSetT<T>::mw_evaluateValue(const RefVectorWithLeader<SPOSetT>& spo_list,
 }
 
 template<typename T>
+void SPOSetT<T>::mw_evaluateValueVPs(const RefVectorWithLeader<SPOSetT>& spo_list,
+                                    const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                    OffloadMWVArray& phi_vps) const
+{
+  assert(this == &spo_list.getLeader());
+  size_t nVPs = 0;
+  for (size_t iw = 0; iw < vp_list.size(); iw++)
+    nVPs += vp_list[iw].getTotalNum();
+  phi_vps.resize(nVPs, OrbitalSetSize);
+
+  ValueVector one_position(OrbitalSetSize);
+  size_t ivp = 0;
+  for (size_t iw = 0; iw < spo_list.size(); iw++)
+    for (size_t k = 0; k < vp_list[iw].getTotalNum(); k++, ivp++)
+    {
+      spo_list[iw].evaluateValue(vp_list[iw], k, one_position);
+      std::copy_n(one_position.data(), OrbitalSetSize, phi_vps.data_at(ivp, 0));
+    }
+  assert(ivp == nVPs);
+}
+
+template<typename T>
 void SPOSetT<T>::mw_evaluateVGLWithSpin(const RefVectorWithLeader<SPOSetT>& spo_list,
                                         const RefVectorWithLeader<ParticleSet>& P_list,
                                         int iat,
