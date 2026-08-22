@@ -85,6 +85,22 @@ public:
    */
   bool multi_ref_ = false;
 
+  /** the electron each job of this set belongs to, one entry per job.
+   *
+   * job_per_vp maps a knot to its job; this maps that job to its electron. A consumer
+   * needing one thing per job, an inverse row being the case in hand, wants both.
+   */
+  std::vector<int> job_electron;
+
+  /** declare that the set carries one reference electron and one source.
+   *
+   * The multi-source and multi-reference descriptions are state of the set, and a set is
+   * reused from one step to the next, so a path that uses neither has to say so. Left
+   * alone, a previous batch's job map stays readable and the orbital sets go on indexing
+   * inverse rows per job for a set that no longer has any. Call after the set is sized.
+   */
+  void setSingleReference(int electron_id, int ion_id);
+
   bool isMultiSource() const { return multi_source_; }
   bool isMultiRef() const { return multi_ref_; }
 
