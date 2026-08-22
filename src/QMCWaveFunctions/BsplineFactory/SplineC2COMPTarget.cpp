@@ -12,6 +12,7 @@
 
 #include <stdexcept>
 #include <cstdlib>
+#include <iostream>
 #include "SplineC2COMPTarget.h"
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
@@ -344,10 +345,14 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
    */
   const int team_width = [] {
     static const int cached = [] {
+      int width = 1024;
       if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
         if (const int v = std::atoi(c); v > 0)
-          return v;
-      return 1024;
+          width = v;
+      // say which width is in force, so a measurement cannot be taken without
+      // evidence that the setting reached the launch
+      std::cerr << "C2CTEAMWIDTH thread_limit=" << width << std::endl;
+      return width;
     }();
     return cached;
   }();
