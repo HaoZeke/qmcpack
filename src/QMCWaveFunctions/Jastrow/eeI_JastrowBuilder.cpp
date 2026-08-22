@@ -15,6 +15,7 @@
 
 
 #include "Particle/DistanceTable.h"
+#include "PlatformSelector.hpp"
 #include "eeI_JastrowBuilder.h"
 #include "QMCWaveFunctions/Jastrow/JeeIOrbitalSoA.h"
 #include "Utilities/ProgressReportEngine.h"
@@ -124,9 +125,16 @@ std::unique_ptr<WaveFunctionComponent> eeI_JastrowBuilder::buildComponent(xmlNod
   if (sourcePtcl)
   {
     std::string ftype("polynomial");
+    std::string useGPU;
     OhmmsAttributeSet tAttrib;
     tAttrib.add(ftype, "function");
+    tAttrib.add(useGPU, "gpu", CPUOMPTargetSelector::candidate_values);
     tAttrib.put(cur);
+
+    // the same default the one- and two-body Jastrows take: follow the coordinates
+    if (useGPU.empty())
+      useGPU = targetPtcl.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD ? "yes" : "no";
+    const bool use_offload = CPUOMPTargetSelector::selectPlatform(useGPU) == PlatformKind::OMPTARGET;
 
     std::string input_name(getXMLAttributeValue(cur, "name"));
     std::string jname = input_name.empty() ? "JeeI_" + ftype : input_name;
@@ -134,7 +142,7 @@ std::unique_ptr<WaveFunctionComponent> eeI_JastrowBuilder::buildComponent(xmlNod
     if (ftype == "polynomial")
     {
       using J3Type = JeeIOrbitalSoA<PolynomialFunctor3D>;
-      auto J3      = std::make_unique<J3Type>(jname, *sourcePtcl, targetPtcl);
+      auto J3      = std::make_unique<J3Type>(jname, *sourcePtcl, targetPtcl, use_offload);
       putkids(kids, *J3);
       return J3;
     }
