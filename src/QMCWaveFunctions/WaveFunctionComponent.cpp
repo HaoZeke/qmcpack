@@ -153,6 +153,24 @@ void WaveFunctionComponent::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionC
     ratios[iw] = wfc_list[iw].ratioGrad(p_list[iw], iat, grad_new[iw]);
 }
 
+void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                               const RefVectorWithLeader<ParticleSet>& p_list,
+                                               int iat,
+                                               std::vector<PsiValue>& ratios,
+                                               std::vector<GradType>& grad_new,
+                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const
+{
+  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+
+  // a component without a device path still owes the caller the same values in the same
+  // place, so the host result goes down rather than the caller having to ask which it got
+  const int nw = wfc_list.size();
+  ratios_device.resize(nw);
+  for (int iw = 0; iw < nw; iw++)
+    ratios_device[iw] = ratios[iw];
+  ratios_device.updateTo();
+}
+
 void WaveFunctionComponent::mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                                  const RefVectorWithLeader<ParticleSet>& p_list,
                                                  int iat,

@@ -574,6 +574,42 @@ void TwoBodyJastrow<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComp
 }
 
 template<typename FT>
+void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                           const RefVectorWithLeader<ParticleSet>& p_list,
+                                           int iat,
+                                           std::vector<PsiValue>& ratios,
+                                           std::vector<GradType>& grad_new,
+                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const
+{
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device);
+    return;
+  }
+
+  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+
+  /* Uat and the value just computed for the proposed position both sit in resident
+   * storage, so the ratio is a difference and an exponential away from being formed on
+   * the device. Taking it there is what lets a caller compare it against the variate
+   * without the value coming to the host first.
+   */
+  auto& wfc_leader   = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  auto& mw_res       = wfc_leader.mw_mem_handle_.getResource();
+  const int nw       = wfc_list.size();
+  const size_t npad  = wfc_leader.N_padded;
+  const size_t vstr  = mw_res.mw_vgl.cols();
+  const auto* uat_ptr = mw_res.mw_allUat.device_data();
+  const auto* vgl_ptr = mw_res.mw_vgl.device_data();
+  ratios_device.resize(nw);
+  auto* rd_ptr = ratios_device.device_data();
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, vgl_ptr, rd_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    rd_ptr[iw] = static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
+}
+
+template<typename FT>
 void TwoBodyJastrow<FT>::acceptMove(ParticleSet& P, int iat, bool safe_to_delay)
 {
   // get the old u, du, d2u
