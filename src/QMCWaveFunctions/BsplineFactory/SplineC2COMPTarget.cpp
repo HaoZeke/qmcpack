@@ -342,9 +342,69 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
 
+  /* One spline block is the common case, and there the interpolation pass and the
+   * assignment-and-reduction pass run over the same (virtual particle, team) grid with the
+   * same chunking. A team's assign_v reads exactly the range that team's evaluate_v_impl_v2
+   * just wrote, index 2i and 2i+1 for orbital i inside [first, last), so there is no
+   * cross-team dependency to keep the two apart. Running them as one kernel saves a launch
+   * and a repeat of the position buffer per call, and lets the assignment read the
+   * interpolated values while they are still in cache instead of after a second traversal
+   * of an array sized spline_padded_size by mw_nVP.
+   *
+   * Consecutive omp parallel for regions inside one team iteration carry an implicit
+   * barrier, so the write is complete before the read.
+   */
+  const bool single_block = num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size &&
+      block_offsets[0] == 0;
+
   {
     ScopedTimer offload(offload_timer_);
 
+    if (single_block)
+    {
+      const auto* spline_ptr = &SplineInst->getBlock(0);
+
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
+                  map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
+      for (int iat = 0; iat < mw_nVP; iat++)
+        for (int team_id = 0; team_id < NumTeams; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+
+          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+          auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
+          auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
+          auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
+          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+
+          int ix, iy, iz;
+          ST a[4], b[4], c[4];
+          spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
+                                                pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
+
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = 0; index < last - first; index++)
+            spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
+                                               offload_scratch_iat_ptr + first + index);
+
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, orb_size);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2C::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
+                          offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, index);
+
+          ComplexT sum(0);
+          PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
+          for (int i = first_cplx; i < last_cplx; i++)
+            sum += psi_iat_ptr[i] * psiinv_ptr[i];
+          ratios_private_ptr[iat * NumTeams + team_id] = sum;
+        }
+    }
+    else
+    {
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
       const auto* spline_ptr     = &SplineInst->getBlock(ib);
@@ -405,6 +465,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
           sum += psi_iat_ptr[i] * psiinv_ptr[i];
         ratios_private_ptr[iat * NumTeams + team_id] = sum;
       }
+    }
   }
 
   // do the reduction manually
