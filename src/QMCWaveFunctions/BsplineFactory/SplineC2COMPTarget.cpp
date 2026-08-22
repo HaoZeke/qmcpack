@@ -354,7 +354,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOS
     int width         = 32;
     while (width < static_cast<int>(work) && width < 1024)
       width *= 2;
-    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+    if (const char* c = std::getenv("QMCPACK_SPLINE_TEAM_WIDTH"))
       if (const int v = std::atoi(c); v > 0)
         width = v;
     return width;
@@ -709,7 +709,7 @@ void SplineC2COMPTarget<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedA
     int width         = 32;
     while (width < static_cast<int>(work) && width < 1024)
       width *= 2;
-    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+    if (const char* c = std::getenv("QMCPACK_SPLINE_TEAM_WIDTH"))
       if (const int v = std::atoi(c); v > 0)
         width = v;
     return width;
@@ -968,7 +968,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
     int width         = 32;
     while (width < static_cast<int>(work) && width < 1024)
       width *= 2;
-    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+    if (const char* c = std::getenv("QMCPACK_SPLINE_TEAM_WIDTH"))
       if (const int v = std::atoi(c); v > 0)
         width = v;
     return width;

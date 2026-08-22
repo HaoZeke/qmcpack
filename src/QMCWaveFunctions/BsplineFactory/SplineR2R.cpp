@@ -283,7 +283,7 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
     int width         = 32;
     while (width < static_cast<int>(work) && width < 1024)
       width *= 2;
-    if (const char* c = std::getenv("QMCPACK_C2C_TEAM_WIDTH"))
+    if (const char* c = std::getenv("QMCPACK_SPLINE_TEAM_WIDTH"))
       if (const int v = std::atoi(c); v > 0)
         width = v;
     return width;
