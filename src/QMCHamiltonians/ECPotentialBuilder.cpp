@@ -57,6 +57,7 @@ bool ECPotentialBuilder::put(xmlNodePtr cur)
   }
   std::string ecpFormat;
   std::string NLPP_algo;
+  std::string batch_electrons;
   std::string use_DLA;
   std::string pbc;
   std::string forces;
@@ -66,6 +67,7 @@ bool ECPotentialBuilder::put(xmlNodePtr cur)
   OhmmsAttributeSet pAttrib;
   pAttrib.add(ecpFormat, "format", {"table", "xml"});
   pAttrib.add(NLPP_algo, "algorithm", {"batched", "non-batched"});
+  pAttrib.add(batch_electrons, "batch_electrons", {"no", "yes"});
   pAttrib.add(use_DLA, "DLA", {"no", "yes"});
   pAttrib.add(pbc, "pbc", {"yes", "no"});
   pAttrib.add(forces, "forces", {"no", "yes"});
@@ -115,7 +117,8 @@ bool ECPotentialBuilder::put(xmlNodePtr cur)
   if (hasNonLocalPot)
   {
     std::unique_ptr<NonLocalECPotential> apot =
-        std::make_unique<NonLocalECPotential>(IonConfig, targetPtcl, use_DLA == "yes", NLPP_algo == "batched");
+        std::make_unique<NonLocalECPotential>(IonConfig, targetPtcl, use_DLA == "yes",
+                                              NLPP_algo == "batched", batch_electrons == "yes");
 
     int nknot_max = 0;
     // These are actually NonLocalECPComponents

@@ -81,11 +81,16 @@ struct NonLocalECPotential::NonLocalECPotentialMultiWalkerResource : public Reso
  *\param els the positions of the electrons
  *\param psi trial wavefunction
  */
-NonLocalECPotential::NonLocalECPotential(ParticleSet& ions, ParticleSet& els, bool enable_DLA, bool use_VP)
+NonLocalECPotential::NonLocalECPotential(ParticleSet& ions,
+                                         ParticleSet& els,
+                                         bool enable_DLA,
+                                         bool use_VP,
+                                         bool batch_electron_groups_in)
     : ForceBase(ions, els),
       myRNG(nullptr),
       IonConfig(ions),
       use_DLA(enable_DLA),
+      batch_electron_groups(batch_electron_groups_in),
       vp_(use_VP ? std::make_unique<VirtualParticleSet>(els) : nullptr),
       Peln(els),
       neighbor_lists(els.getTotalNum(), ions.getTotalNum(), PP)
@@ -112,6 +117,7 @@ NonLocalECPotential::NonLocalECPotential(const NonLocalECPotential& nlpp, Partic
       myRNG(nullptr),
       IonConfig(nlpp.IonConfig),
       use_DLA(nlpp.use_DLA),
+      batch_electron_groups(nlpp.batch_electron_groups),
       vp_(nlpp.vp_ ? std::make_unique<VirtualParticleSet>(els, nlpp.vp_->getNumDistTables()) : nullptr),
       Peln(els),
       neighbor_lists(nlpp.neighbor_lists)
@@ -659,9 +665,15 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
    * time, spanning ions only, so its sets carry a single reference electron and it needs
    * nothing of the wavefunction beyond what the per-job path already asks for.
    */
-  const char* collapse_env         = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
-  const bool collapse_requested    = collapse_env && (*collapse_env == '1' || *collapse_env == '2');
+  const char* collapse_env = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
+  /* The deck asks through batch_electrons on the pseudopotential. The environment can
+   * ask as well, which is how one deck is measured both ways without editing it, and is
+   * the only way to reach 2; setting it to 0 declines whatever the deck said.
+   */
   const bool collapse_per_electron = collapse_env && *collapse_env == '2';
+  const bool collapse_requested =
+      !(collapse_env && *collapse_env == '0') &&
+      (O_leader.batch_electron_groups || (collapse_env && (*collapse_env == '1' || *collapse_env == '2')));
 
   /* Batching a whole group puts several electrons in one virtual particle set, and a
    * component reading one reference electron per set would give every quadrature point
