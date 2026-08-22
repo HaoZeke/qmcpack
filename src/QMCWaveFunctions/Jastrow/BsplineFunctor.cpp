@@ -19,6 +19,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include "BsplineFunctor.h"
+#include <cstdlib>
 
 namespace qmcplusplus
 {
@@ -172,7 +173,27 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
-  PRAGMA_OFFLOAD("omp target teams distribute map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
+  /* How wide a team may be, taken from the work it has.
+   *
+   * A team here reduces over n_src sources for one pair, which is the ion count for a
+   * one-body Jastrow and the electron count for a two-body one: two and eight on a
+   * diamond cell. Left to the runtime the team is hundreds of threads wide, so a
+   * multiprocessor hosts a handful of nearly empty teams instead of many full ones.
+   * The floor is one warp because narrower cannot help, and the ceiling is what the
+   * runtime would have chosen, so a system with many sources per team is unaffected.
+   */
+  const int team_width = [n_src] {
+    int width = 32;
+    while (width < n_src && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_JASTROW_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
+
+  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
+                    map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to:ref_at[:num_pairs], mw_dist[:dist_stride*num_pairs]) \
                     map(always, from:mw_vals[:num_pairs])")
