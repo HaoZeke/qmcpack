@@ -127,6 +127,63 @@ void J1OrbitalSoA<FT>::releaseResource(ResourceCollection& collection,
 }
 
 template<typename FT>
+void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                            const RefVectorWithLeader<ParticleSet>& p_list,
+                                            int iat,
+                                            const std::vector<bool>& isAccepted,
+                                            bool safe_to_delay) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const int nw     = wfc_list.size();
+
+  /* After a ratio-only move the single walker accept recomputes the reduction over ions,
+   * because ratio() did not need the gradient and laplacian that the accept stores. That
+   * recompute is per walker on the host, and with a high acceptance it undoes most of
+   * what batching the ratio saved, so it is batched under the same gate.
+   *
+   * A move that came through ratioGrad already has the values and needs no recompute,
+   * which is what the update mode says.
+   */
+  const bool needs_recompute = wfc_leader.UpdateMode == ORB_PBYP_RATIO;
+  if constexpr (HasMwEvaluateVGL<FT>::value)
+  {
+    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= 512)
+    {
+      auto& p_leader        = p_list.getLeader();
+      const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+      auto& mw_mem          = wfc_leader.mw_mem_handle_.getResource();
+      auto& mw_vgl          = mw_mem.mw_vgl;
+      auto& mw_cur_allu     = mw_mem.mw_cur_allu;
+      const size_t n_padded = getAlignedSize<valT>(wfc_leader.Nions);
+      mw_vgl.resize(nw, DIM + 2);
+      mw_cur_allu.resize(n_padded * 3 * nw);
+
+      FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.data(),
+                         n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
+                         mw_mem.mw_ratiograd_buffer);
+
+      for (int iw = 0; iw < nw; iw++)
+      {
+        auto& wfc  = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+        wfc.curAt  = mw_vgl[iw][0];
+        wfc.curLap = -mw_vgl[iw][DIM + 1];
+        for (int idim = 0; idim < DIM; idim++)
+          wfc.curGrad[idim] = mw_vgl[iw][idim + 1];
+        // the values are in hand, so the single walker accept must not redo them
+        wfc.UpdateMode = ORB_PBYP_PARTIAL;
+      }
+    }
+  }
+
+  for (int iw = 0; iw < nw; iw++)
+    if (isAccepted[iw])
+      wfc_list[iw].acceptMove(p_list[iw], iat, safe_to_delay);
+    else
+      wfc_list[iw].restore(iat);
+}
+
+template<typename FT>
 void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                     const RefVectorWithLeader<ParticleSet>& p_list,
                                     int iat,
