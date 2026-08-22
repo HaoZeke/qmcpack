@@ -82,10 +82,18 @@ public:
     Vector<char, OffloadPinnedAllocator<char>> updateInv_buffer_H2D;
     // mw_evalGrad pointer buffer
     Vector<char, OffloadPinnedAllocator<char>> evalGrad_buffer_H2D;
-    /// device addresses of the spans a crowd copies to the host together
+    /// device addresses of the inverse spans a crowd copies to the host together
     DualVector<Value*> gather_ptrs;
     /// those spans packed back to back, so one transfer carries the crowd
     DualVector<Value> gather_staging;
+    /** the same pair for the gradient and laplacian spans
+     *
+     * Each span set keeps its own scratch because the gather recognises an address list
+     * the device already holds. Two sets sharing one buffer describe different spans on
+     * alternate calls, so the list never survives to be recognised.
+     */
+    DualVector<Value*> gather_ptrs_vgl;
+    DualVector<Value> gather_staging_vgl;
     /// scratch space for rank-1 update
     UnpinnedDualVector<Value> mw_temp;
     // scratch space for keeping one row of Ainv

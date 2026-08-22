@@ -235,11 +235,23 @@ void copyEachToHost(Queue<PlatformKind::OMPTARGET>& queue,
     return;
   }
 
+  /* The spans keep their device addresses between calls, so the list already on the
+   * device usually still describes the crowd. Comparing it walks a few pointers on the
+   * host and saves a round trip whenever it holds. A resize leaves the contents
+   * unspecified, so a crowd that changed size always uploads.
+   */
+  const bool same_size = (ptrs.size() == static_cast<size_t>(batch_count));
   ptrs.resize(batch_count);
   staging.resize(n * batch_count);
+  bool addresses_current = same_size;
   for (int iw = 0; iw < batch_count; iw++)
-    ptrs[iw] = items[iw].get().device_data() + offset;
-  ptrs.updateTo();
+  {
+    auto* const span  = items[iw].get().device_data() + offset;
+    addresses_current = addresses_current && (ptrs[iw] == span);
+    ptrs[iw]          = span;
+  }
+  if (!addresses_current)
+    ptrs.updateTo();
 
   auto* src_list = ptrs.device_data();
   auto* packed   = staging.device_data();
