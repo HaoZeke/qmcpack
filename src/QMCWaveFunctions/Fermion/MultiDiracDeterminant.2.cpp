@@ -389,16 +389,24 @@ void MultiDiracDeterminant::mw_evaluateDetsForPtclMove(const RefVectorWithLeader
 
   {
     ScopedTimer local_timer(det_leader.evalOrbValue_timer);
+
+    // one call for the batch; phi_list is already built above
+    std::vector<SPOSet::ValueVector> psi_views;
+    psi_views.reserve(nw);
+    RefVector<SPOSet::ValueVector> psi_v_list;
+    psi_v_list.reserve(nw);
     for (size_t iw = 0; iw < nw; iw++)
     {
-      MultiDiracDeterminant& det = (det_list[iw]);
-      Vector<ValueType> psiV_list_host_view(psiV_list[iw].get().data(), psiV_list[iw].get().size());
-      det.getPhi()->evaluateValue(P_list[iw], iat, psiV_list_host_view);
-      ///Transfer of data from host to Device
-      {
-        ScopedTimer local_timer(det.transferH2D_timer);
+      psi_views.emplace_back(psiV_list[iw].get().data(), psiV_list[iw].get().size());
+      psi_v_list.push_back(psi_views.back());
+    }
+
+    det_leader.Phi->mw_evaluateValue(phi_list, P_list, iat, psi_v_list);
+
+    {
+      ScopedTimer local_timer(det_leader.transferH2D_timer);
+      for (size_t iw = 0; iw < nw; iw++)
         psiV_list[iw].get().updateTo();
-      }
     }
   }
 
