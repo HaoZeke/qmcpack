@@ -385,6 +385,11 @@ Additional information:
    per quadrature point, which excludes wavefunctions carrying a
    non-batched determinant and spinor wavefunctions; where it does not
    apply, the request is reported once and batching stays per electron.
+   It saves kernel launches, so the gain follows how much of a quadrature
+   point's cost sits on the device. Where that cost falls instead on a
+   host-side table update, as in a multi-determinant expansion, no
+   launches merge and the larger set costs more to build and to move, so
+   the setting loses time there. It defaults to off for that reason.
 
 -  **DLA** Determinant localization approximation
    (DLA) :cite:`Zen2019DLA` uses only the fermionic part of
