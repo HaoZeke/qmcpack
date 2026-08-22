@@ -29,6 +29,7 @@
 #include "Particle/MCWalkerConfiguration.h"
 #include "type_traits/template_types.hpp"
 #include "TWFGrads.hpp"
+#include "OMPTarget/OffloadAlignedAllocators.hpp"
 
 /**@file WaveFunctionComponent.h
  *@brief Declaration of WaveFunctionComponent
@@ -301,6 +302,22 @@ public:
                             int iat,
                             std::vector<PsiValue>& ratios,
                             std::vector<GradType>& grad_new) const;
+
+  /** as mw_ratioGrad, and also leaves this component's ratio in device memory
+   *
+   * @param ratios_device one ratio per walker, where a device kernel can read it
+   *
+   * A component whose ratio already exists on the device can hand it over without a
+   * transfer, which is what lets the product over components and the acceptance test be
+   * formed there. The default form computes on the host and sends the result down, so a
+   * component with no device path stays correct and merely gains nothing.
+   */
+  virtual void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                  const RefVectorWithLeader<ParticleSet>& p_list,
+                                  int iat,
+                                  std::vector<PsiValue>& ratios,
+                                  std::vector<GradType>& grad_new,
+                                  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const;
 
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet

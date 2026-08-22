@@ -222,6 +222,16 @@ public:
                     std::vector<PsiValue>& ratios,
                     std::vector<GradType>& grad_new) const override;
 
+  /** the ratio is exp of a difference of two quantities the device already holds, so it
+   *  is formed there rather than sent down after the host has taken the difference
+   */
+  void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                          const RefVectorWithLeader<ParticleSet>& p_list,
+                          int iat,
+                          std::vector<PsiValue>& ratios,
+                          std::vector<GradType>& grad_new,
+                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const override;
+
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override;
   void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
