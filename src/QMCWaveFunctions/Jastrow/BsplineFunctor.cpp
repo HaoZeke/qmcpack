@@ -68,7 +68,22 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
-  PRAGMA_OFFLOAD("omp target teams distribute map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
+  /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
+   * count for a one-body Jastrow and the electron count for a two-body one, so the team
+   * is far wider than the work unless it is told otherwise.
+   */
+  const int team_width = [n_src] {
+    int width = 32;
+    while (width < n_src && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_JASTROW_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
+
+  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
+                    map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(from: mw_cur_allu[:n_padded*3*nw]) \
@@ -283,7 +298,22 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
-  PRAGMA_OFFLOAD("omp target teams distribute map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
+  /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
+   * count for a one-body Jastrow and the electron count for a two-body one, so the team
+   * is far wider than the work unless it is told otherwise.
+   */
+  const int team_width = [n_src] {
+    int width = 32;
+    while (width < n_src && width < 1024)
+      width *= 2;
+    if (const char* c = std::getenv("QMCPACK_JASTROW_TEAM_WIDTH"))
+      if (const int v = std::atoi(c); v > 0)
+        width = v;
+    return width;
+  }();
+
+  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
+                    map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(to: mw_vgl[:(DIM+2)*nw]) \
