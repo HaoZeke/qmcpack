@@ -58,6 +58,9 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
   Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
 
+  /// membership stamps the device copy was built from, one per walker
+  std::vector<size_t> packed_versions;
+
   size_t memb_walker_stride = 0;
   size_t gamma_size         = 0;
   int N_eI = 0, N_ee = 0, C = 0;
@@ -71,7 +74,22 @@ struct JeeIMultiWalkerMem : public Resource
   template<typename WFCPTRS>
   void packMembership(const WFCPTRS& wfcs, int eGroups, int Nion)
   {
-    const size_t nw    = wfcs.size();
+    const size_t nw = wfcs.size();
+    /* elecs_inside changes only when a move is accepted, and a pass over the quadrature
+     * points of one configuration evaluates many ratios without accepting anything, so
+     * most calls would rebuild the copy the device already holds. The stamps the last
+     * pack read identify that copy.
+     */
+    bool packed_current = (packed_versions.size() == nw);
+    for (size_t iw = 0; packed_current && iw < nw; iw++)
+      packed_current = (packed_versions[iw] == wfcs[iw]->getMembershipVersion());
+    if (packed_current)
+      return;
+
+    packed_versions.resize(nw);
+    for (size_t iw = 0; iw < nw; iw++)
+      packed_versions[iw] = wfcs[iw]->getMembershipVersion();
+
     memb_walker_stride = static_cast<size_t>(eGroups) * Nion;
     memb_offsets.resize(nw * memb_walker_stride + 1);
 
@@ -212,6 +230,18 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
 
   /// the cutoff for e-I pairs
   std::vector<valT> Ion_cutoff;
+  /** stamp identifying the contents of elecs_inside
+   *
+   * Drawn from a counter that never repeats, so a stamp identifies one state of one
+   * object and a consumer holding a copy can tell whether the copy still describes it.
+   * A per object counter would let a later object reach a stamp an earlier one had
+   * already handed out.
+   */
+  size_t membership_version_ = 0;
+  static inline std::atomic<size_t> membership_stamp_source_{0};
+  /// record that elecs_inside no longer matches any copy taken of it
+  void touchMembership() { membership_version_ = ++membership_stamp_source_; }
+
   /// the electrons around ions within the cutoff radius, grouped by species
   Array<std::vector<int>, 2> elecs_inside;
   Array<std::vector<valT>, 2> elecs_inside_dist;
@@ -541,6 +571,7 @@ public:
             elecs_inside_dist(jg, iat).push_back(eI_dists[jel][iat]);
             elecs_inside_displ(jg, iat).push_back(eI_displs[jel][iat]);
           }
+    touchMembership();
   }
 
   LogValue evaluateLog(const ParticleSet& P,
@@ -724,6 +755,7 @@ public:
   }
 
   const std::vector<int>& getElecsInside(int kg, int iat) const { return elecs_inside(kg, iat); }
+  size_t getMembershipVersion() const { return membership_version_; }
   const std::vector<valT>& getElecsInsideDist(int kg, int iat) const { return elecs_inside_dist(kg, iat); }
 
   void evaluateRatios(const VirtualParticleSet& VP, std::vector<ValueType>& ratios) override
@@ -818,6 +850,7 @@ public:
 
     const int ig = P.GroupID[iat];
     // update compact list elecs_inside
+    touchMembership();
     // if the old position exists in elecs_inside
     for (int iind = 0; iind < ions_nearby_old.size(); iind++)
     {
