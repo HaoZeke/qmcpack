@@ -44,7 +44,11 @@ class NonLocalECPotential : public OperatorBase, public ForceBase
   struct NonLocalECPotentialMultiWalkerResource;
 
 public:
-  NonLocalECPotential(ParticleSet& ions, ParticleSet& els, bool enable_DLA, bool use_VP);
+  NonLocalECPotential(ParticleSet& ions,
+                      ParticleSet& els,
+                      bool enable_DLA,
+                      bool use_VP,
+                      bool batch_electron_groups = false);
   NonLocalECPotential(const NonLocalECPotential& nlpp, ParticleSet& els);
   ~NonLocalECPotential() override;
 
@@ -180,6 +184,14 @@ protected:
   ParticleSet& IonConfig;
   ///true, determinant localization approximation(DLA) is enabled
   bool use_DLA;
+  /** true, one batch per electron group rather than one per job.
+   *
+   * A group's jobs then share a single virtual particle set, which costs five kernel
+   * launches for the group instead of five per electron. Only wavefunctions whose every
+   * component names a reference electron per quadrature point can be evaluated that way,
+   * so the request is checked against the wavefunction before it is honoured.
+   */
+  bool batch_electron_groups;
 
 private:
   ///virtual particle set

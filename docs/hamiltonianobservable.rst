@@ -324,6 +324,8 @@ attributes:
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``algorithm``:math:`^o`      | text         | batched/non-batched   | batched                | Choose NLPP algorithm                            |
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
+  | ``batch_electrons``:math:`^o`| text         | yes/no                | no                     | One NLPP batch per electron group                |
+  +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``DLA``:math:`^o`            | text         | yes/no                | no                     | Use determinant localization approximation       |
   +------------------------------+--------------+-----------------------+------------------------+--------------------------------------------------+
   | ``physicalSO``:math:`^o`     | boolean      | yes/no                | yes                    | Include the SO contribution in the local energy  |
@@ -365,6 +367,15 @@ Additional information:
    representation has an extra optimization enabled when using the
    batched algorithm. When OpenMP offload build is enabled, the default
    value is ``batched``. Otherwise, ``non-batched`` is the default.
+
+-  **batch_electrons** Evaluate a whole electron group in one batch
+   rather than one batch per electron. A group's quadrature points then
+   share a single ``VirtualParticleSet``, so the group costs the kernel
+   launches of one batch instead of one batch per electron. It applies
+   only where every wavefunction component names a reference electron
+   per quadrature point, which excludes wavefunctions carrying a
+   non-batched determinant and spinor wavefunctions; where it does not
+   apply, the request is reported once and batching stays per electron.
 
 -  **DLA** Determinant localization approximation
    (DLA) :cite:`Zen2019DLA` uses only the fermionic part of
