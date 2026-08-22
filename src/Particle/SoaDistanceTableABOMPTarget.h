@@ -46,6 +46,17 @@ private:
     OffloadPinnedVector<T> mw_r_dr;
     ///accelerator input buffer for multiple data set
     OffloadPinnedVector<char> offload_input;
+    /** temporary distances and displacements of one moved target against every source,
+     *  for a whole batch: [new: nw][old: nw], each [1+D][num_sources padded]
+     *
+     *  A one-body Jastrow reduces over the sources of a single target, which is the same
+     *  shape the two-body one reduces over electrons, and that one is handed the batch at
+     *  once because the electron-electron table keeps this on the device. This is the
+     *  matching storage for the electron-ion table.
+     */
+    OffloadPinnedVector<T> mw_new_old_dist_displ;
+    ///device pointers of the moved target's position per walker
+    OffloadPinnedVector<char> move_input;
 
     DTABMultiWalkerMem() : Resource("DTABMultiWalkerMem") {}
 
@@ -156,6 +167,9 @@ public:
   }
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
+
+  const RealType* getMultiWalkerTempDataPtr() const override
+  { return mw_mem_handle_.getResource().mw_new_old_dist_displ.data(); }
 
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
@@ -360,6 +374,98 @@ public:
     if (!(modes_ & DTModes::NEED_FULL_TABLE_ANYTIME) && prepare_old)
       DTD_BConds<T, D, SC>::computeDistances(P.R[iat], origin_.getCoordinates().getAllParticlePos(),
                                              distances_[iat].data(), displacements_[iat], 0, num_sources_);
+  }
+
+  /** the moved target of every walker against every source, computed on the device
+   *
+   * The base form loops the single walker move, which leaves the result on the host only,
+   * so a component reducing over sources for the batch has nothing on the device to read
+   * and falls back to a walker at a time. The electron-electron table already keeps this;
+   * this is the same for the electron-ion one.
+   *
+   * Host data follows only when DTModes::NEED_TEMP_DATA_ON_HOST is set, as in the
+   * electron-electron table, so a consumer reading getTempDists() keeps working.
+   */
+  void mw_move(const RefVectorWithLeader<DistanceTable>& dt_list,
+               const RefVectorWithLeader<ParticleSet>& p_list,
+               const std::vector<PosType>& rnew_list,
+               const IndexType iat,
+               bool prepare_old = true) const override
+  {
+    assert(this == &dt_list.getLeader());
+    auto& dt_leader             = dt_list.getCastedLeader<SoaDistanceTableABOMPTarget>();
+    auto& mw_mem                = dt_leader.mw_mem_handle_.getResource();
+    auto& mw_new_old_dist_displ = mw_mem.mw_new_old_dist_displ;
+    auto& move_input            = mw_mem.move_input;
+    const size_t nw             = dt_list.size();
+
+    const size_t num_padded  = getAlignedSize<T>(num_sources_);
+    const size_t stride_size = num_padded * (D + 1);
+    mw_new_old_dist_displ.resize(2 * nw * stride_size);
+
+    /* One pointer to the walker's sources and one new position per walker, packed so the
+     * kernel takes a single mapped buffer rather than one clause per array.
+     */
+    const size_t ptr_size      = sizeof(RealType*);
+    const size_t realtype_size = sizeof(RealType);
+    move_input.resize(nw * ptr_size + nw * D * realtype_size * 2);
+    auto source_ptrs = reinterpret_cast<RealType**>(move_input.data());
+    auto new_pos     = reinterpret_cast<RealType*>(move_input.data() + nw * ptr_size);
+    auto old_pos     = new_pos + nw * D;
+
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      auto& dt             = dt_list.getCastedElement<SoaDistanceTableABOMPTarget>(iw);
+      auto& RSoA_OMPTarget = dynamic_cast<const RealSpacePositionsOMPTarget&>(dt.origin_.getCoordinates());
+      source_ptrs[iw]      = const_cast<RealType*>(RSoA_OMPTarget.getDevicePtr());
+      for (size_t idim = 0; idim < D; idim++)
+      {
+        new_pos[iw * D + idim] = rnew_list[iw][idim];
+        old_pos[iw * D + idim] = p_list[iw].R[iat][idim];
+      }
+    }
+
+    auto* r_dr_ptr              = mw_new_old_dist_displ.data();
+    auto* input_ptr             = move_input.data();
+    const int num_sources_local = num_sources_;
+    const int nw_local          = nw;
+
+    {
+      ScopedTimer offload(offload_timer_);
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2)                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
+      for (int iw = 0; iw < nw_local; ++iw)
+        for (int jat = 0; jat < num_sources_local; ++jat)
+        {
+          auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[iw];
+          auto* new_pos_ptr    = reinterpret_cast<RealType*>(input_ptr + nw_local * sizeof(RealType*));
+          auto* old_pos_ptr    = new_pos_ptr + nw_local * D;
+
+          T pos[D];
+          for (int idim = 0; idim < D; idim++)
+            pos[idim] = new_pos_ptr[iw * D + idim];
+          DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_dr_ptr + iw * stride_size,
+                                                        r_dr_ptr + iw * stride_size + num_padded, num_padded, jat);
+
+          if (prepare_old)
+          {
+            for (int idim = 0; idim < D; idim++)
+              pos[idim] = old_pos_ptr[iw * D + idim];
+            DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded,
+                                                          r_dr_ptr + (iw + nw_local) * stride_size,
+                                                          r_dr_ptr + (iw + nw_local) * stride_size + num_padded,
+                                                          num_padded, jat);
+          }
+        }
+    }
+
+    /* Host data comes from computing it on the host rather than from bringing the device
+     * result back. A single target against all sources is cheap there, which is why the
+     * single walker form does it that way, and a copy back would be a blocking transfer
+     * on every move whose cost does not fall as walkers per crowd fall. Consumers reading
+     * getTempDists() keep exactly what they had; the device copy is an addition.
+     */
+    for (size_t iw = 0; iw < nw; iw++)
+      dt_list[iw].move(p_list[iw], rnew_list[iw], iat, prepare_old);
   }
 
   ///update the stripe for jat-th particle
