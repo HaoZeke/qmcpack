@@ -995,7 +995,15 @@ void MultiDiracDeterminant::registerData(ParticleSet& P, WFBufferType& buf)
 }
 
 void MultiDiracDeterminant::createResource(ResourceCollection& collection) const
-{ collection.addResource(std::make_unique<MultiDiracDetMultiWalkerResource>()); }
+{
+  collection.addResource(std::make_unique<MultiDiracDetMultiWalkerResource>());
+  /* The orbital set's own multi walker storage was never created here, so nothing in this
+   * class could ever make a batched call into it and every position was evaluated on its
+   * own. SlaterDet does this for the sposets it holds; here each determinant owns its
+   * orbital set outright, so there is no sharing to account for.
+   */
+  Phi->createResource(collection);
+}
 
 void MultiDiracDeterminant::acquireResource(ResourceCollection& collection,
                                             const RefVectorWithLeader<MultiDiracDeterminant>& wfc_list) const
@@ -1062,6 +1070,14 @@ void MultiDiracDeterminant::acquireResource(ResourceCollection& collection,
   psiM_deviceptr_list.updateTo();
   psiMinv_deviceptr_list.updateTo();
   dpsiM_deviceptr_list.updateTo();
+
+  // after this class's own, matching the order they were created in
+  auto& phi_leader = *wfc_leader.Phi;
+  RefVectorWithLeader<SPOSet> phi_list(phi_leader);
+  phi_list.reserve(nw);
+  for (size_t iw = 0; iw < nw; iw++)
+    phi_list.push_back(*wfc_list.getCastedElement<MultiDiracDeterminant>(iw).Phi);
+  phi_leader.acquireResource(collection, phi_list);
 }
 
 void MultiDiracDeterminant::releaseResource(ResourceCollection& collection,
@@ -1069,6 +1085,13 @@ void MultiDiracDeterminant::releaseResource(ResourceCollection& collection,
 {
   auto& wfc_leader = wfc_list.getCastedLeader<MultiDiracDeterminant>();
   collection.takebackResource(wfc_leader.mw_res_handle_);
+
+  auto& phi_leader = *wfc_leader.Phi;
+  RefVectorWithLeader<SPOSet> phi_list(phi_leader);
+  phi_list.reserve(wfc_list.size());
+  for (size_t iw = 0; iw < wfc_list.size(); iw++)
+    phi_list.push_back(*wfc_list.getCastedElement<MultiDiracDeterminant>(iw).Phi);
+  phi_leader.releaseResource(collection, phi_list);
 }
 
 ///reset the size: with the number of particles and number of orbtials
