@@ -13,6 +13,7 @@
 #ifndef QMCPLUSPLUS_DELAYED_UPDATE_BATCHED_H
 #define QMCPLUSPLUS_DELAYED_UPDATE_BATCHED_H
 
+#include <cassert>
 #include "OhmmsPETE/OhmmsVector.h"
 #include "OhmmsPETE/OhmmsMatrix.h"
 #include "QMCWaveFunctions/Fermion/DiracMatrix.h"
@@ -81,6 +82,10 @@ public:
     Vector<char, OffloadPinnedAllocator<char>> updateInv_buffer_H2D;
     // mw_evalGrad pointer buffer
     Vector<char, OffloadPinnedAllocator<char>> evalGrad_buffer_H2D;
+    /// device addresses of the spans a crowd copies to the host together
+    DualVector<Value*> gather_ptrs;
+    /// those spans packed back to back, so one transfer carries the crowd
+    DualVector<Value> gather_staging;
     /// scratch space for rank-1 update
     UnpinnedDualVector<Value> mw_temp;
     // scratch space for keeping one row of Ainv
@@ -832,9 +837,15 @@ public:
     auto& queue         = mw_rsc.queue;
     engine_leader.guard_no_delay();
 
-    for (DualMatrix<Value>& psiMinv : psiMinv_refs)
-      queue.enqueueD2H(psiMinv);
-    queue.sync();
+    if (psiMinv_refs.empty())
+      return;
+
+    // every walker holds the same determinant, so one span size serves the crowd
+    const size_t inv_size = psiMinv_refs[0].get().size();
+    for (const DualMatrix<Value>& psiMinv : psiMinv_refs)
+      assert(psiMinv.size() == inv_size);
+
+    compute::copyEachToHost(queue, psiMinv_refs, inv_size, 0, mw_rsc.gather_ptrs, mw_rsc.gather_staging);
   }
 };
 } // namespace qmcplusplus

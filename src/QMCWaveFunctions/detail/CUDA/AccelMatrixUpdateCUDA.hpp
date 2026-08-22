@@ -14,6 +14,7 @@
 #define QMCPLUSPLUS_COMPUTE_MATRIX_UPDATE_CUDA_H
 
 #include <QueueAliases.hpp>
+#include "type_traits/template_types.hpp"
 #include "matrix_update_helper.hpp"
 #include "delayed_update_helper.h"
 
@@ -101,6 +102,25 @@ void applyW_stageV(Queue<PlatformKind::CUDA>& queue,
                    T* V_gpu,
                    const T* Ainv)
 { applyW_stageV_cuda(delay_list_gpu, delay_count, temp_gpu, numorbs, ndelay, V_gpu, Ainv, queue.getNative()); }
+
+/** copy the same span of every walker's container to the host
+ *
+ * The queue carries the copies on its stream and sync waits for the stream, so handing
+ * each container over in turn already leaves them in flight together. The scratch
+ * arguments are what the OpenMP form needs to pack the spans and go unused here.
+ */
+template<class CONTAINER, class PTRVEC, class STAGEVEC>
+void copyEachToHost(Queue<PlatformKind::CUDA>& queue,
+                    const RefVector<CONTAINER>& items,
+                    const size_t n,
+                    const size_t offset,
+                    PTRVEC&,
+                    STAGEVEC&)
+{
+  for (CONTAINER& item : items)
+    queue.enqueueD2H(item, n, offset);
+  queue.sync();
+}
 
 } // namespace compute
 } // namespace qmcplusplus
