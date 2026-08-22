@@ -158,17 +158,23 @@ void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFun
                                                int iat,
                                                std::vector<PsiValue>& ratios,
                                                std::vector<GradType>& grad_new,
-                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device) const
+                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const
 {
   mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
 
-  // a component without a device path still owes the caller the same values in the same
-  // place, so the host result goes down rather than the caller having to ask which it got
+  // a component without a device path still owes the caller its factor in the product, so
+  // the host result goes down and is folded in there
   const int nw = wfc_list.size();
-  ratios_device.resize(nw);
+  host_ratio_staging_.resize(nw);
   for (int iw = 0; iw < nw; iw++)
-    ratios_device[iw] = ratios[iw];
-  ratios_device.updateTo();
+    host_ratio_staging_[iw] = ratios[iw];
+  host_ratio_staging_.updateTo();
+
+  const auto* z_ptr = host_ratio_staging_.device_data();
+  auto* prod_ptr    = ratios_device_prod.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(z_ptr, prod_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    prod_ptr[iw] *= z_ptr[iw];
 }
 
 void WaveFunctionComponent::mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
