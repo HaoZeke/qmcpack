@@ -231,4 +231,79 @@ TEST_CASE("VirtualParticleSet multi-ref", "[particle]")
   CHECK(vp.job_per_vp[0] == 0);
   CHECK(vp.job_per_vp[1] == 1);
 }
+
+/** A set is reused between steps, so taking one reference has to retract the job map.
+ *
+ * multi_source_, multi_ref_, job_per_vp and job_electron describe the layout of a set,
+ * and the orbital sets read them to decide whether to index inverse rows per job. A set
+ * that once carried several jobs and then takes a single reference must stop advertising
+ * them, or the next batch indexes through a map belonging to the previous one.
+ */
+TEST_CASE("VirtualParticleSet single reference retracts the job map", "[particle]")
+{
+  auto pset_pool = MinimalParticlePool::make_NiO_a4(OHMMS::Controller);
+
+  auto& ions  = *pset_pool.getParticleSet("i");
+  auto& elecs = *pset_pool.getParticleSet("e");
+
+  elecs.R[0] = {1, 2, 3};
+  elecs.R[1] = {2, 1, 3};
+  elecs.R[2] = {3, 1, 2};
+  elecs.R[3] = {3, 2, 1};
+
+  ions.addTable(ions);
+  ions.update();
+  elecs.addTable(ions);
+  elecs.addTable(elecs);
+  elecs.update();
+
+  VirtualParticleSet vp(elecs);
+  RefVectorWithLeader<VirtualParticleSet> vp_list(vp, {vp});
+  RefVectorWithLeader<ParticleSet> refp_list(elecs, {elecs});
+
+  using PosType  = VirtualParticleSet::PosType;
+  using RealType = VirtualParticleSet::RealType;
+
+  ResourceCollection collection{"NLPPcollection"};
+  vp.createResource(collection);
+  ResourceCollectionTeamLock<VirtualParticleSet> vp_res_lock(collection, vp_list);
+
+  // first a batch spanning two electrons, which sets the whole description
+  std::vector<std::vector<NLPPJob<RealType>>> joblists(1);
+  joblists[0].emplace_back(0, 1, RealType(1.5), PosType(0.1, 0.0, 0.0));
+  joblists[0].emplace_back(2, 3, RealType(2.0), PosType(0.0, 0.2, 0.0));
+  std::vector<std::vector<std::vector<PosType>>> deltaV_lists(1);
+  deltaV_lists[0] = {{{0.1, 0.2, 0.3}, {0.2, 0.3, 0.4}}, {{0.4, 0.5, 0.6}}};
+
+  VirtualParticleSet::mw_makeMovesMultiSource(vp_list, refp_list, deltaV_lists, joblists, true);
+
+  REQUIRE(vp.isMultiRef());
+  REQUIRE(vp.isMultiSource());
+  REQUIRE(vp.getNumJobs() == 2);
+  REQUIRE(vp.getTotalNum() == 3);
+
+  // then a single job on the same set, through the ordinary path
+  const std::vector<PosType> deltaV{{0.7, 0.8, 0.9}};
+  const NLPPJob<RealType> job(1, 2, RealType(1.0), PosType(0.3, 0.0, 0.0));
+  RefVector<const std::vector<PosType>> dv_list{deltaV};
+  RefVector<const NLPPJob<RealType>> jl{job};
+  VirtualParticleSet::mw_makeMoves(vp_list, refp_list, dv_list, jl, true);
+
+  CHECK_FALSE(vp.isMultiRef());
+  CHECK_FALSE(vp.isMultiSource());
+  CHECK(vp.refPtcl == 2);
+  CHECK(vp.refSourcePtcl == 1);
+
+  // one job, naming this set's electron, and every knot mapped to it
+  REQUIRE(vp.getNumJobs() == 1);
+  CHECK(vp.job_electron[0] == 2);
+  REQUIRE(vp.getTotalNum() == 1);
+  REQUIRE(vp.job_per_vp.size() == vp.getTotalNum());
+  CHECK(vp.job_per_vp[0] == 0);
+
+  // the knot sits on the new electron, not on either of the previous batch's
+  CHECK(Approx(vp.R[0][0]) == elecs.R[2][0] + 0.7);
+  CHECK(Approx(vp.R[0][1]) == elecs.R[2][1] + 0.8);
+  CHECK(Approx(vp.R[0][2]) == elecs.R[2][2] + 0.9);
+}
 } // namespace qmcplusplus
