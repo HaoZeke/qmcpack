@@ -283,6 +283,16 @@ public:
     }
   }
 
+  /** the batch's reduction over ions, value only
+   *
+   * The same kernel the pseudopotential ratio uses, over the moved electron's distances
+   * rather than a virtual particle set's, under the same work gate as mw_ratioGrad.
+   */
+  void mw_calcRatio(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                    const RefVectorWithLeader<ParticleSet>& p_list,
+                    int iat,
+                    std::vector<PsiValue>& ratios) const override;
+
   PsiValue ratio(ParticleSet& P, int iat) override
   {
     UpdateMode = ORB_PBYP_RATIO;

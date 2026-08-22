@@ -127,6 +127,48 @@ void J1OrbitalSoA<FT>::releaseResource(ResourceCollection& collection,
 }
 
 template<typename FT>
+void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                    const RefVectorWithLeader<ParticleSet>& p_list,
+                                    int iat,
+                                    std::vector<PsiValue>& ratios) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const int nw     = wfc_list.size();
+
+  /* Same trade as mw_ratioGrad, and the same gate: a launch against the host's reduction
+   * over ions for every walker.
+   */
+  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  {
+    WaveFunctionComponent::mw_calcRatio(wfc_list, p_list, iat, ratios);
+    return;
+  }
+
+  auto& p_leader        = p_list.getLeader();
+  const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+  auto& mw_mem          = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_vals         = mw_mem.mw_vals;
+  const size_t n_padded = getAlignedSize<valT>(wfc_leader.Nions);
+
+  mw_vals.resize(nw);
+  mw_mem.resize_minus_one(nw);
+
+  // the value only form of what mw_ratioGrad uses, over the moved electron's distances
+  FT::mw_evaluateV(NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_mem.mw_minus_one.data(),
+                   dt_leader.getMultiWalkerTempDataPtr(), n_padded * (DIM + 1), mw_vals.data(),
+                   mw_mem.transfer_buffer);
+
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& wfc      = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+    wfc.UpdateMode = ORB_PBYP_RATIO;
+    wfc.curAt      = mw_vals[iw];
+    ratios[iw]     = std::exp(static_cast<PsiValue>(wfc.Vat[iat] - wfc.curAt));
+  }
+}
+
+template<typename FT>
 void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                     const RefVectorWithLeader<ParticleSet>& p_list,
                                     int iat,
