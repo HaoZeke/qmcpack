@@ -162,9 +162,11 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   Vector<char, OffloadPinnedAllocator<char>> dev_valid, dev_accepted;
   size_t device_accept_mismatches = 0;
   Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratio_prod;
+  Vector<QMCTraits::ValueType, OffloadPinnedAllocator<QMCTraits::ValueType>> device_grad_sum;
   std::vector<PsiValue> dev_ratios;
   std::vector<TrialWaveFunction::GradType> dev_grads;
   size_t device_ratio_mismatches = 0;
+  size_t device_grad_mismatches  = 0;
   for (size_t i = 0; i < accept_rands.size(); i++)
     accept_rands[i] = step_context.get_random_gen()();
   accept_rands.updateTo();
@@ -253,14 +255,23 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
           if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
           {
             TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, dev_ratios, dev_grads,
-                                                      device_ratio_prod);
+                                                      device_ratio_prod, device_grad_sum);
             device_ratio_prod.updateFrom();
+            device_grad_sum.updateFrom();
             for (int iw = 0; iw < num_walkers; iw++)
             {
               const RealType mag  = std::abs(ratios[iw]);
               const RealType diff = std::abs(device_ratio_prod[iw] - ratios[iw]);
               if (diff > RealType(1e-9) * std::max(mag, RealType(1)))
                 device_ratio_mismatches++;
+              for (int id = 0; id < QMCTraits::DIM; id++)
+              {
+                const RealType gmag  = std::abs(grads_new.grads_positions[iw][id]);
+                const RealType gdiff = std::abs(device_grad_sum[iw * QMCTraits::DIM + id] -
+                                                grads_new.grads_positions[iw][id]);
+                if (gdiff > RealType(1e-9) * std::max(gmag, RealType(1)))
+                  device_grad_mismatches++;
+              }
             }
           }
 
@@ -345,8 +356,8 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
               << num_walkers << " walkers" << std::endl;
 
   if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
-    std::cerr << "DEVRATIO mismatches=" << device_ratio_mismatches << " over " << num_particles << " electrons and "
-              << num_walkers << " walkers" << std::endl;
+    std::cerr << "DEVRATIO mismatches=" << device_ratio_mismatches << " grad_mismatches=" << device_grad_mismatches
+              << " over " << num_particles << " electrons and " << num_walkers << " walkers" << std::endl;
 
   { // collect GL for KE.
     ScopedTimer buffer_local(timers.buffer_timer);

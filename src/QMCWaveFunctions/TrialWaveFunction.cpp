@@ -745,7 +745,8 @@ void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWa
                                                int iat,
                                                std::vector<PsiValue>& ratios,
                                                std::vector<GradType>& grad_new,
-                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod)
+                                               Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                               Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum)
 {
   const int num_wf = wf_list.size();
   ratios.resize(num_wf);
@@ -760,12 +761,19 @@ void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWa
 
   // the components multiply into this, so it starts at one rather than being assigned by
   // the first of them; that is what lets a component fold the multiply into its own kernel
+  constexpr int dim = OHMMS_DIM;
   ratios_device_prod.resize(num_wf);
+  grads_device_sum.resize(num_wf * dim);
   {
     auto* seed_ptr = ratios_device_prod.device_data();
-    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(seed_ptr)")
+    auto* gseed_ptr = grads_device_sum.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(seed_ptr, gseed_ptr)")
     for (int iw = 0; iw < num_wf; iw++)
+    {
       seed_ptr[iw] = PsiValue(1);
+      for (int id = 0; id < dim; id++)
+        gseed_ptr[iw * dim + id] = ValueType(0);
+    }
   }
 
   std::vector<PsiValue> ratios_z(num_wf);
@@ -773,7 +781,8 @@ void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWa
   {
     ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER + TIMER_SKIP * i]);
     const auto wfc_list(extractWFCRefList(wf_list, i));
-    wavefunction_components[i]->mw_ratioGradDevice(wfc_list, p_list, iat, ratios_z, grad_new, ratios_device_prod);
+    wavefunction_components[i]->mw_ratioGradDevice(wfc_list, p_list, iat, ratios_z, grad_new, ratios_device_prod,
+                                                   grads_device_sum);
     for (int iw = 0; iw < num_wf; iw++)
       ratios[iw] *= ratios_z[iw];
   }

@@ -110,6 +110,7 @@ protected:
    * here so that is not an allocation per particle per move.
    */
   mutable Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> host_ratio_staging_;
+  mutable Vector<ValueType, OffloadPinnedAllocator<ValueType>> host_grad_staging_;
 
 public:
   const LogValue& get_log_value() const { return log_value_; }
@@ -319,15 +320,18 @@ public:
    * the multiply into the component's own kernel is what keeps this free: a component
    * that assigned instead would cost the caller a kernel per component per move.
    *
-   * The default form computes on the host and folds the result in, so a component with no
-   * device path stays correct and merely costs one small transfer.
+   * grads_device_sum is the matching running sum, flat as [nw][DIM], seeded with zero.
+   *
+   * The default form computes on the host and folds both results in, so a component with
+   * no device path stays correct and merely costs one small transfer.
    */
   virtual void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                   const RefVectorWithLeader<ParticleSet>& p_list,
                                   int iat,
                                   std::vector<PsiValue>& ratios,
                                   std::vector<GradType>& grad_new,
-                                  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod) const;
+                                  Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                  Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const;
 
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet
