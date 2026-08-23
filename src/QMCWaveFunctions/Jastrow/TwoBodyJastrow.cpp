@@ -484,7 +484,7 @@ void TwoBodyJastrow<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
   auto& mw_cur_allu = wfc_leader.mw_mem_handle_.getResource().mw_cur_allu;
 
   FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
-                     mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
+                     mw_vgl.device_data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
   mw_vgl.updateFrom();     // read on the host just below
   mw_allUat.updateFrom();  // the accept leaves the stored state on the device
@@ -590,7 +590,7 @@ void TwoBodyJastrow<FT>::mw_evaluateProposedVGL(const RefVectorWithLeader<WaveFu
   mw_vgl.resize(nw, DIM + 2);
 
   FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
-                     mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
+                     mw_vgl.device_data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
                      wfc_leader.mw_mem_handle_.getResource().mw_cur_allu.data(),
                      wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
 }
@@ -723,8 +723,8 @@ void TwoBodyJastrow<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
    * d2Uat asks for them, which is what the fetches in the ratio paths below are for.
    */
   FT::mw_updateVGL(iat, isAccepted, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N,
-                   grp_ids.data(), nw, mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_allUat.data(),
-                   mw_cur_allu.data(), mw_log_delta.data(),
+                   grp_ids.data(), nw, mw_vgl.device_data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
+                   mw_allUat.device_data(), mw_cur_allu.data(), mw_log_delta.data(),
                    wfc_leader.mw_mem_handle_.getResource().mw_update_buffer);
 
   for (int iw = 0; iw < nw; iw++)

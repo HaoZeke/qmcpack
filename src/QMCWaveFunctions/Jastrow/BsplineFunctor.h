@@ -189,7 +189,7 @@ struct BsplineFunctor : public OptimizableFunctorBase
    * @param n_src the number of source particles
    * @param grp_ids the group ids of the n_src source particles
    * @param nw batch size (number of walkers)
-   * @param mw_vgl return resutls. Multi walker value, gradient and laplacian [nw][1(v)+DIM(g)+1(l)]
+   * @param mw_vgl return resutls, a device pointer. Multi walker value, gradient and laplacian [nw][1(v)+DIM(g)+1(l)]
    * @param n_padded the padded size of source particles
    * @param mw_dist Multi walker distance table [nw][1(distance)+DIM(displacements)][n_padded]
    * @param mw_cur_allu Multi walker value, first and second derivatives of pair potentials [nw][DIM][n_padded]. if mw_cur_allu is dual space, only update device side.
@@ -233,7 +233,7 @@ struct BsplineFunctor : public OptimizableFunctorBase
    * @param grp_ids the group ids of the n_src source particles
    * @param nnum_pairs the number of particle pairs
    * @param ref_at the source particles that should be avoided (self pairs)
-   * @param mw_vgl return resutls. Multi walker value, gradient and laplacian [nw][1(v)+DIM(g)+1(l)]
+   * @param mw_vgl return resutls, a device pointer. Multi walker value, gradient and laplacian [nw][1(v)+DIM(g)+1(l)]
    * @param dist_stride the offset of distance pointers between to consecutive walkers
    * @param mw_dist Multi walker distance table [nw][1(distance)+DIM(displacements)][n_padded]
    * @param transfer_buffer temporary transfer buffer.
@@ -384,10 +384,10 @@ struct BsplineFunctor : public OptimizableFunctorBase
    * @param n_src the number of source particles
    * @param grp_ids the group ids of the n_src source particles
    * @param nw batch size (number of walkers)
-   * @param mw_vgl Multi walker value, gradient and laplacian [nw][1(v)+DIM(g)+1(l)]
+   * @param mw_vgl Multi walker value, gradient and laplacian, a device pointer [nw][1(v)+DIM(g)+1(l)]
    * @param n_padded the padded size of source particles
    * @param mw_dist Multi walker distance table [new + old][nw][1(distance)+DIM(displacements)][n_padded]
-   * @param mw_allUat, returned results. Multi walker value, gradient and laplacian of pair potentials [nw][1(v)+DIM(g)+1(l)][n_padded]
+   * @param mw_allUat, returned results, a device pointer. Multi walker value, gradient and laplacian of pair potentials [nw][1(v)+DIM(g)+1(l)][n_padded]
    * @param mw_cur_allu Multi walker value, first and second derivatives of pair potentials [nw][DIM][n_padded]
    * @param transfer_buffer temporary transfer buffer
    *
