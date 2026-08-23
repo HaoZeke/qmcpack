@@ -171,6 +171,16 @@ public:
   const RealType* getMultiWalkerTempDataPtr() const override
   { return mw_mem_handle_.getResource().mw_new_old_dist_displ.data(); }
 
+  /** the device address of the same buffer
+   *
+   * The electron electron table attaches each walker's temporary arrays into its multi
+   * walker buffer, so the host side of that buffer is filled by the per walker move and a
+   * consumer naming the host address reads valid data. This table keeps them separate:
+   * only the device side is written, so a consumer has to name the device address.
+   */
+  const RealType* getMultiWalkerTempDeviceDataPtr() const override
+  { return mw_mem_handle_.getResource().mw_new_old_dist_displ.device_data(); }
+
   void requireTempDataOnDevice() const override { temp_data_on_device_ = true; }
 
   bool hasTempDataOnDevice() const override { return temp_data_on_device_; }
@@ -463,6 +473,7 @@ public:
           }
         }
     }
+
 
     /* Host data comes from computing it on the host rather than from bringing the device
      * result back. A single target against all sources is cheap there, which is why the

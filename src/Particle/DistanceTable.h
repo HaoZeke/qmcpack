@@ -477,6 +477,15 @@ public:
 
   /// the temporary distances of a batch are being produced on the device
   virtual bool hasTempDataOnDevice() const { return false; }
+
+  /** the device address of the batch's temporary distances, or null
+   *
+   * A table that attaches each walker's temporary arrays into its multi walker buffer
+   * fills that buffer's host side as a side effect of the per walker move, so a consumer
+   * naming the host address reads valid data. A table that keeps them separate writes
+   * only the device side, and a consumer has to name the device address.
+   */
+  virtual const RealType* getMultiWalkerTempDeviceDataPtr() const { return nullptr; }
 };
 } // namespace qmcplusplus
 #endif

@@ -871,13 +871,19 @@ public:
     const bool worthwhile = use_offload_ && accepted.size() > 1;
 
     /* The electron ion table forms its temporary distances on the device for a consumer
-     * that has asked. The batch that asks first finds them absent and leaves this move to
-     * the per walker accept, which reads the host copy the table always has.
+     * that has asked, and it forms them on the next move rather than this one. Announcing
+     * the need and then asking whether it is met reads back the flag just set and walks
+     * into a buffer nothing has written, so the batch that announces takes the host path.
      */
-    if (worthwhile && !dt_ei.hasTempDataOnDevice())
-      dt_ei.requireTempDataOnDevice();
+    bool device_ready = false;
+    if (worthwhile)
+    {
+      device_ready = dt_ei.hasTempDataOnDevice();
+      if (!device_ready)
+        dt_ei.requireTempDataOnDevice();
+    }
 
-    if (!worthwhile || !dt_ei.hasTempDataOnDevice())
+    if (!device_ready)
     {
       WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
       return;
@@ -887,7 +893,8 @@ public:
     const RealType* mw_ee = nullptr;
     try
     {
-      mw_ei = dt_ei.getMultiWalkerTempDataPtr();
+      // this table writes only the device side of its temporary buffer, so name that
+      mw_ei = dt_ei.getMultiWalkerTempDeviceDataPtr();
       mw_ee = dt_ee.getMultiWalkerTempDataPtr();
     }
     catch (...)
@@ -1029,12 +1036,16 @@ public:
                 const RealType dot_jk_jI = jk0 * jI0 + jk1 * jI1 + jk2 * jI2;
                 const RealType dot_kI_jk = kI0 * jk0 + kI1 * jk1 + kI2 * jk2;
 
-                // the moved electron's own sum
-                Uj += sign * val;
-                dUj0 += sign * (g1 * jI0 + g0 * jk0);
-                dUj1 += sign * (g1 * jI1 + g0 * jk1);
-                dUj2 += sign * (g1 * jI2 + g0 * jk2);
-                d2Uj -= sign * (h00 + h11 + lapfac * (g0 + g1) + RealType(2) * h01 * dot_jk_jI);
+                /* The moved electron's own sum is a value in its own right on each side of
+                 * the move, so it carries no sign: the accept wants the old sum and the new
+                 * one, not their difference. Only the scatter below is a difference, and
+                 * that is what the sign is for.
+                 */
+                Uj += val;
+                dUj0 += g1 * jI0 + g0 * jk0;
+                dUj1 += g1 * jI1 + g0 * jk1;
+                dUj2 += g1 * jI2 + g0 * jk2;
+                d2Uj -= h00 + h11 + lapfac * (g0 + g1) + RealType(2) * h01 * dot_jk_jI;
 
                 // and what the other electron of the triplet sees
                 const RealType dU_k   = sign * val;
