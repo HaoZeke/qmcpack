@@ -654,6 +654,8 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
 template<typename FT>
 void TwoBodyJastrow<FT>::syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list)
 {
+  if (wfc_list.size() == 0)
+    return;
   auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
   if (!wfc_leader.use_offload_)
     return;

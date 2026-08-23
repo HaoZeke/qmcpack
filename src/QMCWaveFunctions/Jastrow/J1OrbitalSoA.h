@@ -67,6 +67,8 @@ class J1OrbitalSoA : public WaveFunctionComponent
   const int Nions;
   ///number of electrons
   const int Nelec;
+  ///Nelec rounded up to the SIMD alignment, the stride of the crowd-wide state buffer
+  const size_t Nelec_padded;
   /// number of ion groups
   const int NumGroups;
   ///reference to the sources (ions)
@@ -80,6 +82,13 @@ class J1OrbitalSoA : public WaveFunctionComponent
   valT curAt;
   valT curLap;
   posT curGrad;
+  /** set when a single walker accept or recompute wrote this walker's state on the host
+   *
+   * A T-move accepts through the single walker path while the crowd buffer is attached,
+   * so the host copy moves ahead of the device one. The batched paths read and write the
+   * device copy and fetch from it, either of which would lose that write.
+   */
+  bool host_state_dirty_ = false;
 
   ///\f$Vat[i] = sum_(j) u_{i,j}\f$
   Vector<valT> Vat;
@@ -244,6 +253,8 @@ public:
       Vat[iat] = simd::accumulate_n(U.data(), Nions, valT());
       Lap[iat] = accumulateGL(dU.data(), d2U.data(), d_ie.getDisplRow(iat), Grad[iat]);
     }
+    // the crowd buffer, if this walker's state is attached to one, now trails the host
+    host_state_dirty_ = true;
   }
 
   LogValue evaluateLog(const ParticleSet& P,
@@ -482,6 +493,48 @@ public:
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
 
+  /** send the crowd state up if a single walker path wrote it on the host */
+  static void syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list);
+
+  /** the stored gradient at the electron about to move, for the whole crowd
+   *
+   * Grad is device resident across the electron loop, so the base form's per walker host
+   * read would see a stale value. Only the moved electron's entry is wanted, so the kernel
+   * gathers nw of them rather than bringing the whole array down.
+   */
+  void mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                   const RefVectorWithLeader<ParticleSet>& p_list,
+                   int iat,
+                   std::vector<GradType>& grad_now) const override;
+
+  /** the same term added straight into the caller's device side sum */
+  void mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<ParticleSet>& p_list,
+                         int iat,
+                         std::vector<GradType>& grad_now,
+                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const override;
+
+  /** recompute on the host, then send the state up
+   *
+   * recompute writes Vat, Grad and Lap on the host, and the batched ratio and accept read
+   * them on the device, so the buffer goes up before anything else runs.
+   */
+  void mw_recompute(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                    const RefVectorWithLeader<ParticleSet>& p_list,
+                    const std::vector<bool>& recompute) const override;
+
+  void mw_evaluateLog(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                      const RefVectorWithLeader<ParticleSet>& p_list,
+                      const RefVector<ParticleSet::ParticleGradient>& G_list,
+                      const RefVector<ParticleSet::ParticleLaplacian>& L_list) const override;
+
+  /** G and L from the stored state, which the accept leaves on the device */
+  void mw_evaluateGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                     const RefVectorWithLeader<ParticleSet>& p_list,
+                     const RefVector<ParticleSet::ParticleGradient>& G_list,
+                     const RefVector<ParticleSet::ParticleLaplacian>& L_list,
+                     bool fromscratch) const override;
+
   PsiValue ratioGrad(ParticleSet& P, int iat, GradType& grad_iat) override
   {
     UpdateMode = ORB_PBYP_PARTIAL;
@@ -509,6 +562,8 @@ public:
     Vat[iat]  = curAt;
     Grad[iat] = curGrad;
     Lap[iat]  = curLap;
+    // the crowd buffer, if this walker's state is attached to one, now trails the host
+    host_state_dirty_ = true;
   }
 
 

@@ -89,12 +89,26 @@ struct J1OrbitalSoAMultiWalkerMem : public Resource
   Vector<int, OffloadPinnedAllocator<int>> mw_minus_one;
   // multi walker value and gradient for a proposed move, [nw][DIM+2]
   Matrix<T, OffloadPinnedAllocator<T>> mw_vgl;
-  // the current value at the moved electron, one per walker, for the device factor
-  Vector<T, OffloadPinnedAllocator<T>> mw_vat;
   // per source scratch the value and gradient kernel writes, [nw][3][n_padded]
   Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
   // fused buffer for the value and gradient kernel
   Vector<char, OffloadPinnedAllocator<char>> mw_ratiograd_buffer;
+  /* memory pool for Vat, Grad and Lap across the crowd, [nw][n_padded] + [nw][n_padded][DIM]
+   * + [nw][n_padded]. Each walker's own containers are views into it, so the accept can
+   * write the stored state where the kernels read it.
+   */
+  Vector<T, OffloadPinnedAllocator<T>> mw_allVat;
+  // the log value change the accept kernel forms, one per walker
+  Vector<T, OffloadPinnedAllocator<T>> mw_log_delta;
+  // the stored gradient at one electron, gathered for a host reader, [nw][DIM]
+  Vector<T, OffloadPinnedAllocator<T>> mw_grad_at;
+  // the accepted walker list the accept kernel branches on, or the mask's own indices
+  Vector<int, OffloadPinnedAllocator<int>> mw_accepted;
+  /* whether the last ratio call left mw_vgl on the device. The batched ratio runs under a
+   * work threshold and a residency test, and the accept kernel reads what it wrote, so the
+   * accept asks this rather than repeating the test and drifting from it.
+   */
+  bool mw_vgl_on_device = false;
 
   void resize_minus_one(size_t size)
   {
@@ -119,6 +133,7 @@ J1OrbitalSoA<FT>::J1OrbitalSoA(const std::string& obj_name, const ParticleSet& i
       myTableID(els.addTable(ions, use_offload ? DTModes::ALL_OFF : DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
       Nions(ions.getTotalNum()),
       Nelec(els.getTotalNum()),
+      Nelec_padded(getAlignedSize<valT>(els.getTotalNum())),
       NumGroups(ions.groups()),
       Ions(ions)
 {
@@ -162,13 +177,64 @@ void J1OrbitalSoA<FT>::acquireResource(ResourceCollection& collection,
 {
   auto& wfc_leader          = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
   wfc_leader.mw_mem_handle_ = collection.lendResource<J1OrbitalSoAMultiWalkerMem<RealType>>();
+
+  const size_t nw   = wfc_list.size();
+  const size_t npad = wfc_leader.Nelec_padded;
+  auto& mw_allVat   = wfc_leader.mw_mem_handle_.getResource().mw_allVat;
+  mw_allVat.resize(npad * (OHMMS_DIM + 2) * nw);
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    // copy each walker's Vat, Grad and Lap into the shared buffer and attach to it
+    auto& wfc = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+
+    valT* vat_ptr = mw_allVat.data() + iw * npad;
+    std::copy_n(wfc.Vat.data(), wfc.Nelec, vat_ptr);
+    wfc.Vat.free();
+    wfc.Vat.attachReference(vat_ptr, wfc.Nelec);
+
+    posT* grad_ptr = reinterpret_cast<posT*>(mw_allVat.data() + nw * npad + iw * npad * OHMMS_DIM);
+    std::copy_n(wfc.Grad.data(), wfc.Nelec, grad_ptr);
+    wfc.Grad.free();
+    wfc.Grad.attachReference(grad_ptr, wfc.Nelec);
+
+    valT* lap_ptr = mw_allVat.data() + nw * npad * (OHMMS_DIM + 1) + iw * npad;
+    std::copy_n(wfc.Lap.data(), wfc.Nelec, lap_ptr);
+    wfc.Lap.free();
+    wfc.Lap.attachReference(lap_ptr, wfc.Nelec);
+  }
+  mw_allVat.updateTo();
 }
 
 template<typename FT>
 void J1OrbitalSoA<FT>::releaseResource(ResourceCollection& collection,
                                        const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const
 {
-  auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  auto& wfc_leader  = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const size_t nw   = wfc_list.size();
+  const size_t npad = wfc_leader.Nelec_padded;
+  auto& mw_allVat   = wfc_leader.mw_mem_handle_.getResource().mw_allVat;
+  mw_allVat.updateFrom();
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    // detach and give each walker its own storage back, carrying the values out
+    auto& wfc = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+
+    const valT* vat_ptr  = mw_allVat.data() + iw * npad;
+    const posT* grad_ptr = reinterpret_cast<const posT*>(mw_allVat.data() + nw * npad + iw * npad * OHMMS_DIM);
+    const valT* lap_ptr  = mw_allVat.data() + nw * npad * (OHMMS_DIM + 1) + iw * npad;
+
+    wfc.Vat.free();
+    wfc.Vat.resize(wfc.Nelec);
+    std::copy_n(vat_ptr, wfc.Nelec, wfc.Vat.data());
+
+    wfc.Grad.free();
+    wfc.Grad.resize(wfc.Nelec);
+    std::copy_n(grad_ptr, wfc.Nelec, wfc.Grad.data());
+
+    wfc.Lap.free();
+    wfc.Lap.resize(wfc.Nelec);
+    std::copy_n(lap_ptr, wfc.Nelec, wfc.Lap.data());
+  }
   collection.takebackResource(wfc_leader.mw_mem_handle_);
 }
 
@@ -179,6 +245,7 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
                                             const std::vector<bool>& isAccepted,
                                             bool safe_to_delay) const
 {
+  syncHostState(wfc_list);
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
   const int nw     = wfc_list.size();
@@ -209,7 +276,7 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
       FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.device_data(),
                          n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                          mw_mem.mw_ratiograd_buffer);
-  mw_vgl.updateFrom(); // read on the host just below
+      mw_vgl.updateFrom(); // read on the host just below
 
       for (int iw = 0; iw < nw; iw++)
       {
@@ -221,6 +288,65 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
         // the values are in hand, so the single walker accept must not redo them
         wfc.UpdateMode = ORB_PBYP_PARTIAL;
       }
+    }
+  }
+
+  /* The accept writes three numbers at the moved electron and moves the log value by the
+   * difference between the stored value there and the proposed one. All four come from
+   * mw_vgl, which the ratio kernel left on the device, and the state they land in is
+   * device resident too, so the whole thing is one kernel over the crowd and nw scalars
+   * come back. The host form is a per walker call that reads and writes the same state
+   * on the host, which is what makes the state's residency the thing that decides.
+   */
+  if constexpr (HasMwEvaluateVGL<FT>::value)
+  {
+    if (use_offload_ && wfc_leader.UpdateMode != ORB_PBYP_RATIO &&
+        wfc_leader.mw_mem_handle_.getResource().mw_vgl_on_device)
+    {
+      auto& mw_mem       = wfc_leader.mw_mem_handle_.getResource();
+      auto& mw_log_delta = mw_mem.mw_log_delta;
+      auto& mw_accepted  = mw_mem.mw_accepted;
+      mw_log_delta.resize(nw);
+      mw_accepted.resize(nw);
+      for (int iw = 0; iw < nw; iw++)
+        mw_accepted[iw] = isAccepted[iw] ? 1 : 0;
+      mw_accepted.updateTo();
+
+      const size_t npad   = wfc_leader.Nelec_padded;
+      constexpr int dim   = OHMMS_DIM;
+      const size_t vstr   = mw_mem.mw_vgl.cols();
+      const auto* vgl_ptr = mw_mem.mw_vgl.device_data();
+      auto* vat_ptr       = mw_mem.mw_allVat.device_data();
+      const auto* acc_ptr = mw_accepted.device_data();
+      auto* delta_ptr     = mw_log_delta.device_data();
+      const size_t nwz    = nw;
+
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                      is_device_ptr(vgl_ptr, vat_ptr, acc_ptr, delta_ptr)")
+      for (size_t iw = 0; iw < nwz; iw++)
+      {
+        if (!acc_ptr[iw])
+        {
+          delta_ptr[iw] = valT(0);
+          continue;
+        }
+        valT* Vat  = vat_ptr + iw * npad;
+        valT* Grad = vat_ptr + nwz * npad + iw * npad * dim;
+        valT* Lap  = vat_ptr + nwz * npad * (dim + 1) + iw * npad;
+
+        const valT* vgl = vgl_ptr + iw * vstr;
+        delta_ptr[iw]   = Vat[iat] - vgl[0];
+        Vat[iat]        = vgl[0];
+        for (int id = 0; id < dim; id++)
+          Grad[iat * dim + id] = vgl[id + 1];
+        // the kernel stores the negated laplacian, as the host form's curLap does
+        Lap[iat] = -vgl[dim + 1];
+      }
+      mw_log_delta.updateFrom();
+
+      for (int iw = 0; iw < nw; iw++)
+        wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw).log_value_ += mw_log_delta[iw];
+      return;
     }
   }
 
@@ -237,6 +363,7 @@ void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionCompon
                                     int iat,
                                     std::vector<PsiValue>& ratios) const
 {
+  syncHostState(wfc_list);
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
   const int nw     = wfc_list.size();
@@ -281,6 +408,7 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
                                     std::vector<PsiValue>& ratios,
                                     std::vector<GradType>& grad_new) const
 {
+  syncHostState(wfc_list);
   if constexpr (!HasMwEvaluateVGL<FT>::value)
   {
     WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
@@ -313,6 +441,7 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
   if (static_cast<size_t>(nw) * wfc_leader.Nions < batchedWorkThreshold() ||
       !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
+    wfc_leader.mw_mem_handle_.getResource().mw_vgl_on_device = false;
     WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
     return;
   }
@@ -327,6 +456,7 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
   FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.device_data(),
                      n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      mw_mem.mw_ratiograd_buffer);
+  mw_mem.mw_vgl_on_device = true;
   mw_vgl.updateFrom(); // read on the host just below
 
   for (int iw = 0; iw < nw; iw++)
@@ -354,6 +484,7 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
 {
+  syncHostState(wfc_list);
   if constexpr (!HasMwEvaluateVGL<FT>::value)
   {
     WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
@@ -380,30 +511,41 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
     return;
   }
 
-  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
-
-  /* Vat at the moved electron is the only part of the ratio the device does not already hold,
-   * so it is the only thing that goes down: one scalar per walker.
+  /* Vat and the proposed value are both device resident, so the factor is a difference and
+   * an exponential away from being formed where they are, and nothing here reads either on
+   * the host. The proposed values still have to be computed, which is the kernel below;
+   * what this form drops against mw_ratioGrad is the copy down of mw_vgl and the per walker
+   * host loop over it. ratios and grad_new are left untouched, as the caller's contract says.
    */
-  auto& mw_mem = wfc_leader.mw_mem_handle_.getResource();
-  auto& mw_vgl = mw_mem.mw_vgl;
-  auto& mw_vat = mw_mem.mw_vat;
-  mw_vat.resize(nw);
-  for (int iw = 0; iw < nw; iw++)
-    mw_vat[iw] = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw).Vat[iat];
-  mw_vat.updateTo();
+  auto& p_leader        = p_list.getLeader();
+  const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+  auto& mw_mem          = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_vgl          = mw_mem.mw_vgl;
+  const size_t n_padded = getAlignedSize<valT>(wfc_leader.Nions);
+  mw_vgl.resize(nw, DIM + 2);
+  mw_mem.mw_cur_allu.resize(n_padded * 3 * nw);
 
+  FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.device_data(),
+                     n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_mem.mw_cur_allu.data(),
+                     mw_mem.mw_ratiograd_buffer);
+  mw_mem.mw_vgl_on_device = true;
+  for (int iw = 0; iw < nw; iw++)
+    wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw).UpdateMode = ORB_PBYP_PARTIAL;
+  wfc_leader.UpdateMode = ORB_PBYP_PARTIAL;
+
+  const size_t npad   = wfc_leader.Nelec_padded;
   const size_t vstr   = mw_vgl.cols();
+  const size_t nwz    = nw;
   const auto* vgl_ptr = mw_vgl.device_data();
-  const auto* vat_ptr = mw_vat.device_data();
+  const auto* vat_ptr = mw_mem.mw_allVat.device_data();
   auto* rd_ptr        = ratios_device_prod.device_data();
   auto* gs_ptr        = grads_device_sum.device_data();
   constexpr int dim   = OHMMS_DIM;
 
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vgl_ptr, vat_ptr, rd_ptr, gs_ptr)")
-  for (int iw = 0; iw < nw; iw++)
+  for (size_t iw = 0; iw < nwz; iw++)
   {
-    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(vat_ptr[iw] - vgl_ptr[iw * vstr]));
+    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(vat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
     for (int id = 0; id < dim; id++)
       gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
   }
@@ -411,10 +553,140 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
 }
 
 template<typename FT>
+void J1OrbitalSoA<FT>::syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list)
+{
+  if (wfc_list.size() == 0)
+    return;
+  auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  if (!wfc_leader.use_offload_)
+    return;
+  bool dirty = false;
+  for (int iw = 0; iw < wfc_list.size(); iw++)
+  {
+    auto& wfc = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw);
+    dirty |= wfc.host_state_dirty_;
+    wfc.host_state_dirty_ = false;
+  }
+  /* Every walker's host copy is current when one of them goes dirty, because the reader
+   * that ran before the single walker write fetched the whole buffer, so the push is the
+   * whole buffer too.
+   */
+  if (dirty)
+    wfc_leader.mw_mem_handle_.getResource().mw_allVat.updateTo();
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_recompute(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                    const RefVectorWithLeader<ParticleSet>& p_list,
+                                    const std::vector<bool>& recompute) const
+{
+  WaveFunctionComponent::mw_recompute(wfc_list, p_list, recompute);
+  if (use_offload_)
+    wfc_list.getCastedLeader<J1OrbitalSoA<FT>>().mw_mem_handle_.getResource().mw_allVat.updateTo();
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_evaluateLog(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                      const RefVectorWithLeader<ParticleSet>& p_list,
+                                      const RefVector<ParticleSet::ParticleGradient>& G_list,
+                                      const RefVector<ParticleSet::ParticleLaplacian>& L_list) const
+{
+  WaveFunctionComponent::mw_evaluateLog(wfc_list, p_list, G_list, L_list);
+  if (use_offload_)
+    wfc_list.getCastedLeader<J1OrbitalSoA<FT>>().mw_mem_handle_.getResource().mw_allVat.updateTo();
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                   const RefVectorWithLeader<ParticleSet>& p_list,
+                                   int iat,
+                                   std::vector<GradType>& grad_now) const
+{
+  syncHostState(wfc_list);
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_evalGrad(wfc_list, p_list, iat, grad_now);
+    return;
+  }
+
+  auto& wfc_leader  = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const int nw      = wfc_list.size();
+  auto& mw_mem      = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_grad_at  = mw_mem.mw_grad_at;
+  constexpr int dim = OHMMS_DIM;
+  mw_grad_at.resize(nw * dim);
+
+  /* The state is [nw][n_padded][DIM] after the values, and a host reader wants nw times DIM
+   * of it, so the gather is what goes down rather than the array.
+   */
+  {
+    const size_t npad   = wfc_leader.Nelec_padded;
+    const size_t nwz    = nw;
+    const auto* vat_ptr = mw_mem.mw_allVat.device_data();
+    auto* out_dev       = mw_grad_at.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vat_ptr, out_dev)")
+    for (size_t iw = 0; iw < nwz; iw++)
+      for (int id = 0; id < dim; id++)
+        out_dev[iw * dim + id] = vat_ptr[nwz * npad + iw * npad * dim + static_cast<size_t>(iat) * dim + id];
+  }
+  mw_grad_at.updateFrom();
+
+  // the caller accumulates across components, so this assigns its own term
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < dim; id++)
+      grad_now[iw][id] = mw_grad_at[iw * dim + id];
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                         const RefVectorWithLeader<ParticleSet>& p_list,
+                                         int iat,
+                                         std::vector<GradType>& grad_now,
+                                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+{
+  syncHostState(wfc_list);
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now);
+    return;
+  }
+
+  auto& wfc_leader  = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const int nw      = wfc_list.size();
+  const size_t npad = wfc_leader.Nelec_padded;
+  constexpr int dim = OHMMS_DIM;
+  const size_t nwz  = nw;
+
+  const auto* vat_ptr = wfc_leader.mw_mem_handle_.getResource().mw_allVat.device_data();
+  auto* dst_ptr       = grads_device_now.device_data();
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vat_ptr, dst_ptr)")
+  for (size_t iw = 0; iw < nwz; iw++)
+    for (int id = 0; id < dim; id++)
+      dst_ptr[iw * dim + id] +=
+          static_cast<ValueType>(vat_ptr[nwz * npad + iw * npad * dim + static_cast<size_t>(iat) * dim + id]);
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     const RefVector<ParticleSet::ParticleGradient>& G_list,
+                                     const RefVector<ParticleSet::ParticleLaplacian>& L_list,
+                                     bool fromscratch) const
+{
+  syncHostState(wfc_list);
+  if (use_offload_)
+    // computeGL sums the host Vat, Grad and Lap, which the accept path leaves on the device
+    wfc_list.getCastedLeader<J1OrbitalSoA<FT>>().mw_mem_handle_.getResource().mw_allVat.updateFrom();
+  WaveFunctionComponent::mw_evaluateGL(wfc_list, p_list, G_list, L_list, fromscratch);
+}
+
+template<typename FT>
 void J1OrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                          const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                          std::vector<std::vector<ValueType>>& ratios) const
 {
+  syncHostState(wfc_list);
   if (!use_offload_)
   {
     WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
@@ -425,6 +697,12 @@ void J1OrbitalSoA<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctionC
   if (wfc_list.size() == 0)
     return;
   auto& wfc_leader        = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+
+  /* Vat stays on the device across the electron loop, and this is one of the two readers
+   * that bring it back. Both run once per step rather than once per electron.
+   */
+  wfc_leader.mw_mem_handle_.getResource().mw_allVat.updateFrom();
+
   auto& vp_leader         = vp_list.getLeader();
   const auto& mw_refPctls = vp_leader.getMultiWalkerRefPctls();
   auto& mw_mem            = wfc_leader.mw_mem_handle_.getResource();
