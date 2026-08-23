@@ -101,6 +101,14 @@ private:
   ///\f$d2Uat[i] = sum_(j) d2u_{i,j}\f$
   Vector<valT, aligned_allocator<valT>> d2Uat;
   valT cur_Uat;
+  /** set when a single walker accept or recompute wrote this walker's state on the host
+   *
+   * A T-move accepts through the single walker path while the crowd buffer is attached,
+   * so the host copy moves ahead of the device one. The batched paths read and write the
+   * device copy and fetch from it, either of which would lose that write, so they push
+   * first when this is set.
+   */
+  bool host_state_dirty_ = false;
   aligned_vector<valT> cur_u, cur_du, cur_d2u;
   aligned_vector<valT> old_u, old_du, old_d2u;
   aligned_vector<valT> DistCompressed;
@@ -240,6 +248,23 @@ public:
                           std::vector<GradType>& grad_new,
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
+
+  /** send the crowd state up if a single walker path wrote it on the host
+   *
+   * Called at the head of every batched entry point, so that a T-move's accept survives
+   * the next kernel and the next fetch.
+   */
+  static void syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list);
+
+  /** the stored gradient at the moved electron, for a host caller
+   *
+   * dUat is device resident across the electron loop, so the base form's host read would
+   * be one accept behind. The gather brings back nw times DIM numbers.
+   */
+  void mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                   const RefVectorWithLeader<ParticleSet>& p_list,
+                   int iat,
+                   std::vector<GradType>& grad_now) const override;
 
   /** the stored gradient at the moved electron, added where it already is
    *
