@@ -183,7 +183,15 @@ public:
 
   void requireTempDataOnDevice() const override { temp_data_on_device_ = true; }
 
-  bool hasTempDataOnDevice() const override { return temp_data_on_device_; }
+  /** whether the device side holds the temp distances for the move in hand
+   *
+   * Asking for them does not produce them: the batched move fills the device side only when
+   * the request was already standing when it ran, and the move for the current particle has
+   * happened by the time a consumer asks. Reporting the request here would tell that consumer
+   * the buffer is good on the one move between the request and the first fill, where it holds
+   * whatever it held before, and a zero distance there divides.
+   */
+  bool hasTempDataOnDevice() const override { return temp_data_filled_on_device_; }
 
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
@@ -378,6 +386,8 @@ public:
   ///evaluate the temporary pair relations
   inline void move(const ParticleSet& P, const PosType& rnew, const IndexType iat, bool prepare_old) override
   {
+    // this form does not touch the device side, so what is there no longer describes the move
+    temp_data_filled_on_device_ = false;
     // Single particle against all sources is cheap and is computed on the host, as
     // SoaDistanceTableAAOMPTarget::move does. The device side is not written here: the
     // full table is recomputed by mw_evaluate, so anything stored into distances_ or
@@ -483,6 +493,11 @@ public:
      */
     for (size_t iw = 0; iw < nw; iw++)
       dt_list[iw].move(p_list[iw], rnew_list[iw], iat, prepare_old);
+
+    /* Last, because the single walker form above clears this: after it, the device side holds
+     * this move's distances exactly when the offload above ran.
+     */
+    dt_leader.temp_data_filled_on_device_ = temp_data_on_device_;
   }
 
   ///update the stripe for jat-th particle
@@ -521,6 +536,8 @@ private:
    * the distances on the host leaves the device out of a move entirely.
    */
   mutable bool temp_data_on_device_ = false;
+  /// whether the device side of the temp distances describes the move in hand
+  mutable bool temp_data_filled_on_device_ = false;
   /// timer for evaluate()
   NewTimer& evaluate_timer_;
 };
