@@ -468,6 +468,20 @@ public:
                     std::vector<PsiValue>& ratios,
                     std::vector<GradType>& grad_new) const override;
 
+  /** the component's factor and gradient term, formed where the batched form left them
+   *
+   * The batched form leaves the proposed value and gradient in mw_vgl on the device, so the
+   * ratio is that value against Vat at the moved electron. Only the latter comes from the
+   * host, one scalar per walker, where the base form sends both a ratio and a gradient.
+   */
+  void mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                          const RefVectorWithLeader<ParticleSet>& p_list,
+                          int iat,
+                          std::vector<PsiValue>& ratios,
+                          std::vector<GradType>& grad_new,
+                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
+
   PsiValue ratioGrad(ParticleSet& P, int iat, GradType& grad_iat) override
   {
     UpdateMode = ORB_PBYP_PARTIAL;

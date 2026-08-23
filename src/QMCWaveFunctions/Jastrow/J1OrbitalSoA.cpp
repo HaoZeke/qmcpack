@@ -63,6 +63,8 @@ struct J1OrbitalSoAMultiWalkerMem : public Resource
   Vector<int, OffloadPinnedAllocator<int>> mw_minus_one;
   // multi walker value and gradient for a proposed move, [nw][DIM+2]
   Matrix<T, OffloadPinnedAllocator<T>> mw_vgl;
+  // the current value at the moved electron, one per walker, for the device factor
+  Vector<T, OffloadPinnedAllocator<T>> mw_vat;
   // per source scratch the value and gradient kernel writes, [nw][3][n_padded]
   Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
   // fused buffer for the value and gradient kernel
@@ -313,6 +315,71 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
       wfc.curGrad[idim] = mw_vgl[iw][idim + 1];
     ratios[iw] = std::exp(static_cast<PsiValue>(wfc.Vat[iat] - wfc.curAt));
     grad_new[iw] += wfc.curGrad;
+  }
+  }
+}
+
+template<typename FT>
+void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                          const RefVectorWithLeader<ParticleSet>& p_list,
+                                          int iat,
+                                          std::vector<PsiValue>& ratios,
+                                          std::vector<GradType>& grad_new,
+                                          Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
+                                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
+{
+  if constexpr (!HasMwEvaluateVGL<FT>::value)
+  {
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
+                                              grads_device_sum);
+    return;
+  }
+  else
+  {
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<J1OrbitalSoA<FT>>();
+  const int nw     = wfc_list.size();
+
+  /* The factor is formed from mw_vgl, which carries the proposed value and gradient on the
+   * device only when the batched form ran there. That form decides on the work available and
+   * on the table having temp distances resident, so the same question is asked here, the same
+   * way, rather than assumed. Where it does not run, the base form stages its own results,
+   * which is two transfers against the one below.
+   */
+  if (!wfc_leader.use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+      !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
+  {
+    WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
+                                              grads_device_sum);
+    return;
+  }
+
+  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
+
+  /* Vat at the moved electron is the only part of the ratio the device does not already hold,
+   * so it is the only thing that goes down: one scalar per walker.
+   */
+  auto& mw_mem = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_vgl = mw_mem.mw_vgl;
+  auto& mw_vat = mw_mem.mw_vat;
+  mw_vat.resize(nw);
+  for (int iw = 0; iw < nw; iw++)
+    mw_vat[iw] = wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw).Vat[iat];
+  mw_vat.updateTo();
+
+  const size_t vstr   = mw_vgl.cols();
+  const auto* vgl_ptr = mw_vgl.device_data();
+  const auto* vat_ptr = mw_vat.device_data();
+  auto* rd_ptr        = ratios_device_prod.device_data();
+  auto* gs_ptr        = grads_device_sum.device_data();
+  constexpr int dim   = OHMMS_DIM;
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vgl_ptr, vat_ptr, rd_ptr, gs_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+  {
+    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(vat_ptr[iw] - vgl_ptr[iw * vstr]));
+    for (int id = 0; id < dim; id++)
+      gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
   }
   }
 }
