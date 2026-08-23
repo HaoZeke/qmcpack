@@ -206,7 +206,7 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
       mw_vgl.resize(nw, DIM + 2);
       mw_cur_allu.resize(n_padded * 3 * nw);
 
-      FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.data(),
+      FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.device_data(),
                          n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                          mw_mem.mw_ratiograd_buffer);
   mw_vgl.updateFrom(); // read on the host just below
@@ -324,7 +324,7 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
   mw_vgl.resize(nw, DIM + 2);
   mw_cur_allu.resize(n_padded * 3 * nw);
 
-  FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.data(),
+  FT::mw_evaluateVGL(-1, NumGroups, GroupFunctors.data(), wfc_leader.Nions, grp_ids.data(), nw, mw_vgl.device_data(),
                      n_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      mw_mem.mw_ratiograd_buffer);
   mw_vgl.updateFrom(); // read on the host just below

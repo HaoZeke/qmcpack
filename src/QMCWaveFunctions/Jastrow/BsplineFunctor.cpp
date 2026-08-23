@@ -95,9 +95,11 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
   // between calls, so it goes down only when it does
   auto* transfer_buffer_ptr = stageFunctorTable(num_groups, functors, 0, transfer_buffer);
 
-  /* The results are left on the device. A caller that reads them on the host asks for them,
-   * which is one line at that caller, and a caller that consumes them on the device pays
-   * nothing. Bringing them back here made the second kind impossible.
+  /* The results are left on the device, so mw_vgl is taken as a device pointer rather than
+   * mapped: a mapped host pointer would have the kernel write the host copy and the
+   * caller's updateFrom would then overwrite it with the device one. A caller that reads
+   * the results on the host asks for them, and a caller that consumes them on the device
+   * pays nothing.
    */
 
   /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
@@ -115,7 +117,7 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
   }();
 
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    is_device_ptr(transfer_buffer_ptr) \
+                    is_device_ptr(transfer_buffer_ptr, mw_vgl) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(from: mw_cur_allu[:n_padded*3*nw])")
@@ -299,10 +301,9 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
   }();
 
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    is_device_ptr(transfer_buffer_ptr) \
+                    is_device_ptr(transfer_buffer_ptr, mw_vgl, mw_allUat) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
-                    map(to: mw_vgl[:(DIM+2)*nw]) \
                     map(always, from: mw_log_delta[0:nw]) \
                     map(to: accept_mask[:accept_mask ? nw : 0])")
   for (int iw = 0; iw < nw; iw++)
