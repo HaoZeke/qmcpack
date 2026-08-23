@@ -14,6 +14,7 @@
 
 
 #include "TwoBodyJastrow.h"
+
 #include "CPU/SIMD/algorithm.hpp"
 #include "SoaDistanceTableABOMPTarget.h"
 #include "ResourceCollection.h"
@@ -39,6 +40,8 @@ struct TwoBodyJastrowMultiWalkerMem : public Resource
   Vector<T, OffloadPinnedAllocator<T>> mw_allUat;
   /// per-walker change in the log value from an accept, so the state itself can stay on device
   Vector<T, OffloadPinnedAllocator<T>> mw_log_delta;
+  // the stored gradient at one electron, gathered for a host reader, [nw][DIM]
+  Vector<T, OffloadPinnedAllocator<T>> mw_grad_at;
   /// memory pool for cur_u, cur_du, cur_d2u [3][Nw][N_padded]. 3 is for value, first and second derivatives.
   Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
 
@@ -180,6 +183,8 @@ void TwoBodyJastrow<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctio
     WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
     return;
   }
+
+  syncHostState(wfc_list);
 
   // add early return to prevent from accessing vp_list[0]
   if (wfc_list.size() == 0)
@@ -470,6 +475,8 @@ void TwoBodyJastrow<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
     return;
   }
 
+  syncHostState(wfc_list);
+
   //right now. Directly use FT::mw_evaluateVGL implementation.
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader      = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
@@ -581,6 +588,8 @@ void TwoBodyJastrow<FT>::mw_evaluateProposedVGL(const RefVectorWithLeader<WaveFu
                                                 const RefVectorWithLeader<ParticleSet>& p_list,
                                                 int iat) const
 {
+  syncHostState(wfc_list);
+
   auto& wfc_leader      = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
   auto& p_leader        = p_list.getLeader();
   const auto& dt_leader = p_leader.getDistTableAA(my_table_ID_);
@@ -643,6 +652,72 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
 }
 
 template<typename FT>
+void TwoBodyJastrow<FT>::syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list)
+{
+  auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  if (!wfc_leader.use_offload_)
+    return;
+  bool dirty = false;
+  for (int iw = 0; iw < wfc_list.size(); iw++)
+  {
+    auto& wfc = wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw);
+    dirty |= wfc.host_state_dirty_;
+    wfc.host_state_dirty_ = false;
+  }
+  /* Every walker's host copy is current when one of them goes dirty, because the reader
+   * that ran before the single walker write fetched the whole buffer, so the push is the
+   * whole buffer too.
+   */
+  if (dirty)
+    wfc_leader.mw_mem_handle_.getResource().mw_allUat.updateTo();
+}
+
+template<typename FT>
+void TwoBodyJastrow<FT>::mw_evalGrad(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                     const RefVectorWithLeader<ParticleSet>& p_list,
+                                     int iat,
+                                     std::vector<GradType>& grad_now) const
+{
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_evalGrad(wfc_list, p_list, iat, grad_now);
+    return;
+  }
+
+  /* dUat is device resident across the electron loop, so the base form's per walker host
+   * read would see the state as it was before the last accept. Only the moved electron's
+   * entry is wanted, nw times DIM numbers, so that is what the gather brings down rather
+   * than the whole array.
+   */
+  syncHostState(wfc_list);
+
+  auto& wfc_leader  = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  const int nw      = wfc_list.size();
+  auto& mw_mem      = wfc_leader.mw_mem_handle_.getResource();
+  auto& mw_grad_at  = mw_mem.mw_grad_at;
+  constexpr int dim = OHMMS_DIM;
+  mw_grad_at.resize(nw * dim);
+
+  {
+    const size_t npad   = wfc_leader.N_padded;
+    const size_t nwz    = nw;
+    const auto* uat_ptr = mw_mem.mw_allUat.device_data();
+    auto* out_dev       = mw_grad_at.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, out_dev)")
+    for (size_t iw = 0; iw < nwz; iw++)
+      for (int id = 0; id < dim; id++)
+        out_dev[iw * dim + id] =
+            uat_ptr[nwz * npad + iw * npad * dim + static_cast<size_t>(id) * npad + iat];
+  }
+  mw_grad_at.updateFrom();
+
+  // the caller accumulates across components, so this assigns its own term
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < dim; id++)
+      grad_now[iw][id] = mw_grad_at[iw * dim + id];
+}
+
+template<typename FT>
 void TwoBodyJastrow<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                            const RefVectorWithLeader<ParticleSet>& p_list,
                                            int iat,
@@ -654,6 +729,8 @@ void TwoBodyJastrow<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctio
     WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now);
     return;
   }
+
+  syncHostState(wfc_list);
 
   auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
   assert(this == &wfc_leader);
@@ -720,6 +797,8 @@ void TwoBodyJastrow<FT>::acceptMove(ParticleSet& P, int iat, bool safe_to_delay)
   }
   log_value_ += Uat[iat] - cur_Uat;
   Uat[iat]   = cur_Uat;
+  // the crowd buffer, if this walker's state is attached to one, now trails the host
+  host_state_dirty_ = true;
   dUat(iat)  = cur_dUat;
   d2Uat[iat] = cur_d2Uat;
 }
@@ -736,6 +815,8 @@ void TwoBodyJastrow<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
     WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
     return;
   }
+
+  syncHostState(wfc_list);
 
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader      = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
@@ -758,7 +839,6 @@ void TwoBodyJastrow<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
                    grp_ids.data(), nw, mw_vgl.device_data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
                    mw_allUat.device_data(), mw_cur_allu.data(), mw_log_delta.data(),
                    wfc_leader.mw_mem_handle_.getResource().mw_update_buffer);
-
   for (int iw = 0; iw < nw; iw++)
     wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw).log_value_ += mw_log_delta[iw];
 }
@@ -810,6 +890,8 @@ void TwoBodyJastrow<FT>::recompute(const ParticleSet& P)
       }
     }
   }
+  // the crowd buffer, if this walker's state is attached to one, now trails the host
+  host_state_dirty_ = true;
 }
 
 template<typename FT>
@@ -896,6 +978,8 @@ void TwoBodyJastrow<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionCom
     WaveFunctionComponent::mw_evaluateGL(wfc_list, p_list, G_list, L_list, fromscratch);
     return;
   }
+
+  syncHostState(wfc_list);
 
   auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
   assert(this == &wfc_leader);
