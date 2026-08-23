@@ -29,6 +29,27 @@ namespace
  * them grows with the number of sources and buys nothing on its own. The batch that asks
  * first finds them absent and reads the host distances for that move.
  */
+/** the work below which a launch costs more than the host reduction it replaces
+ *
+ * A two ion cell at 64 walkers measures 5.1 percent slower, 2 of 8 pairs, which puts the
+ * crossover near that product. Every batched entry point here asks the same question, so
+ * they ask it in one place and cannot drift apart.
+ *
+ * The value is overridable because a caller forming its factor from what the batched form
+ * left on the device depends on that form having run, and a small case otherwise has no way
+ * to be driven down the batched path deliberately.
+ */
+size_t batchedWorkThreshold()
+{
+  static const size_t value = [] {
+    if (const char* c = std::getenv("QMCPACK_J1_BATCH_MIN_WORK"))
+      if (const long v = std::atol(c); v >= 0)
+        return static_cast<size_t>(v);
+    return size_t(512);
+  }();
+  return value;
+}
+
 bool deviceTempDistancesReady(const ParticleSet& p_leader, int table_id)
 {
   const auto& dt = p_leader.getDistTableAB(table_id);
@@ -168,7 +189,7 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
   const bool needs_recompute = wfc_leader.UpdateMode == ORB_PBYP_RATIO;
   if constexpr (HasMwEvaluateVGL<FT>::value)
   {
-    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= 512 &&
+    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= batchedWorkThreshold() &&
         deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
     {
       auto& p_leader        = p_list.getLeader();
@@ -217,7 +238,7 @@ void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionCompon
   /* Same trade as mw_ratioGrad, and the same gate: a launch against the host's reduction
    * over ions for every walker.
    */
-  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < batchedWorkThreshold() ||
       !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_calcRatio(wfc_list, p_list, iat, ratios);
@@ -279,13 +300,11 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
   const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
   const int nw          = wfc_list.size();
 
-  /* The batched form trades a pair of kernel launches per move for the host's reduction
-   * over ions, once per walker. Below some amount of work the launches cost more than the
-   * loop they replace. A two ion cell at 64 walkers measures 5.1 percent slower, 2 of 8
-   * pairs, which puts the crossover near that product, so the host loop serves the small
-   * end with a margin over the one point available to anchor it.
+  /* The batched form trades a pair of kernel launches per move for the host's reduction over
+   * ions, once per walker. Below some amount of work the launches cost more than the loop
+   * they replace; batchedWorkThreshold carries where that sits and why.
    */
-  if (static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+  if (static_cast<size_t>(nw) * wfc_leader.Nions < batchedWorkThreshold() ||
       !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
@@ -346,7 +365,7 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
    * way, rather than assumed. Where it does not run, the base form stages its own results,
    * which is two transfers against the one below.
    */
-  if (!wfc_leader.use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512 ||
+  if (!wfc_leader.use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < batchedWorkThreshold() ||
       !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
