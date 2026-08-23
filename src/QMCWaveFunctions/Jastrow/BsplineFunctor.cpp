@@ -20,9 +20,60 @@
 
 #include "BsplineFunctor.h"
 #include <cstdlib>
+#include <cstring>
 
 namespace qmcplusplus
 {
+template<typename REAL>
+char* BsplineFunctor<REAL>::stageFunctorTable(const int num_groups,
+                                             const BsplineFunctor* const functors[],
+                                             const size_t tail_bytes,
+                                             Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer)
+{
+  const size_t table_bytes = functorTableBytes(num_groups);
+  // the table, then the caller's per call region, then the image of the table as last sent
+  const size_t needed = table_bytes * 2 + tail_bytes;
+  bool table_is_new   = false;
+  if (transfer_buffer.size() != needed)
+  {
+    transfer_buffer.resize(needed);
+    // a fresh buffer carries no image to compare against and a device side never written
+    table_is_new = true;
+  }
+
+  char* const table = transfer_buffer.data();
+  char* const sent  = table + table_bytes + tail_bytes;
+
+  REAL** mw_coefs_ptr        = reinterpret_cast<REAL**>(table);
+  REAL* mw_DeltaRInv_ptr     = reinterpret_cast<REAL*>(table + sizeof(REAL*) * num_groups);
+  REAL* mw_cutoff_radius_ptr = mw_DeltaRInv_ptr + num_groups;
+  int* mw_max_index_ptr      = reinterpret_cast<int*>(table + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
+  for (int ig = 0; ig < num_groups; ig++)
+    if (functors[ig])
+    {
+      mw_coefs_ptr[ig]         = functors[ig]->spline_coefs_->device_data();
+      mw_DeltaRInv_ptr[ig]     = functors[ig]->DeltaRInv;
+      mw_cutoff_radius_ptr[ig] = functors[ig]->cutoff_radius;
+      mw_max_index_ptr[ig]     = functors[ig]->getMaxIndex();
+    }
+    else
+    {
+      mw_coefs_ptr[ig]         = nullptr;
+      mw_DeltaRInv_ptr[ig]     = 0.0;
+      mw_cutoff_radius_ptr[ig] = 0.0; // important! Prevent spline evaluation to access nullptr.
+      mw_max_index_ptr[ig]     = 0;
+    }
+
+  // a coefficient reallocation or a parameter change shows up as a difference in these bytes,
+  // which are the whole of what the device needs, so the compare is the exact test
+  if (table_is_new || std::memcmp(table, sent, table_bytes) != 0)
+  {
+    std::memcpy(sent, table, table_bytes);
+    transfer_buffer.updateTo(table_bytes, 0);
+  }
+  return transfer_buffer.device_data();
+}
+
 template<typename REAL>
 void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
                                           const int num_groups,
@@ -40,33 +91,9 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
   static_assert(DIM == 3, "only support 3D due to explicit x,y,z coded.");
   const size_t dist_stride = n_padded * (DIM + 1);
 
-  /* transfer buffer used for
-     * Bspline coefs device pointer sizeof(T*), DeltaRInv sizeof(T) and cutoff_radius sizeof(T)
-     * these contents change based on the group of the target particle, so it is prepared per call.
-     */
-  transfer_buffer.resize((sizeof(REAL*) + sizeof(REAL) * 2 + sizeof(int)) * num_groups);
-  REAL** mw_coefs_ptr        = reinterpret_cast<REAL**>(transfer_buffer.data());
-  REAL* mw_DeltaRInv_ptr     = reinterpret_cast<REAL*>(transfer_buffer.data() + sizeof(REAL*) * num_groups);
-  REAL* mw_cutoff_radius_ptr = mw_DeltaRInv_ptr + num_groups;
-  int* mw_max_index_ptr =
-      reinterpret_cast<int*>(transfer_buffer.data() + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
-  for (int ig = 0; ig < num_groups; ig++)
-    if (functors[ig])
-    {
-      mw_coefs_ptr[ig]         = functors[ig]->spline_coefs_->device_data();
-      mw_DeltaRInv_ptr[ig]     = functors[ig]->DeltaRInv;
-      mw_cutoff_radius_ptr[ig] = functors[ig]->cutoff_radius;
-      mw_max_index_ptr[ig]     = functors[ig]->getMaxIndex();
-    }
-    else
-    {
-      mw_coefs_ptr[ig]         = nullptr;
-      mw_DeltaRInv_ptr[ig]     = 0.0;
-      mw_cutoff_radius_ptr[ig] = 0.0; // important! Prevent spline evaluation to access nullptr.
-      mw_max_index_ptr[ig]     = 0;
-    }
-
-  auto* transfer_buffer_ptr = transfer_buffer.data();
+  // the functor table is all this kernel needs from the host and it does not change
+  // between calls, so it goes down only when it does
+  auto* transfer_buffer_ptr = stageFunctorTable(num_groups, functors, 0, transfer_buffer);
 
   /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
    * count for a one-body Jastrow and the electron count for a two-body one, so the team
@@ -83,7 +110,7 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
   }();
 
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
+                    is_device_ptr(transfer_buffer_ptr) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(from: mw_cur_allu[:n_padded*3*nw]) \
@@ -160,33 +187,9 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
                                         REAL* mw_vals,
                                         Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer)
 {
-  /* transfer buffer used for
-     * Bspline coefs device pointer sizeof(REAL*), DeltaRInv sizeof(REAL), cutoff_radius sizeof(REAL)
-     * these contents change based on the group of the target particle, so it is prepared per call.
-     */
-  transfer_buffer.resize((sizeof(REAL*) + sizeof(REAL) * 2 + sizeof(int)) * num_groups);
-  REAL** mw_coefs_ptr        = reinterpret_cast<REAL**>(transfer_buffer.data());
-  REAL* mw_DeltaRInv_ptr     = reinterpret_cast<REAL*>(transfer_buffer.data() + sizeof(REAL*) * num_groups);
-  REAL* mw_cutoff_radius_ptr = mw_DeltaRInv_ptr + num_groups;
-  int* mw_max_index_ptr =
-      reinterpret_cast<int*>(transfer_buffer.data() + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
-  for (int ig = 0; ig < num_groups; ig++)
-    if (functors[ig])
-    {
-      mw_coefs_ptr[ig]         = functors[ig]->spline_coefs_->device_data();
-      mw_DeltaRInv_ptr[ig]     = functors[ig]->DeltaRInv;
-      mw_cutoff_radius_ptr[ig] = functors[ig]->cutoff_radius;
-      mw_max_index_ptr[ig]     = functors[ig]->getMaxIndex();
-    }
-    else
-    {
-      mw_coefs_ptr[ig]         = nullptr;
-      mw_DeltaRInv_ptr[ig]     = 0.0;
-      mw_cutoff_radius_ptr[ig] = 0.0; // important! Prevent spline evaluation to access nullptr.
-      mw_max_index_ptr[ig]     = 0;
-    }
-
-  auto* transfer_buffer_ptr = transfer_buffer.data();
+  // the functor table is all this kernel needs from the host and it does not change
+  // between calls, so it goes down only when it does
+  auto* transfer_buffer_ptr = stageFunctorTable(num_groups, functors, 0, transfer_buffer);
 
   /* How wide a team may be, taken from the work it has.
    *
@@ -208,7 +211,7 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
   }();
 
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
+                    is_device_ptr(transfer_buffer_ptr) \
                     map(to: grp_ids[:n_src]) \
                     map(to:ref_at[:num_pairs], mw_dist[:dist_stride*num_pairs]) \
                     map(always, from:mw_vals[:num_pairs])")
@@ -257,34 +260,11 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
   static_assert(DIM == 3, "only support 3D due to explicit x,y,z coded.");
   const size_t dist_stride = n_padded * (DIM + 1);
 
-  /* transfer buffer used for
-     * Bspline coefs device pointer sizeof(REAL*), DeltaRInv sizeof(REAL), cutoff_radius sizeof(REAL)
-     * and packed accept list at most nw * sizeof(int)
-     * these contents change based on the group of the target particle, so it is prepared per call.
-     */
-  transfer_buffer.resize((sizeof(REAL*) + sizeof(REAL) * 2 + sizeof(int)) * num_groups + nw * sizeof(int));
-  REAL** mw_coefs_ptr        = reinterpret_cast<REAL**>(transfer_buffer.data());
-  REAL* mw_DeltaRInv_ptr     = reinterpret_cast<REAL*>(transfer_buffer.data() + sizeof(REAL*) * num_groups);
-  REAL* mw_cutoff_radius_ptr = mw_DeltaRInv_ptr + num_groups;
-  int* mw_max_index_ptr =
-      reinterpret_cast<int*>(transfer_buffer.data() + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
-  int* accepted_indices = mw_max_index_ptr + num_groups;
-
-  for (int ig = 0; ig < num_groups; ig++)
-    if (functors[ig])
-    {
-      mw_coefs_ptr[ig]         = functors[ig]->spline_coefs_->device_data();
-      mw_DeltaRInv_ptr[ig]     = functors[ig]->DeltaRInv;
-      mw_cutoff_radius_ptr[ig] = functors[ig]->cutoff_radius;
-      mw_max_index_ptr[ig]     = functors[ig]->getMaxIndex();
-    }
-    else
-    {
-      mw_coefs_ptr[ig]         = nullptr;
-      mw_DeltaRInv_ptr[ig]     = 0.0;
-      mw_cutoff_radius_ptr[ig] = 0.0; // important! Prevent spline evaluation to access nullptr.
-      mw_max_index_ptr[ig]     = 0;
-    }
+  // the functor table goes down only when it changes; the packed accept list that
+  // follows it is formed per call and sent on its own
+  const size_t table_bytes  = functorTableBytes(num_groups);
+  auto* transfer_buffer_ptr = stageFunctorTable(num_groups, functors, nw * sizeof(int), transfer_buffer);
+  int* accepted_indices     = reinterpret_cast<int*>(transfer_buffer.data() + table_bytes);
 
   // Packing the accepted walkers here is what makes the kernel's loop bound depend on a
   // count only the host can form. Filling the list with every walker and marking the
@@ -293,10 +273,11 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
   // Without a device mask the list is marked from the host decision; with one the kernel
   // reads the mask and the host decision is not needed at all.
   if (!accept_mask)
+  {
     for (int iw = 0; iw < nw; iw++)
       accepted_indices[iw] = isAccepted[iw] ? iw : -1;
-
-  auto* transfer_buffer_ptr = transfer_buffer.data();
+    transfer_buffer.updateTo(nw * sizeof(int), table_bytes);
+  }
 
   /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
    * count for a one-body Jastrow and the electron count for a two-body one, so the team
@@ -313,7 +294,7 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
   }();
 
   PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    map(always, to: transfer_buffer_ptr[:transfer_buffer.size()]) \
+                    is_device_ptr(transfer_buffer_ptr) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(to: mw_vgl[:(DIM+2)*nw]) \
