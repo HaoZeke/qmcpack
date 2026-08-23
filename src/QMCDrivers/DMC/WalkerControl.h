@@ -165,9 +165,15 @@ private:
   IndexType max_copy_;
   ///trial energy energy
   FullPrecRealType trial_energy_;
-  /** Copied from curData[LE_MAX+rank_num] during branching
-   *  I think the point is to prove that this number doesn't need to be stashed at the end of the curData buffer.
-   *  \todo figure out if curData[LE_MAX...LE_MAX+num_ranks] can be eliminated
+  /** Copied from curData[LE_MAX+rank_num] during branching.
+   *
+   *  It can be taken out of that buffer, and it should not be. Every rank needs every rank's
+   *  count to build the redistribution, so a gather is required either way; carrying it in the
+   *  reduced vector fuses that gather into the reduction and costs one collective instead of
+   *  two. Splitting it into an allreduce of LE_MAX plus an allgather of one int was measured
+   *  2 to 4 times slower in WalkerControl::allreduce at 4, 8 and 16 ranks. The payload is
+   *  about 192 bytes at 16 ranks, so what is being paid for is the synchronisation, and two
+   *  barriers cost more than one however little the second one carries.
    */
   std::vector<int> num_per_rank_;
   ///offset of the particle index for a fair distribution
