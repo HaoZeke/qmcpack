@@ -20,6 +20,8 @@
 #include <stdexcept>
 
 #include "TrialWaveFunction.h"
+
+#include <limits>
 #include <omp.h>
 #include "ResourceCollection.h"
 #include "Utilities/IteratorUtility.h"
@@ -784,9 +786,18 @@ void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWa
     const auto wfc_list(extractWFCRefList(wf_list, i));
     wavefunction_components[i]->mw_ratioGradDevice(wfc_list, p_list, iat, ratios_z, grad_new, ratios_device_prod,
                                                    grads_device_sum);
-    for (int iw = 0; iw < num_wf; iw++)
-      ratios[iw] *= ratios_z[iw];
   }
+
+  /* The product this call produces lives in ratios_device_prod, and a component whose
+   * state is device resident forms its factor without bringing anything to the host.
+   * ratios and grad_new therefore cannot be filled here: a component that skipped the
+   * host work leaves its slot untouched, and a partial product is a plausible-looking
+   * wrong number. They are poisoned so that a caller reading them fails rather than
+   * proceeds. Callers that need host values call mw_calcRatioGrad instead.
+   */
+  const auto poison = std::numeric_limits<RealType>::quiet_NaN();
+  std::fill(ratios.begin(), ratios.end(), PsiValue(poison));
+  std::fill(grad_new.begin(), grad_new.end(), GradType(poison));
 }
 
 void TrialWaveFunction::printGL(ParticleSet::ParticleGradient& G, ParticleSet::ParticleLaplacian& L, std::string tag)

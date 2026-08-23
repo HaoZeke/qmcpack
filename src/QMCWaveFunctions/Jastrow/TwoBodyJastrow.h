@@ -152,6 +152,14 @@ private:
   posT accumulateG(const valT* restrict du, const DisplRow& displ) const;
   /**@} */
 
+  /** run the proposed-position VGL kernel for the whole crowd, leaving the result in
+   *  the resource's mw_vgl on the device. Both the host and the device ratio forms
+   *  need exactly this and differ only in what they do with it afterwards.
+   */
+  void mw_evaluateProposedVGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                              const RefVectorWithLeader<ParticleSet>& p_list,
+                              int iat) const;
+
 public:
   TwoBodyJastrow(const std::string& obj_name, ParticleSet& p, bool use_offload);
   TwoBodyJastrow(const TwoBodyJastrow& rhs) = delete;
