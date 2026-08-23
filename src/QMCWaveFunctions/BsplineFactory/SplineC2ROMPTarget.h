@@ -71,6 +71,13 @@ public:
 private:
   /// timer for offload portion
   NewTimer& offload_timer_;
+  /** every (block, team) pair of the table, flattened so one kernel covers all blocks
+   *
+   * Held by shared_ptr for the reason mKK and myKcart are: a clone shares the buffer
+   * that was pushed to the device rather than copying a host image whose device side
+   * was never written.
+   */
+  std::shared_ptr<OffloadVector<SplineBlockTeam<ST>>> block_teams_;
   ///number of complex bands
   int nComplexBands;
 
@@ -175,6 +182,7 @@ public:
     // transfer static data to GPU
     mKK->updateTo();
     myKcart->updateTo();
+    buildSplineBlockTeams<ST>(*SplineInst, block_teams_);
   }
 
   /** remap kPoints to pack the double copy */
