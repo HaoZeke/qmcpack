@@ -480,6 +480,7 @@ void TwoBodyJastrow<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
   FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
                      mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
+  mw_vgl.updateFrom(); // read on the host just below
 
   for (int iw = 0; iw < nw; iw++)
   {
@@ -562,6 +563,7 @@ void TwoBodyJastrow<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComp
   FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
                      mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
+  mw_vgl.updateFrom(); // read on the host just below
 
   for (int iw = 0; iw < nw; iw++)
   {

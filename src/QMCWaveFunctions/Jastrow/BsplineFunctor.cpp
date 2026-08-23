@@ -95,6 +95,11 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
   // between calls, so it goes down only when it does
   auto* transfer_buffer_ptr = stageFunctorTable(num_groups, functors, 0, transfer_buffer);
 
+  /* The results are left on the device. A caller that reads them on the host asks for them,
+   * which is one line at that caller, and a caller that consumes them on the device pays
+   * nothing. Bringing them back here made the second kind impossible.
+   */
+
   /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
    * count for a one-body Jastrow and the electron count for a two-body one, so the team
    * is far wider than the work unless it is told otherwise.
@@ -113,8 +118,7 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
                     is_device_ptr(transfer_buffer_ptr) \
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
-                    map(from: mw_cur_allu[:n_padded*3*nw]) \
-                    map(always, from: mw_vgl[:(DIM+2)*nw])")
+                    map(from: mw_cur_allu[:n_padded*3*nw])")
   for (int ip = 0; ip < nw; ip++)
   {
     REAL val_sum(0);
