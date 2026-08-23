@@ -38,6 +38,10 @@ namespace
  * The value is overridable because a caller forming its factor from what the batched form
  * left on the device depends on that form having run, and a small case otherwise has no way
  * to be driven down the batched path deliberately.
+ *
+ * Lowering it is not only a performance choice. A two ion cell driven down the batched path
+ * produces a NaN kinetic energy, so the threshold is holding a broken configuration out of
+ * reach as well as a slow one. Raise it freely; lower it only to reproduce that.
  */
 size_t batchedWorkThreshold()
 {
