@@ -69,21 +69,6 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 #endif
   }
 
-#if !defined(QMC_COMPLEX)
-  /* Orbitals that are real without a duplex table are served by SplineR2R, in host and
-   * offload builds alike, and it still reaches its coefficients through getSplinePtr(),
-   * which requires a single block. The restriction belongs to the table rather than to
-   * the build, so it is asked about here rather than under the offload flag.
-   */
-  if (!use_duplex_splines_ && distributed_ranks > 1)
-  {
-    app_warning() << "Distributing the memory of spline coefficients is not supported for a real einspline table. "
-                     "Overriding distributed_ranks to 1."
-                  << std::endl;
-    distributed_ranks = 1;
-  }
-#endif
-
   auto dist_comm_ptr = std::make_unique<Communicate>(*myComm, myComm->size() / (distributed_ranks * shared_ranks));
 
   app_log() << "  Using " << (use_duplex_splines_ ? "complex" : "real") << " einspline table." << std::endl;

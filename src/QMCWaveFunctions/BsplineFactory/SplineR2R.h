@@ -63,6 +63,12 @@ private:
   const bool use_offload_;
   /// timer for offload portion
   NewTimer& offload_timer_;
+  /** every (block, team) pair of the table, flattened so one kernel covers all blocks
+   *
+   * Held by shared_ptr so a clone shares the buffer that was pushed to the device rather
+   * than copying a host image whose device side was never written.
+   */
+  std::shared_ptr<OffloadVector<SplineBlockTeam<ST>>> block_teams_;
   /// if true, gamma point calculation
   bool IsGamma;
   ///\f$GGt=G^t G \f$, transformation for tensor in LatticeUnit to CartesianUnit, e.g. Hessian

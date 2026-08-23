@@ -60,12 +60,22 @@ template<typename ST>
 void SplineR2R<ST>::finalizeConstruction()
 {
   if (use_offload_)
+  {
     SplineInst->finalize();
+    buildSplineBlockTeams<ST>(*SplineInst, block_teams_);
+  }
 }
 
 template<typename ST>
 void SplineR2R<ST>::storeParamsBeforeRotation()
 {
+  /* Rotation mixes every orbital with every other, so with the coefficients divided each
+   * output block would need input from all of them: a cross-block gemm rather than a
+   * change of indexing. Saying so here beats the bare throw from getSplinePtr().
+   */
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineR2R: orbital rotation is not implemented for coefficients distributed across "
+                             "ranks; set distributed_ranks to 1 for optimisation runs.");
   const auto spline_ptr     = SplineInst->getSplinePtr();
   const auto coefs_tot_size = spline_ptr->coefs_size;
   coef_copy_                = std::make_shared<std::vector<ST>>(coefs_tot_size);
@@ -115,6 +125,13 @@ void SplineR2R<ST>::storeParamsBeforeRotation()
 template<typename ST>
 void SplineR2R<ST>::applyRotation(const ValueMatrix& rot_mat, bool use_stored_copy)
 {
+  /* Rotation mixes every orbital with every other, so with the coefficients divided each
+   * output block would need input from all of them: a cross-block gemm rather than a
+   * change of indexing. Saying so here beats the bare throw from getSplinePtr().
+   */
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineR2R: orbital rotation is not implemented for coefficients distributed across "
+                             "ranks; set distributed_ranks to 1 for optimisation runs.");
   // SplineInst is a MultiBspline. See src/spline2/MultiBspline.hpp
   const auto spline_ptr = SplineInst->getSplinePtr();
   assert(spline_ptr != nullptr);
@@ -294,20 +311,26 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   mw_offload_scratch.resize(spline_padded_size * mw_nVP);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr    = SplineInst->getSplinePtr();
+  const auto* spline_ptr    = &SplineInst->getBlock(0);
   auto* offload_scratch_ptr = mw_offload_scratch.data();
   auto* buffer_H2D_ptr      = det_ratios_buffer_H2D.data();
   auto* ratios_private_ptr  = mw_ratios_private.data();
 
   {
     ScopedTimer offload(offload_timer_);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) thread_limit(team_width) \
+    /* The interpolation already stands apart from the assignment here, so walking the
+     * blocks needs no fast path: one team grid over every (block, team) pair covers a
+     * divided table and an undivided one alike.
+     */
+    const auto* teams_ptr     = block_teams_->data();
+    const int num_block_teams = block_teams_->size();
+
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(num_block_teams*mw_nVP) thread_limit(team_width) \
                     map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
     for (int iat = 0; iat < mw_nVP; iat++)
-      for (int team_id = 0; team_id < NumTeams; team_id++)
+      for (int t = 0; t < num_block_teams; t++)
       {
-        const size_t first = ChunkSizePerTeam * team_id;
-        const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+        const auto& team = teams_ptr[t];
 
         auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
         auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + n_inv_rows * sizeof(ValueType*));
@@ -318,9 +341,10 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
                                               pos_scratch[iat * 4 + 3], ix, iy, iz, a, b, c);
 
         PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = 0; index < last - first; index++)
-          spline2offload::evaluate_v_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c,
-                                             offload_scratch_iat_ptr + first + index);
+        for (int index = 0; index < team.last - team.first; index++)
+          spline2offload::evaluate_v_impl_v2(team.coefs, team.x_stride, team.y_stride, team.z_stride, ix, iy, iz,
+                                             team.first + index, a, b, c,
+                                             offload_scratch_iat_ptr + team.out_offset + team.first + index);
       }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) thread_limit(team_width) \
@@ -489,7 +513,10 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
   rg_private.resize(num_pos, NumTeams * 4);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr         = SplineInst->getSplinePtr();
+  const auto* spline_ptr         = &SplineInst->getBlock(0);
+  const ST dxInv                 = spline_ptr->x_grid.delta_inv;
+  const ST dyInv                 = spline_ptr->y_grid.delta_inv;
+  const ST dzInv                 = spline_ptr->z_grid.delta_inv;
   auto* buffer_H2D_ptr           = buffer_H2D.data();
   auto* offload_scratch_ptr      = mw_offload_scratch.data();
   auto* GGt_ptr                  = GGt_offload->data();
@@ -502,13 +529,17 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
 
   {
     ScopedTimer offload(offload_timer_);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
+    // the interpolation stands apart from the assignment here too, so one team grid over
+    // every (block, team) pair serves a divided table and an undivided one alike
+    const auto* teams_ptr     = block_teams_->data();
+    const int num_block_teams = block_teams_->size();
+
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(num_block_teams*num_pos) \
                     map(always, to: buffer_H2D_ptr[:buffer_H2D.size()])")
     for (int iw = 0; iw < num_pos; iw++)
-      for (int team_id = 0; team_id < NumTeams; team_id++)
+      for (int t = 0; t < num_block_teams; t++)
       {
-        const size_t first = ChunkSizePerTeam * team_id;
-        const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+        const auto& team = teams_ptr[t];
 
         auto* restrict offload_scratch_iw_ptr = offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
         const auto* restrict pos_iw_ptr       = reinterpret_cast<ST*>(buffer_H2D_ptr + buffer_H2D_stride * iw);
@@ -518,11 +549,12 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
                                               c, da, db, dc, d2a, d2b, d2c);
 
         PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = 0; index < last - first; index++)
+        for (int index = 0; index < team.last - team.first; index++)
         {
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + first + index,
-                                               spline_padded_size);
+          const size_t output_index = team.out_offset + team.first + index;
+          spline2offload::evaluate_vgh_impl_v2(team.coefs, team.x_stride, team.y_stride, team.z_stride, dxInv, dyInv,
+                                               dzInv, ix, iy, iz, team.first + index, a, b, c, da, db, dc, d2a, d2b,
+                                               d2c, offload_scratch_iw_ptr + output_index, spline_padded_size);
         }
       }
 
