@@ -112,20 +112,8 @@ inline void evaluate_v_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>:
                                const T c[4],
                                T* restrict vals)
 {
-  const intptr_t xs = spline_m->x_stride;
-  const intptr_t ys = spline_m->y_stride;
-  const intptr_t zs = spline_m->z_stride;
-
-  T val = T();
-  for (int i = 0; i < 4; i++)
-    for (int j = 0; j < 4; j++)
-    {
-      const T* restrict coefs = spline_coefs + ((ix + i) * xs + (iy + j) * ys + iz * zs);
-      val += a[i] * b[j] *
-          (c[0] * coefs[index] + c[1] * coefs[index + zs] + c[2] * coefs[index + zs * 2] +
-           c[3] * coefs[index + zs * 3]);
-    }
-  *vals = val;
+  evaluate_v_impl_v2(spline_coefs, spline_m->x_stride, spline_m->y_stride, spline_m->z_stride, ix, iy, iz, index, a, b,
+                     c, vals);
 }
 
 } // namespace spline2offload

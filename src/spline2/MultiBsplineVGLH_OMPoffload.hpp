@@ -363,8 +363,13 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
  *  symGGt is the symmetrised metric the caller already forms once per team.
  */
 template<typename T>
-inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
-                                 const T* restrict spline_coefs,
+inline void evaluate_vgl_impl_v2(const T* restrict spline_coefs,
+                                 const intptr_t xs,
+                                 const intptr_t ys,
+                                 const intptr_t zs,
+                                 const T dxInv,
+                                 const T dyInv,
+                                 const T dzInv,
                                  int ix,
                                  int iy,
                                  int iz,
@@ -383,10 +388,6 @@ inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
                                  const size_t out_offset,
                                  const size_t lapl_offset)
 {
-  const intptr_t xs = spline_m->x_stride;
-  const intptr_t ys = spline_m->y_stride;
-  const intptr_t zs = spline_m->z_stride;
-
   T val = T();
   T gx = T(), gy = T(), gz = T();
   T hxx = T(), hxy = T(), hxz = T(), hyy = T(), hyz = T(), hzz = T();
@@ -423,10 +424,6 @@ inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
       val += pre00 * sum0;
     }
 
-  const T dxInv = spline_m->x_grid.delta_inv;
-  const T dyInv = spline_m->y_grid.delta_inv;
-  const T dzInv = spline_m->z_grid.delta_inv;
-
   val_grads_lapl[0]              = val;
   val_grads_lapl[out_offset]     = gx * dxInv;
   val_grads_lapl[out_offset * 2] = gy * dyInv;
@@ -434,6 +431,39 @@ inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
   val_grads_lapl[lapl_offset]    = hxx * dxInv * dxInv * symGGt[0] + hxy * dxInv * dyInv * symGGt[1] +
       hxz * dxInv * dzInv * symGGt[2] + hyy * dyInv * dyInv * symGGt[3] + hyz * dyInv * dzInv * symGGt[4] +
       hzz * dzInv * dzInv * symGGt[5];
+}
+
+/** the descriptor form, forwarding to the strided one
+ *
+ * The blocks of a distributed table share a grid, so a kernel covering all of them holds
+ * the strides and the grid spacings in a flat list rather than reading a descriptor per
+ * block. Callers with a descriptor in hand keep this signature.
+ */
+template<typename T>
+inline void evaluate_vgl_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
+                                 const T* restrict spline_coefs,
+                                 int ix,
+                                 int iy,
+                                 int iz,
+                                 const int index,
+                                 const T a[4],
+                                 const T b[4],
+                                 const T c[4],
+                                 const T da[4],
+                                 const T db[4],
+                                 const T dc[4],
+                                 const T d2a[4],
+                                 const T d2b[4],
+                                 const T d2c[4],
+                                 const T symGGt[6],
+                                 T* restrict val_grads_lapl,
+                                 const size_t out_offset,
+                                 const size_t lapl_offset)
+{
+  evaluate_vgl_impl_v2(spline_coefs, spline_m->x_stride, spline_m->y_stride, spline_m->z_stride,
+                       static_cast<T>(spline_m->x_grid.delta_inv), static_cast<T>(spline_m->y_grid.delta_inv),
+                       static_cast<T>(spline_m->z_grid.delta_inv), ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
+                       d2c, symGGt, val_grads_lapl, out_offset, lapl_offset);
 }
 
 } // namespace spline2offload

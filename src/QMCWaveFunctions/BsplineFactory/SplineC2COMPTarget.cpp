@@ -1108,22 +1108,27 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
     }
     else
     {
-    for (size_t ib = 0; ib < num_blocks; ib++)
-    {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
-      const size_t block_splines = spline_ptr->num_splines;
-      if (block_splines == 0)
-        continue;
-      const size_t block_offset = block_offsets[ib];
-      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+    /* One team grid over every (block, team) pair, as in mw_evaluateDetRatios: one launch
+     * rather than one per block. The blocks share a grid, so a record carries the
+     * coefficients, the strides and its range, and the grid spacings come from any block.
+     */
+    const auto* spline_ptr    = &SplineInst->getBlock(0);
+    const auto* teams_ptr     = block_teams_->data();
+    const int num_block_teams = block_teams_->size();
+    const ST dxInv            = spline_ptr->x_grid.delta_inv;
+    const ST dyInv            = spline_ptr->y_grid.delta_inv;
+    const ST dzInv            = spline_ptr->z_grid.delta_inv;
 
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*num_pos) \
+    {
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(num_block_teams*num_pos) \
                       map(always, to: buffer_H2D_ptr[:buffer_H2D.size()])")
       for (int iw = 0; iw < num_pos; iw++)
-        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        for (int t = 0; t < num_block_teams; t++)
         {
-          const size_t first = ChunkSizePerTeam * team_id;
-          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+          const auto& team          = teams_ptr[t];
+          const size_t first        = team.first;
+          const size_t last         = team.last;
+          const size_t block_offset = team.out_offset;
 
           auto* restrict offload_scratch_iw_ptr =
               offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
@@ -1162,9 +1167,9 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
           {
             // coefficients are indexed within the block, results at the global offset
             const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgl_impl_v2(spline_ptr, spline_ptr->coefs, ix, iy, iz, first + index, a, b,
-                                                 c, da, db, dc, d2a, d2b, d2c, symGGt,
-                                                 offload_scratch_iw_ptr + output_index, spline_padded_size,
+            spline2offload::evaluate_vgl_impl_v2(team.coefs, team.x_stride, team.y_stride, team.z_stride, dxInv, dyInv,
+                                                 dzInv, ix, iy, iz, first + index, a, b, c, da, db, dc, d2a, d2b, d2c,
+                                                 symGGt, offload_scratch_iw_ptr + output_index, spline_padded_size,
                                                  spline_padded_size * SoAFields3D::LAPL);
             }
           }
