@@ -119,6 +119,27 @@ void QMCDriverNew::initPopulationAndCrowds(const AdjustedWalkerCounts& awc)
                 << "                        blocks = " << qmcdriver_input_.get_max_blocks() << std::endl
                 << std::endl;
 
+#ifdef ENABLE_OFFLOAD
+  /* Walkers per crowd is the width of the device work, and the crowd count is how many times
+   * every kernel is launched, so on a device this pair sets throughput rather than just how
+   * the walkers are grouped. Measured on one system and one device, the same walkers in crowds
+   * of 64 ran 2.8 to 4 times faster than in crowds of 8 or 16, with the launch count and the
+   * runtime's per-launch host callback rising in step.
+   *
+   * The default is one crowd per thread, which is the right rule for a host and the wrong one
+   * here: it ties a device work width to a host thread count. Say so when the default has left
+   * the crowds narrow, since the cost is invisible otherwise and costs nothing to change in a
+   * deck. The floor is deliberately well below the measured optimum so this stays quiet unless
+   * the configuration is clearly poor.
+   */
+  if (const size_t nc = awc.walkers_per_crowd.size();
+      nc > 1 && !qmcdriver_input_.get_num_crowds() && awc.walkers_per_crowd[0] < 32)
+    app_warning() << "Only " << awc.walkers_per_crowd[0] << " walkers per crowd over " << nc
+                  << " crowds, from the default of one crowd per thread. On a device every crowd launches its own "
+                     "kernels, so throughput usually improves with fewer, wider crowds. Setting 'crowds' explicitly "
+                     "is worth measuring." << std::endl;
+#endif
+
   // set num_global_walkers explicitly and then make local walkers.
   population_.set_num_global_walkers(awc.global_walkers);
 
