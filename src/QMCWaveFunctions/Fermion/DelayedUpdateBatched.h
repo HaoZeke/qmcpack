@@ -410,6 +410,61 @@ public:
       grad_now[iw] = {grads_value_v[iw][0], grads_value_v[iw][1], grads_value_v[iw][2]};
   }
 
+  /** the gradients for the changed row, left in device memory
+   *
+   * The same computation as mw_evalGrad, stopping before the copy down. A caller that
+   * only feeds the result to another device side step pays neither the copy nor the
+   * host side unpacking of it, once per particle per step.
+   * The result is mw_rsc.grads_value_v, nw by grad_size on the device.
+   */
+  static void mw_evalGradDevice(const RefVectorWithLeader<This_t>& engines,
+                                MultiWalkerResource& mw_rsc,
+                                const RefVector<DualMatrix<Value>>& psiMinv_refs,
+                                const std::vector<const Value*>& dpsiM_row_list,
+                                const int rowchanged,
+                                const int grad_size)
+  {
+    auto& engine_leader = engines.getLeader();
+    if (!engine_leader.no_delayed_update_)
+      mw_prepareInvRow(engines, mw_rsc, psiMinv_refs, rowchanged);
+
+    auto& queue               = mw_rsc.queue;
+    auto& evalGrad_buffer_H2D = mw_rsc.evalGrad_buffer_H2D;
+    auto& grads_value_v       = mw_rsc.grads_value_v;
+
+    const int nw                     = engines.size();
+    constexpr size_t num_ptrs_packed = 2; // it must match packing and unpacking
+    evalGrad_buffer_H2D.resize(sizeof(Value*) * num_ptrs_packed * nw);
+    Matrix<const Value*> ptr_buffer(reinterpret_cast<const Value**>(evalGrad_buffer_H2D.data()), num_ptrs_packed, nw);
+    for (int iw = 0; iw < nw; iw++)
+    {
+      if (engine_leader.no_delayed_update_)
+      {
+        DualMatrix<Value>& psiMinv = psiMinv_refs[iw];
+        ptr_buffer[0][iw]          = psiMinv.device_data() + rowchanged * psiMinv.cols();
+      }
+      else
+        ptr_buffer[0][iw] = engines[iw].invRow.device_data();
+      ptr_buffer[1][iw] = dpsiM_row_list[iw];
+    }
+
+    queue.enqueueH2D(evalGrad_buffer_H2D);
+
+    if (grads_value_v.rows() != nw || grads_value_v.cols() != grad_size)
+      grads_value_v.resize(nw, grad_size);
+
+    const Value** invRow_ptr    = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data());
+    const Value** dpsiM_row_ptr = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data()) + nw;
+
+    compute::calcGradients_batched(queue, engine_leader.invRow.size(), invRow_ptr, dpsiM_row_ptr,
+                                   grads_value_v.device_data(), nw);
+    /* The consumer is an OpenMP kernel on a different stream, so the queue is still
+     * drained. What this form drops is the copy down of the gradients themselves and
+     * the host side unpacking that follows it.
+     */
+    queue.sync();
+  }
+
   template<typename GT>
   static void mw_evalGradWithSpin(const RefVectorWithLeader<This_t>& engines,
                                   MultiWalkerResource& mw_rsc,

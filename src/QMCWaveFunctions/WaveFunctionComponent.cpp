@@ -88,6 +88,33 @@ void WaveFunctionComponent::mw_evalGrad(const RefVectorWithLeader<WaveFunctionCo
     grad_now[iw] = wfc_list[iw].evalGrad(p_list[iw], iat);
 }
 
+void WaveFunctionComponent::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                              const RefVectorWithLeader<ParticleSet>& p_list,
+                                              int iat,
+                                              std::vector<GradType>& grad_now,
+                                              Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+{
+  const int nw = wfc_list.size();
+  mw_evalGrad(wfc_list, p_list, iat, grad_now);
+
+  /* The host values have to reach the sum the device side steps read, so they are staged
+   * once and added there. A component that overrides this never forms them at all.
+   */
+  constexpr int dim = OHMMS_DIM;
+  Vector<ValueType, OffloadPinnedAllocator<ValueType>> staged(nw * dim);
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < dim; id++)
+      staged[iw * dim + id] = static_cast<ValueType>(grad_now[iw][id]);
+  staged.updateTo();
+
+  const auto* src_ptr = staged.device_data();
+  auto* dst_ptr       = grads_device_now.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < dim; id++)
+      dst_ptr[iw * dim + id] += src_ptr[iw * dim + id];
+}
+
 void WaveFunctionComponent::mw_evalGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                                 const RefVectorWithLeader<ParticleSet>& p_list,
                                                 int iat,

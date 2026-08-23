@@ -20,6 +20,8 @@
 #include "QMCWaveFunctions/TWFGrads.hpp"
 #include "TauParams.hpp"
 
+#include <stdexcept>
+
 namespace qmcplusplus
 {
 /// this class implements drift modification
@@ -57,6 +59,21 @@ public:
    */
   virtual bool isUNRScaling() const { return false; }
   virtual RealType getUNRScalingA() const { return RealType(0); }
+
+  /** the drifts for one electron across the walkers, formed in device memory
+   *
+   *  grads and drifts are device pointers, [nw][dim] flat. Only a modifier whose scaling
+   *  a target region can reproduce provides this, which is what isUNRScaling reports, so
+   *  the default refuses rather than silently producing the wrong drift.
+   */
+  virtual void getDriftsDevice(RealType tau,
+                               size_t nw,
+                               int dim,
+                               const QMCTraits::ValueType* grads,
+                               RealType* drifts) const
+  {
+    throw std::runtime_error("DriftModifierBase::getDriftsDevice has no device form for this modifier");
+  }
 
   virtual bool parseXML(xmlNodePtr cur) { return true; }
 

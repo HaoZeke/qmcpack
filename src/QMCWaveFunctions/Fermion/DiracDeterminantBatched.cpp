@@ -225,6 +225,45 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evalGrad(const RefVectorWithLeade
 }
 
 template<PlatformKind PL, typename VT, typename FPVT>
+void DiracDeterminantBatched<PL, VT, FPVT>::mw_evalGradDevice(
+    const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+    const RefVectorWithLeader<ParticleSet>& p_list,
+    int iat,
+    std::vector<GradType>& grad_now,
+    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  auto& mw_res     = wfc_leader.mw_res_handle_.getResource();
+  ScopedTimer local_timer(RatioTimer);
+
+  const int nw = wfc_list.size();
+  std::vector<const Value*> dpsiM_row_list(nw, nullptr);
+  RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
+  engine_list.reserve(nw);
+
+  const int WorkingIndex = iat - FirstIndex;
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+    dpsiM_row_list[iw] = det.psiM_vgl.device_data() + psiM_vgl.capacity() + NumOrbitals * WorkingIndex * DIM;
+    engine_list.push_back(det.det_engine_);
+  }
+
+  constexpr int dim = OHMMS_DIM;
+  UpdateEngine::mw_evalGradDevice(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs, dpsiM_row_list, WorkingIndex,
+                                  dim);
+
+  // the engine writes its own value type, so the widening happens where the values are
+  const auto* src_ptr = mw_res.engine_rsc.grads_value_v.device_data();
+  auto* dst_ptr       = grads_device_now.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < dim; id++)
+      dst_ptr[iw * dim + id] += static_cast<ValueType>(src_ptr[iw * dim + id]);
+}
+
+template<PlatformKind PL, typename VT, typename FPVT>
 typename DiracDeterminantBatched<PL, VT, FPVT>::Grad DiracDeterminantBatched<PL, VT, FPVT>::evalGradWithSpin(
     ParticleSet& P,
     int iat,

@@ -743,6 +743,40 @@ void TrialWaveFunction::mw_calcRatioGrad(const RefVectorWithLeader<TrialWaveFunc
   }
 }
 
+void TrialWaveFunction::mw_evalGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                          const RefVectorWithLeader<ParticleSet>& p_list,
+                                          int iat,
+                                          std::vector<GradType>& grad_now,
+                                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now)
+{
+  const int num_wf = wf_list.size();
+  grad_now.resize(num_wf);
+  std::fill(grad_now.begin(), grad_now.end(), GradType(0));
+
+  auto& wf_leader = wf_list.getLeader();
+  ScopedTimer local_timer(wf_leader.TWF_timers_[VGL_TIMER]);
+  auto& wavefunction_components = wf_leader.Z;
+  const int num_wfc             = wavefunction_components.size();
+
+  constexpr int dim = OHMMS_DIM;
+  grads_device_now.resize(num_wf * dim);
+  {
+    auto* seed_ptr = grads_device_now.device_data();
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(seed_ptr)")
+    for (int iw = 0; iw < num_wf; iw++)
+      for (int id = 0; id < dim; id++)
+        seed_ptr[iw * dim + id] = ValueType(0);
+  }
+
+  std::vector<GradType> grad_z(num_wf);
+  for (int i = 0; i < num_wfc; ++i)
+  {
+    ScopedTimer z_timer(wf_leader.WFC_timers_[VGL_TIMER + TIMER_SKIP * i]);
+    wavefunction_components[i]->mw_evalGradDevice(extractWFCRefList(wf_list, i), p_list, iat, grad_z,
+                                                  grads_device_now);
+  }
+}
+
 void TrialWaveFunction::mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
                                                const RefVectorWithLeader<ParticleSet>& p_list,
                                                int iat,

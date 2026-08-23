@@ -333,6 +333,22 @@ public:
                                   Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                                   Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const;
 
+  /** the component's gradient term at the current position, summed in device memory
+   *
+   * grads_device_now is the running sum over components, flat as [nw][DIM], seeded with
+   * zero by the caller. A component whose gradient is already device resident adds to it
+   * without the value passing through the host, which is what lets the drift and the
+   * proposed position be formed there too.
+   *
+   * The default form computes on the host and sends the result up, so a component with no
+   * device path stays correct at the cost of one small transfer.
+   */
+  virtual void mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                 const RefVectorWithLeader<ParticleSet>& p_list,
+                                 int iat,
+                                 std::vector<GradType>& grad_now,
+                                 Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const;
+
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet
    * @param iat index of the particle whose new position was proposed

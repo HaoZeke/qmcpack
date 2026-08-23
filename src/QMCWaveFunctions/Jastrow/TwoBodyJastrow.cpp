@@ -643,6 +643,38 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
 }
 
 template<typename FT>
+void TwoBodyJastrow<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                           const RefVectorWithLeader<ParticleSet>& p_list,
+                                           int iat,
+                                           std::vector<GradType>& grad_now,
+                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+{
+  if (!use_offload_)
+  {
+    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now);
+    return;
+  }
+
+  auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  assert(this == &wfc_leader);
+  const int nw      = wfc_list.size();
+  const size_t npad = wfc_leader.N_padded;
+
+  // dUat sits at the DIM blocks after the values, walker major within each dimension
+  const auto* uat_ptr = wfc_leader.mw_mem_handle_.getResource().mw_allUat.device_data();
+  auto* dst_ptr       = grads_device_now.device_data();
+  constexpr int dim   = OHMMS_DIM;
+  const int nd        = static_cast<int>(wfc_leader.ndim);
+  const size_t base   = static_cast<size_t>(nw) * npad;
+
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, dst_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+    for (int id = 0; id < nd; id++)
+      dst_ptr[iw * dim + id] +=
+          static_cast<ValueType>(uat_ptr[base + iw * npad * dim + static_cast<size_t>(id) * npad + iat]);
+}
+
+template<typename FT>
 void TwoBodyJastrow<FT>::acceptMove(ParticleSet& P, int iat, bool safe_to_delay)
 {
   // get the old u, du, d2u
