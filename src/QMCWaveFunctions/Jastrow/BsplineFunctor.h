@@ -151,6 +151,36 @@ struct BsplineFunctor : public OptimizableFunctorBase
                    REAL* restrict distArrayCompressed,
                    int* restrict distIndices) const;
 
+  /// byte size of the group indexed functor table
+  static size_t functorTableBytes(const int num_groups)
+  {
+    return (sizeof(REAL*) + sizeof(REAL) * 2 + sizeof(int)) * num_groups;
+  }
+
+  /** put the group indexed functor table on the device, sending it only when it changes
+   *
+   * The table holds, per group, the coefficient device pointer, the inverse grid spacing, the
+   * cutoff radius and the max index. The kernels index it by group id, so no entry of it
+   * depends on the particle being moved, and no entry changes while the functors and their
+   * coefficient allocations stay put. The image of the table as last sent is kept in the same
+   * buffer, past the region any kernel reads, and the transfer happens only on a difference.
+   *
+   * The buffer is laid out as the table, then tail_bytes of the caller's own per call region,
+   * then the image of the last send. The table comes first so that a kernel reaching past it
+   * for the caller's region does the same arithmetic either way. A caller with a per call
+   * region sends that region itself, which is why tail_bytes is only reserved here.
+   *
+   * @param num_groups number of groups the table covers
+   * @param functors one functor per group, entries may be null
+   * @param tail_bytes size of the caller's per call region following the table
+   * @param transfer_buffer buffer the caller keeps across calls
+   * @return device address of the table, the base a kernel does its arithmetic from
+   */
+  static char* stageFunctorTable(const int num_groups,
+                                 const BsplineFunctor* const functors[],
+                                 const size_t tail_bytes,
+                                 Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer);
+
   /** compute value, gradient and laplacian for target particles
    * This more than just a batched call of evaluateVGL
    * @param iat the source particle that should be avoided (self pairs)
