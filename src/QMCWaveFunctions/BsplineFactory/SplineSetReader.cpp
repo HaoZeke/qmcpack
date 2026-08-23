@@ -57,16 +57,9 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   {
     // Sharing is supported on offload builds: the coefficients live in one MPI-3 shared
     // window per group of ranks and each rank maps that window onto its own device.
-    // Distributing is supported for the complex offload SPO, whose evaluation paths all
-    // walk the blocks. The real one still reaches the coefficients through
-    // getSplinePtr(), which requires a single block, so it stays restricted.
-#if !defined(QMC_COMPLEX)
-    if (distributed_ranks > 1)
-      app_warning() << "Offload implementation doesn't support distributing the memory of spline coefficients "
-                       "for real-valued orbitals. Overriding distributed_ranks to 1."
-                    << std::endl;
-    distributed_ranks = 1;
-#endif
+    // Distributing is supported for both offload SPOs, whose evaluation paths all walk
+    // the blocks. Orbital rotation still needs one block, and the SPO that offers it says
+    // so when asked to rotate a divided table.
 #if !defined(HAVE_MPI)
     if (shared_ranks > 1)
       app_warning() << "Sharing the memory of spline coefficients requires an MPI build. "
@@ -75,6 +68,21 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
     shared_ranks = 1;
 #endif
   }
+
+#if !defined(QMC_COMPLEX)
+  /* Orbitals that are real without a duplex table are served by SplineR2R, in host and
+   * offload builds alike, and it still reaches its coefficients through getSplinePtr(),
+   * which requires a single block. The restriction belongs to the table rather than to
+   * the build, so it is asked about here rather than under the offload flag.
+   */
+  if (!use_duplex_splines_ && distributed_ranks > 1)
+  {
+    app_warning() << "Distributing the memory of spline coefficients is not supported for a real einspline table. "
+                     "Overriding distributed_ranks to 1."
+                  << std::endl;
+    distributed_ranks = 1;
+  }
+#endif
 
   auto dist_comm_ptr = std::make_unique<Communicate>(*myComm, myComm->size() / (distributed_ranks * shared_ranks));
 
