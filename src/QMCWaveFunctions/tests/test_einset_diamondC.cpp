@@ -300,6 +300,88 @@ void test_einset_diamond_1x1x1(bool use_offload, int distributed_ranks = 1, int 
 #endif
 }
 
+/** a table that genuinely divides, evaluated against the same table undivided
+ *
+ * The aligned division decides what a request produces. A real table of eight orbitals
+ * at single precision pads to one aligned chunk and lands entirely in the first block,
+ * so asking for two gets two blocks holding eight and zero, and the arithmetic that
+ * offsets a block's output never runs. Sixteen orbitals at double precision divide into
+ * eight and eight, which is the case this covers.
+ */
+void test_einset_divided(bool use_offload)
+{
+  Communicate* c = OHMMS::Controller;
+  if (c->size() % 2 != 0)
+    return;
+
+  Lattice lattice;
+  // diamondC_2x1x1: the 1x1x1 cell supplies only eight orbitals at this twist, and a real
+  // table of eight splines is one aligned chunk, so it cannot divide into two non-empty
+  // blocks however many are asked for
+  lattice.R = {6.7463223, 6.7463223, 0.0, 0.0, 3.37316115, 3.37316115, 3.37316115, 0.0, 3.37316115};
+
+  ParticleSetPool ptcl = ParticleSetPool(c);
+  ptcl.createSimulationCellByLattice(lattice);
+  auto ions_uptr = std::make_unique<ParticleSet>(ptcl.getSimulationCell());
+  auto elec_uptr = std::make_unique<ParticleSet>(ptcl.getSimulationCell());
+  ParticleSet& ions_(*ions_uptr);
+  ParticleSet& elec_(*elec_uptr);
+
+  ions_.setName("ion");
+  ptcl.addParticleSet(std::move(ions_uptr));
+  ions_.create({4});
+  ions_.R[0] = {0.0, 0.0, 0.0};
+  ions_.R[1] = {1.68658058, 1.68658058, 1.68658058};
+  ions_.R[2] = {3.37316115, 3.37316115, 0.0};
+  ions_.R[3] = {5.05974173, 5.05974173, 1.68658058};
+  ions_.update();
+
+  elec_.setName("elec");
+  ptcl.addParticleSet(std::move(elec_uptr));
+  elec_.create({2});
+  elec_.R[0] = {0.0, 0.0, 0.0};
+  elec_.R[1] = {0.0, 1.0, 0.0};
+  SpeciesSet& tspecies = elec_.getSpeciesSet();
+  int upIdx            = tspecies.addSpecies("u");
+  tspecies(tspecies.addAttribute("charge"), upIdx) = -1;
+
+  SPOSet::ValueVector undivided(10), divided(10);
+  for (int distributed_ranks : {1, 2})
+  {
+    const char* xml_template = R"XML(
+<sposet_collection type="einspline" href="diamondC_2x1x1.pwscf.h5" tilematrix="2 0 0 0 1 0 0 0 1" twistnum="0" source="ion" meshfactor="1.0" precision="double" gpu="omptarget">
+    <sposet name="updet" size="10">
+        <coefs_mem distributed_ranks="DISTRIBUTED_RANKS" shared_ranks="1"/>
+    </sposet>
+</sposet_collection>)XML";
+    std::string spo_xml(xml_template);
+    if (!use_offload)
+      spo_xml = std::regex_replace(spo_xml, std::regex("omptarget"), "no");
+    spo_xml = std::regex_replace(spo_xml, std::regex("DISTRIBUTED_RANKS"), std::to_string(distributed_ranks));
+
+    Libxml2Document doc;
+    REQUIRE(doc.parseFromString(spo_xml));
+    xmlNodePtr root = doc.getRoot();
+    xmlNodePtr ein1 = xmlFirstElementChild(root);
+    EinsplineSetBuilder einSet(elec_, ptcl.getPool(), c, root);
+    auto spo = einSet.createSPOSetFromXML(ein1);
+    REQUIRE(spo);
+
+    elec_.update();
+    spo->evaluateValue(elec_, 0, distributed_ranks == 1 ? undivided : divided);
+  }
+
+  // dividing the coefficients moves where they live, not what they are
+  for (int i = 0; i < 10; i++)
+    CHECK(std::real(divided[i]) == Approx(std::real(undivided[i])));
+}
+
+TEST_CASE("Einspline SPO divided coefficients diamond_1x1x1", "[wavefunction]")
+{
+  test_einset_divided(true);
+  test_einset_divided(false);
+}
+
 TEST_CASE("Einspline SPO from HDF diamond_1x1x1", "[wavefunction]")
 {
   test_einset_diamond_1x1x1(true);
