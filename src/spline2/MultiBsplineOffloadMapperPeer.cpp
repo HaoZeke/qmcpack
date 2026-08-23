@@ -185,6 +185,19 @@ MultiBsplineOffloadMapperPeer<T>::~MultiBsplineOffloadMapperPeer()
 template<typename T>
 void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 {
+  /* Nothing can be shared without a device runtime that hands an allocation to another
+   * process, so every rank maps its own copy, which is what the ordinary mapper does.
+   *
+   * Say so. The request came from the input, the host side of it did take effect, and the
+   * line that reports it says the coefficients are shared. A caller sizing a run on device
+   * memory would read that and be wrong by a factor of the group size, which on a large
+   * table is the difference between fitting and not.
+   */
+  if (comm_.size() > 1 && comm_.rank() == 0)
+    app_warning() << "Spline coefficients are shared on the host across " << comm_.size()
+                  << " ranks, but this build cannot share a device allocation between processes, so "
+                     "each rank still holds its own device copy. Configure with ENABLE_CUDA to share "
+                     "the device copy as well." << std::endl;
   Base::mapToDevice();
 }
 
