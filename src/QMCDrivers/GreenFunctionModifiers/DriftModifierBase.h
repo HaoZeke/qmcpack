@@ -49,6 +49,15 @@ public:
   template<CoordsType CT>
   void getDrifts(const TauParams<RealType, CT>& taus, const TWFGrads<CT>& qf, MCCoords<CT>& drifts) const;
 
+  /** the scaling this modifier applies, for a caller that reproduces it inside a target region
+   *
+   *  getDrift is virtual and cannot be called from device code, so a device path has to compute
+   *  the same scaling itself. It may only do that for a modifier whose scaling it knows, which is
+   *  what the first of these reports. Returning false is the safe answer for anything new.
+   */
+  virtual bool isUNRScaling() const { return false; }
+  virtual RealType getUNRScalingA() const { return RealType(0); }
+
   virtual bool parseXML(xmlNodePtr cur) { return true; }
 
   virtual ~DriftModifierBase() {}
