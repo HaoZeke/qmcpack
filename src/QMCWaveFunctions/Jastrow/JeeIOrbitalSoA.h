@@ -57,6 +57,17 @@ struct JeeIMultiWalkerMem : public Resource
    * displacement of the other electron from the ion as well, so the accept ships it.
    */
   Vector<VALT, OffloadPinnedAllocator<VALT>> memb_displ;
+  /** the same entries indexed by the electron they land on rather than by the ion
+   *
+   * A scatter accumulated with atomics sums in whatever order the threads arrive, so two
+   * runs of the same move differ in the last bits and the trajectories part. Grouping the
+   * entries by their target lets one thread own an electron and sum its contributions in
+   * a fixed order, which is the same arithmetic every time and needs no atomics.
+   */
+  Vector<int, OffloadPinnedAllocator<int>> memb_ion, memb_grp;
+  Vector<size_t, OffloadPinnedAllocator<size_t>> inv_offsets;
+  Vector<int, OffloadPinnedAllocator<int>> inv_entry;
+  size_t inv_walker_stride = 0;
   Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
@@ -72,6 +83,8 @@ struct JeeIMultiWalkerMem : public Resource
    */
   Vector<VALT, OffloadPinnedAllocator<VALT>> acc_delta;
   Vector<VALT, OffloadPinnedAllocator<VALT>> acc_reduce;
+  /// per electron partials of the moved electron's own sum, summed in electron order
+  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_jpart;
   /// which walker each accepted entry belongs to
   Vector<int, OffloadPinnedAllocator<int>> acc_walker;
 
@@ -89,7 +102,7 @@ struct JeeIMultiWalkerMem : public Resource
 
   /// flatten every walker's elecs_inside into one offsets/values pair
   template<typename WFCPTRS>
-  void packMembership(const WFCPTRS& wfcs, int eGroups, int Nion)
+  void packMembership(const WFCPTRS& wfcs, int eGroups, int Nion, int nelec)
   {
     const size_t nw = wfcs.size();
     /* elecs_inside changes only when a move is accepted, and a pass over the quadrature
@@ -125,6 +138,8 @@ struct JeeIMultiWalkerMem : public Resource
     memb_elec.resize(total);
     memb_dist.resize(total);
     memb_displ.resize(total * 3);
+    memb_ion.resize(total);
+    memb_grp.resize(total);
 
     size_t at = 0;
     for (size_t iw = 0; iw < nw; iw++)
@@ -140,15 +155,53 @@ struct JeeIMultiWalkerMem : public Resource
           {
             memb_elec[at] = els[n];
             memb_dist[at] = dst[n];
+            memb_ion[at]  = iat;
+            memb_grp[at]  = kg;
             for (int idim = 0; idim < 3; idim++)
               memb_displ[at * 3 + idim] = dsp[n][idim];
           }
         }
     }
+    /* The same entries again, grouped by the electron they land on. Counting first and
+     * filling second keeps each electron's list in increasing entry order, so the sum a
+     * thread forms over it does not depend on how the threads were scheduled.
+     */
+    const int nelec_l = nelec;
+    inv_walker_stride = static_cast<size_t>(nelec_l);
+    inv_offsets.resize(nw * inv_walker_stride + 1);
+    std::vector<size_t> counts(nw * inv_walker_stride, 0);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const size_t begin = memb_offsets[iw * memb_walker_stride];
+      const size_t end   = memb_offsets[(iw + 1) * memb_walker_stride];
+      for (size_t idx = begin; idx < end; idx++)
+        counts[iw * inv_walker_stride + memb_elec[idx]]++;
+    }
+    size_t running = 0;
+    for (size_t slot = 0; slot < nw * inv_walker_stride; slot++)
+    {
+      inv_offsets[slot] = running;
+      running += counts[slot];
+    }
+    inv_offsets[nw * inv_walker_stride] = running;
+    inv_entry.resize(running);
+    std::vector<size_t> cursor(inv_offsets.begin(), inv_offsets.end() - 1);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const size_t begin = memb_offsets[iw * memb_walker_stride];
+      const size_t end   = memb_offsets[(iw + 1) * memb_walker_stride];
+      for (size_t idx = begin; idx < end; idx++)
+        inv_entry[cursor[iw * inv_walker_stride + memb_elec[idx]]++] = static_cast<int>(idx);
+    }
+
     memb_offsets.updateTo();
     memb_elec.updateTo();
     memb_dist.updateTo();
     memb_displ.updateTo();
+    memb_ion.updateTo();
+    memb_grp.updateTo();
+    inv_offsets.updateTo();
+    inv_entry.updateTo();
   }
 
   /// one flat gamma block per (ion group, j group, k group), plus a present/absent flag
@@ -679,7 +732,7 @@ public:
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion);
+    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
     mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
     mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
     mem.vp_walker.resize(nVPs);
@@ -914,7 +967,7 @@ public:
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion);
+    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
     mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
     mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
 
@@ -931,6 +984,7 @@ public:
     mem.acc_walker.updateTo();
     mem.acc_delta.resize(static_cast<size_t>(na) * nfield * Nelec_l);
     mem.acc_reduce.resize(static_cast<size_t>(na) * 10);
+    mem.acc_jpart.resize(static_cast<size_t>(na) * nfield * Nelec_l);
 
     auto* memb_off    = mem.memb_offsets.data();
     auto* memb_elec   = mem.memb_elec.data();
@@ -943,6 +997,11 @@ public:
     auto* delta_ptr   = mem.acc_delta.data();
     auto* reduce_ptr  = mem.acc_reduce.data();
     auto* walker_ptr  = mem.acc_walker.data();
+    auto* jpart_ptr   = mem.acc_jpart.data();
+    auto* memb_ion    = mem.memb_ion.data();
+    auto* memb_grp    = mem.memb_grp.data();
+    auto* inv_off     = mem.inv_offsets.data();
+    auto* inv_ent     = mem.inv_entry.data();
 
     const size_t memb_stride = mem.memb_walker_stride;
     const size_t gsize       = mem.gamma_size;
@@ -962,12 +1021,18 @@ public:
     const size_t stride_ei = pad_ei * (OHMMS_DIM + 1);
     const size_t stride_ee = pad_ee * (OHMMS_DIM + 1);
     const size_t delta_len   = mem.acc_delta.size();
+    const size_t inv_stride  = mem.inv_walker_stride;
+    const size_t n_inv_off   = mem.inv_offsets.size();
+    const size_t n_inv_ent   = mem.inv_entry.size();
     constexpr RealType lapfac(OHMMS_DIM - 1);
 
     {
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
                       map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
+                      map(to: memb_ion[:n_memb], memb_grp[:n_memb]) \
+                      map(to: inv_off[:n_inv_off], inv_ent[:n_inv_ent]) \
+                      map(alloc: jpart_ptr[:delta_len]) \
                       map(to: gamma_flat[:gsize * eGroups * eGroups * eGroups], \
                               fn_have[:eGroups * eGroups * eGroups]) \
                       map(to: ion_cut[:Nion], ion_grp[:Nion]) \
@@ -977,6 +1042,7 @@ public:
       {
         const int iw            = walker_ptr[ia];
         auto* restrict delta_iw = delta_ptr + static_cast<size_t>(ia) * nfield * Nelec_l;
+        auto* restrict jpart_iw = jpart_ptr + static_cast<size_t>(ia) * nfield * Nelec_l;
 
         PRAGMA_OFFLOAD("omp parallel for")
         for (int k = 0; k < static_cast<int>(nfield) * Nelec_l; k++)
@@ -994,78 +1060,91 @@ public:
           const RealType* ee_dist = mw_ee + ee_base;
           const RealType* ee_disp = ee_dist + pad_ee;
 
-          RealType Uj = 0, dUj0 = 0, dUj1 = 0, dUj2 = 0, d2Uj = 0;
-          PRAGMA_OFFLOAD("omp parallel for reduction(+: Uj, dUj0, dUj1, dUj2, d2Uj)")
-          for (int iat_ion = 0; iat_ion < Nion; iat_ion++)
+          /* One thread per electron, each summing the entries that land on it in the
+           * order the pack laid them down. The moved electron's own sum is gathered the
+           * same way, as a partial per electron, and added up afterwards in electron
+           * order. Nothing here depends on how the threads were scheduled.
+           */
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int kel = 0; kel < Nelec_l; kel++)
           {
-            const RealType r_jI = ei_dist[iat_ion];
-            if (r_jI >= ion_cut[iat_ion])
-              continue;
-            const RealType jI0 = ei_disp[iat_ion];
-            const RealType jI1 = ei_disp[pad_ei + iat_ion];
-            const RealType jI2 = ei_disp[2 * pad_ei + iat_ion];
-            const int ig       = ion_grp[iat_ion];
+            RealType jU = 0, jG0 = 0, jG1 = 0, jG2 = 0, jL = 0;
+            RealType kU = 0, kG0 = 0, kG1 = 0, kG2 = 0, kL = 0;
 
-            for (int kg = 0; kg < eGroups; kg++)
+            if (kel != iat)
             {
-              const int fidx = (ig * eGroups + jg) * eGroups + kg;
-              if (!fn_have[fidx])
-                continue;
-              const RealType* grow = gamma_flat + static_cast<size_t>(fidx) * gsize;
-              const size_t slot    = static_cast<size_t>(iw) * memb_stride + static_cast<size_t>(kg) * Nion + iat_ion;
-              const size_t begin   = memb_off[slot];
-              const size_t end     = memb_off[slot + 1];
-              for (size_t idx = begin; idx < end; idx++)
+              const size_t slot  = static_cast<size_t>(iw) * inv_stride + kel;
+              const size_t begin = inv_off[slot];
+              const size_t end   = inv_off[slot + 1];
+              for (size_t e = begin; e < end; e++)
               {
-                const int kel = memb_elec[idx];
-                if (kel == iat)
+                const int idx     = inv_ent[e];
+                const int iat_ion = memb_ion[idx];
+                const int kg      = memb_grp[idx];
+
+                const RealType r_jI = ei_dist[iat_ion];
+                if (r_jI >= ion_cut[iat_ion])
                   continue;
-                const RealType r_kI = memb_dist[idx];
-                const RealType r_jk = ee_dist[kel];
-                const RealType jk0  = ee_disp[kel];
-                const RealType jk1  = ee_disp[pad_ee + kel];
-                const RealType jk2  = ee_disp[2 * pad_ee + kel];
-                const RealType kI0  = memb_displ[idx * 3];
-                const RealType kI1  = memb_displ[idx * 3 + 1];
-                const RealType kI2  = memb_displ[idx * 3 + 2];
+                const int fidx = (ion_grp[iat_ion] * eGroups + jg) * eGroups + kg;
+                if (!fn_have[fidx])
+                  continue;
+
+                const RealType* grow = gamma_flat + static_cast<size_t>(fidx) * gsize;
+                const RealType jI0   = ei_disp[iat_ion];
+                const RealType jI1   = ei_disp[pad_ei + iat_ion];
+                const RealType jI2   = ei_disp[2 * pad_ei + iat_ion];
+                const RealType r_kI  = memb_dist[idx];
+                const RealType r_jk  = ee_dist[kel];
+                const RealType jk0   = ee_disp[kel];
+                const RealType jk1   = ee_disp[pad_ee + kel];
+                const RealType jk2   = ee_disp[2 * pad_ee + kel];
+                const RealType kI0   = memb_displ[idx * 3];
+                const RealType kI1   = memb_displ[idx * 3 + 1];
+                const RealType kI2   = memb_displ[idx * 3 + 2];
 
                 RealType val, g0, g1, g2, h00, h01, h02, h11, h22;
-                FT::evaluateVGH_impl(r_jk, r_jI, r_kI, grow, N_eI_k, N_ee_k, C_k, L_k, val, g0, g1, g2, h00, h01, h02,
-                                     h11, h22);
+                FT::evaluateVGH_impl(r_jk, r_jI, r_kI, grow, N_eI_k, N_ee_k, C_k, L_k, val, g0, g1, g2, h00, h01,
+                                     h02, h11, h22);
 
                 const RealType dot_jk_jI = jk0 * jI0 + jk1 * jI1 + jk2 * jI2;
                 const RealType dot_kI_jk = kI0 * jk0 + kI1 * jk1 + kI2 * jk2;
 
-                /* The moved electron's own sum is a value in its own right on each side of
-                 * the move, so it carries no sign: the accept wants the old sum and the new
-                 * one, not their difference. Only the scatter below is a difference, and
-                 * that is what the sign is for.
-                 */
-                Uj += val;
-                dUj0 += g1 * jI0 + g0 * jk0;
-                dUj1 += g1 * jI1 + g0 * jk1;
-                dUj2 += g1 * jI2 + g0 * jk2;
-                d2Uj -= h00 + h11 + lapfac * (g0 + g1) + RealType(2) * h01 * dot_jk_jI;
+                jU += val;
+                jG0 += g1 * jI0 + g0 * jk0;
+                jG1 += g1 * jI1 + g0 * jk1;
+                jG2 += g1 * jI2 + g0 * jk2;
+                jL -= h00 + h11 + lapfac * (g0 + g1) + RealType(2) * h01 * dot_jk_jI;
 
-                // and what the other electron of the triplet sees
-                const RealType dU_k   = sign * val;
-                const RealType dgx    = sign * (g2 * kI0 - g0 * jk0);
-                const RealType dgy    = sign * (g2 * kI1 - g0 * jk1);
-                const RealType dgz    = sign * (g2 * kI2 - g0 * jk2);
-                const RealType dlap_k = -sign * (h00 + h22 + lapfac * (g0 + g2) - RealType(2) * h02 * dot_kI_jk);
-
-                PRAGMA_OFFLOAD("omp atomic update")
-                delta_iw[kel] += dU_k;
-                PRAGMA_OFFLOAD("omp atomic update")
-                delta_iw[Nelec_l + kel] += dgx;
-                PRAGMA_OFFLOAD("omp atomic update")
-                delta_iw[2 * Nelec_l + kel] += dgy;
-                PRAGMA_OFFLOAD("omp atomic update")
-                delta_iw[3 * Nelec_l + kel] += dgz;
-                PRAGMA_OFFLOAD("omp atomic update")
-                delta_iw[4 * Nelec_l + kel] += dlap_k;
+                kU += val;
+                kG0 += g2 * kI0 - g0 * jk0;
+                kG1 += g2 * kI1 - g0 * jk1;
+                kG2 += g2 * kI2 - g0 * jk2;
+                kL -= h00 + h22 + lapfac * (g0 + g2) - RealType(2) * h02 * dot_kI_jk;
               }
             }
+
+            delta_iw[kel] += sign * kU;
+            delta_iw[Nelec_l + kel] += sign * kG0;
+            delta_iw[2 * Nelec_l + kel] += sign * kG1;
+            delta_iw[3 * Nelec_l + kel] += sign * kG2;
+            delta_iw[4 * Nelec_l + kel] += sign * kL;
+
+            jpart_iw[kel]                 = jU;
+            jpart_iw[Nelec_l + kel]       = jG0;
+            jpart_iw[2 * Nelec_l + kel]   = jG1;
+            jpart_iw[3 * Nelec_l + kel]   = jG2;
+            jpart_iw[4 * Nelec_l + kel]   = jL;
+          }
+
+          // and the moved electron's own sum, added in electron order
+          RealType Uj = 0, dUj0 = 0, dUj1 = 0, dUj2 = 0, d2Uj = 0;
+          for (int kel = 0; kel < Nelec_l; kel++)
+          {
+            Uj += jpart_iw[kel];
+            dUj0 += jpart_iw[Nelec_l + kel];
+            dUj1 += jpart_iw[2 * Nelec_l + kel];
+            dUj2 += jpart_iw[3 * Nelec_l + kel];
+            d2Uj += jpart_iw[4 * Nelec_l + kel];
           }
 
           const int off        = ia * 10 + pass * 5;
