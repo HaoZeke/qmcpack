@@ -307,12 +307,19 @@ __global__ void add_delay_list_save_sigma_VGL_kernel(int* const delay_list[],
                                                      T* const dphi_out[],
                                                      T* const d2phi_out[],
                                                      const int norb,
-                                                     const int n_accepted)
+                                                     const int n_accepted,
+                                                     const char* __restrict__ accept_mask)
 {
   const int tid = threadIdx.x;
   const int iw  = blockIdx.x;
 
-  if (iw < n_accepted)
+  /* With a mask the walkers stay in their natural order and slot iw belongs to walker iw,
+   * so acceptance is read per walker. Without one the slots were packed accepted first and
+   * the leading n_accepted of them are the accepted ones, as before.
+   */
+  const bool accepted = accept_mask ? (accept_mask[iw] != 0) : (iw < n_accepted);
+
+  if (accepted)
   {
     // real accept
     int* __restrict__ delay_list_iw = delay_list[iw];
@@ -400,7 +407,8 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<float>(cudaStream_t hstream,
                                                          float* const d2phi_out[],
                                                          const int norb,
                                                          const int n_accepted,
-                                                         const int batch_count)
+                                                         const int batch_count,
+                                                         const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -410,7 +418,7 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<float>(cudaStream_t hstream,
   dim3 dimGrid(batch_count);
   add_delay_list_save_sigma_VGL_kernel<float, COLBS>
       <<<dimGrid, dimBlock, 0, hstream>>>(delay_list, rowchanged, delay_count, binv, binv_lda, ratio_inv, phi_vgl_in,
-                                          phi_vgl_stride, phi_out, dphi_out, d2phi_out, norb, n_accepted);
+                                          phi_vgl_stride, phi_out, dphi_out, d2phi_out, norb, n_accepted, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -429,7 +437,8 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<double>(cudaStream_t hstream,
                                                           double* const d2phi_out[],
                                                           const int norb,
                                                           const int n_accepted,
-                                                          const int batch_count)
+                                                          const int batch_count,
+                                                          const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -439,7 +448,7 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<double>(cudaStream_t hstream,
   dim3 dimGrid(batch_count);
   add_delay_list_save_sigma_VGL_kernel<double, COLBS>
       <<<dimGrid, dimBlock, 0, hstream>>>(delay_list, rowchanged, delay_count, binv, binv_lda, ratio_inv, phi_vgl_in,
-                                          phi_vgl_stride, phi_out, dphi_out, d2phi_out, norb, n_accepted);
+                                          phi_vgl_stride, phi_out, dphi_out, d2phi_out, norb, n_accepted, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -458,7 +467,8 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<std::complex<float>>(cudaStrea
                                                                        std::complex<float>* const d2phi_out[],
                                                                        const int norb,
                                                                        const int n_accepted,
-                                                                       const int batch_count)
+                                                                       const int batch_count,
+                                                                       const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -471,7 +481,7 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<std::complex<float>>(cudaStrea
                                           (const thrust::complex<float>*)ratio_inv,
                                           (const thrust::complex<float>**)phi_vgl_in, phi_vgl_stride,
                                           (thrust::complex<float>**)phi_out, (thrust::complex<float>**)dphi_out,
-                                          (thrust::complex<float>**)d2phi_out, norb, n_accepted);
+                                          (thrust::complex<float>**)d2phi_out, norb, n_accepted, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -490,7 +500,8 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<std::complex<double>>(cudaStre
                                                                         std::complex<double>* const d2phi_out[],
                                                                         const int norb,
                                                                         const int n_accepted,
-                                                                        const int batch_count)
+                                                                        const int batch_count,
+                                                                        const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -503,7 +514,7 @@ cudaError_t add_delay_list_save_sigma_VGL_batched<std::complex<double>>(cudaStre
                                           binv_lda, (const thrust::complex<double>*)ratio_inv,
                                           (const thrust::complex<double>**)phi_vgl_in, phi_vgl_stride,
                                           (thrust::complex<double>**)phi_out, (thrust::complex<double>**)dphi_out,
-                                          (thrust::complex<double>**)d2phi_out, norb, n_accepted);
+                                          (thrust::complex<double>**)d2phi_out, norb, n_accepted, accept_mask);
   return cudaPeekAtLastError();
 }
 
