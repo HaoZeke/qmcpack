@@ -22,6 +22,7 @@
 #include <sstream>
 
 #include "WalkerControl.h"
+#include <cstdlib>
 #include "QMCDrivers/WalkerProperties.h"
 #include "OhmmsData/ParameterSet.h"
 #include "type_traits/template_types.hpp"
@@ -274,6 +275,19 @@ void WalkerControl::computeCurData(const UPtrVector<MCPWalker>& walkers, std::ve
   else
     curData[LE_MAX + rank_num_] = num_total_copies; // node num of walkers after local branching
 
+  /* The reduction below is a global synchronisation, so its timer holds two things that behave
+   * differently at scale: the wait for the slowest rank, which grows with the rank count, and the
+   * communication, which barely does. A barrier in front absorbs the first, leaving the second,
+   * and WC_imbalance is the timer this file already names for it.
+   *
+   * Off by default, because it is a second collective and that is not free: measured on this
+   * code, splitting one collective into two costs more than the wider one saved.
+   */
+  if (const char* d = std::getenv("QMCPACK_WC_SPLIT_BARRIER"); d && *d == '1')
+  {
+    ScopedTimer imbalance(my_timers_[WC_imbalance]);
+    myComm->barrier();
+  }
   {
     ScopedTimer allreduce_timer(my_timers_[WC_allreduce]);
     myComm->allreduce(curData);
