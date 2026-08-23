@@ -15,6 +15,7 @@
 
 #include "DMCBatched.h"
 #include "QMCDrivers/GreenFunctionModifiers/DriftModifierBase.h"
+#include "QMCDrivers/GreenFunctionModifiers/DriftModifierUNR.h"
 #include "Concurrency/ParallelExecutor.hpp"
 #include "Concurrency/Info.hpp"
 #include "Message/UniformCommunicateError.h"
@@ -67,6 +68,70 @@ inline void dmcAcceptanceOnDevice(size_t nw,
   {
     const RT prob = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
     accepted[iw]  = (are_valid[iw] != 0 && ratios[iw] != PsiV(0) && prob >= std::numeric_limits<RT>::epsilon() &&
+                    variates[iw] < prob)
+        ? 1
+        : 0;
+  }
+}
+
+/** The whole per-electron decision, on the device, in one kernel.
+ *
+ *  The host form is five loops: scale the gradient into a reverse drift, form the two Green's
+ *  function exponents, form the probability, test the phase, compare against the variate. Each
+ *  reads values the device already holds, so each is a reason to bring them over. Done here they
+ *  are one launch and the ratios and gradients never leave the device.
+ *
+ *  The arithmetic is the host's, term for term: driftScalingUNR and logGreensFunctionPos are the
+ *  same functions the host path calls, declared target so both sides compute the same value, and
+ *  the variates are the ones drawn for the step, consumed in the same order.
+ *
+ *  packed carries what the host still owns for this electron: the forward drift and the
+ *  displacement, [nw][dim] each, then the validity flags, so it is one transfer rather than three.
+ */
+template<typename RT, typename PsiV, typename VT>
+inline void dmcDecisionOnDevice(size_t nw,
+                                int dim,
+                                RT tau,
+                                RT oneover2tau,
+                                RT drift_a,
+                                const PsiV* ratios_dev,
+                                const VT* grads_dev,
+                                const RT* packed,
+                                const RT* variates,
+                                char* accepted)
+{
+  const size_t drift_off = 0;
+  const size_t delta_off = nw * dim;
+  const size_t valid_off = 2 * nw * dim;
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                  map(always, to: packed[0:2 * nw * dim + nw]) \
+                  is_device_ptr(ratios_dev, grads_dev, variates, accepted)")
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    RT vsq(0);
+    for (int id = 0; id < dim; id++)
+    {
+      const RT g = std::real(grads_dev[iw * dim + id]);
+      vsq += g * g;
+    }
+    const RT sc = driftScalingUNR(tau, drift_a, vsq);
+
+    RT gb_sq(0), gf_sq(0);
+    for (int id = 0; id < dim; id++)
+    {
+      // drifts_reverse = scaled gradient, then the forward drift added, as the host does
+      const RT rev = std::real(grads_dev[iw * dim + id]) * sc + packed[drift_off + iw * dim + id];
+      gb_sq += rev * rev;
+      const RT d = packed[delta_off + iw * dim + id];
+      gf_sq += d * d;
+    }
+    const RT log_gb = -oneover2tau * gb_sq;
+    const RT log_gf = -oneover2tau * gf_sq;
+
+    const PsiV ratio = ratios_dev[iw];
+    const RT prob    = std::norm(ratio) * std::exp(log_gb - log_gf);
+    const bool valid = packed[valid_off + iw] != RT(0);
+    accepted[iw]     = (valid && ratio != PsiV(0) && prob >= std::numeric_limits<RT>::epsilon() &&
                     variates[iw] < prob)
         ? 1
         : 0;
@@ -166,6 +231,28 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   size_t device_accept_mismatches = 0;
   Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratio_prod;
   Vector<QMCTraits::ValueType, OffloadPinnedAllocator<QMCTraits::ValueType>> device_grad_sum;
+  /// forward drift, displacement and validity for one electron, packed into one transfer
+  Vector<RealType, OffloadPinnedAllocator<RealType>> decision_packed;
+
+  /* Whether the decision can be taken on the device at all, decided once rather than per electron.
+   *
+   * Serialized crowd walkers put the dispatchers on their single walker forms, which a device mask
+   * has nothing to say to. The device form also reproduces the drift scaling itself, since the
+   * modifier's own entry point is virtual and cannot be called from a target region, so it may only
+   * run for a modifier whose scaling it knows.
+   */
+  const bool device_decision_possible = [&sft] {
+    if constexpr (CT != CoordsType::POS)
+      return false; // spin coordinates carry a second Green's function term the kernel does not form
+#if !defined(QMC_COMPLEX)
+    return false; // a real build rejects on a phase change, which the kernel does not test
+#else
+    if (sft.serializing_crowd_walkers || !sft.drift_modifier.isUNRScaling())
+      return false;
+    const char* d = std::getenv("QMCPACK_DMC_DEVICE_ACCEPT");
+    return d && *d == '1';
+#endif
+  }();
   std::vector<PsiValue> dev_ratios;
   std::vector<TrialWaveFunction::GradType> dev_grads;
   size_t device_ratio_mismatches = 0;
@@ -246,7 +333,11 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
 
         ps_dispatcher.flex_makeMove(walker_elecs, iat, drifts, are_valid);
 
-        twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
+        if (device_decision_possible)
+          TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, ratios, dev_grads,
+                                                    device_ratio_prod, device_grad_sum);
+        else
+          twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, ratios, grads_new);
 
         /* Cross-check the device product against the host one before anything relies on
          * it. The device form recomputes the same component ratios and multiplies them
@@ -278,13 +369,17 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
             }
           }
 
-        computeLogGreensFunction(deltas, taus, log_gf);
+        if (!device_decision_possible)
+        {
+          // the device form folds all of this into its own kernel, from values already there
+          computeLogGreensFunction(deltas, taus, log_gf);
 
-        sft.drift_modifier.getDrifts(taus, grads_new, drifts_reverse);
+          sft.drift_modifier.getDrifts(taus, grads_new, drifts_reverse);
 
-        drifts_reverse += drifts;
+          drifts_reverse += drifts;
 
-        computeLogGreensFunction(drifts_reverse, taus, log_gb);
+          computeLogGreensFunction(drifts_reverse, taus, log_gb);
+        }
 
         auto checkPhaseChanged = [&sft](const PsiValue& ratio, int& is_reject) {
           if (ratio == PsiValue(0) || sft.branch_engine.phaseChanged(std::arg(ratio)))
@@ -298,13 +393,18 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         rejects.resize(num_walkers); // instead of std::vector<bool>
         for (int iw = 0; iw < num_walkers; ++iw)
         {
-          checkPhaseChanged(ratios[iw], rejects[iw]);
-          //This is just convenient to do here
+          // a complex build never reports a phase change, and rr_proposed is host bookkeeping
+          // that the decision does not enter
+          if (!device_decision_possible)
+            checkPhaseChanged(ratios[iw], rejects[iw]);
+          else
+            rejects[iw] = 0;
           rr_proposed[iw] += rr[iw];
         }
 
-        for (int iw = 0; iw < num_walkers; ++iw)
-          prob[iw] = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
+        if (!device_decision_possible)
+          for (int iw = 0; iw < num_walkers; ++iw)
+            prob[iw] = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
 
         // Cross-check the device form against the host one before it replaces it: the kernel
         // has to reproduce this decision exactly for every walker, and a disagreement is a
@@ -340,24 +440,34 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
          * its own counters and for rr_accepted, so it takes one copy of nw bytes, once, rather
          * than the ratios and gradients it would otherwise have formed the decision from.
          */
-        const bool device_accept = [&sft] {
-          // serialized crowd walkers means the dispatchers call the single walker forms, and a
-          // device mask has nothing to say to those, so this path is only for the batched one
-          if (sft.serializing_crowd_walkers)
-            return false;
-          const char* d = std::getenv("QMCPACK_DMC_DEVICE_ACCEPT");
-          return d && *d == '1';
-        }();
+        const bool device_accept = device_decision_possible;
 
         if (device_accept)
         {
-          dev_valid.resize(num_walkers);
+          /* One kernel for the whole decision, reading the ratios and gradients where they were
+           * computed. What the host still owns for this electron, the forward drift and the
+           * displacement and the validity flags, goes down packed as one transfer.
+           */
+          constexpr int dim = QMCTraits::DIM;
           dev_accepted.resize(num_walkers);
+          decision_packed.resize(2 * num_walkers * dim + num_walkers);
+          auto* pk = decision_packed.data();
           for (int iw = 0; iw < num_walkers; ++iw)
-            dev_valid[iw] = (are_valid[iw] && !rejects[iw]) ? 1 : 0;
-          dmcAcceptanceOnDevice<RealType, PsiValue>(num_walkers, ratios.data(), log_gf.data(), log_gb.data(),
-                                                    dev_valid.data(), accept_rands.data() + iat * num_walkers,
-                                                    dev_accepted.device_data());
+            for (int id = 0; id < dim; id++)
+            {
+              pk[iw * dim + id]                      = drifts.positions[iw][id];
+              pk[num_walkers * dim + iw * dim + id]  = deltas.positions[iw][id];
+            }
+          for (int iw = 0; iw < num_walkers; ++iw)
+            pk[2 * num_walkers * dim + iw] = (are_valid[iw] && !rejects[iw]) ? RealType(1) : RealType(0);
+
+          dmcDecisionOnDevice<RealType, PsiValue, QMCTraits::ValueType>(num_walkers, dim, taus.tauovermass,
+                                                             taus.oneover2tau,
+                                                             sft.drift_modifier.getUNRScalingA(),
+                                                             device_ratio_prod.device_data(),
+                                                             device_grad_sum.device_data(), pk,
+                                                             accept_rands.device_data() + iat * num_walkers,
+                                                             dev_accepted.device_data());
           dev_accepted.updateFrom();
 
           isAccepted.clear();

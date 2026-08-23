@@ -82,6 +82,9 @@ public:
     }
   }
 
+  bool isUNRScaling() const override { return true; }
+  RealType getUNRScalingA() const override { return a_; }
+
   DriftModifierUNR(RealType a = 1.0) : a_(a) {}
 
 private:
