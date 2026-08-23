@@ -56,10 +56,13 @@ inline void dmcAcceptanceOnDevice(size_t nw,
                                   const RT* variates,
                                   char* accepted)
 {
+  // accepted is a device address: the mask is what the accept path reads, so it stays there and
+  // the host takes a copy only if it needs one for its own bookkeeping
+
   PRAGMA_OFFLOAD("omp target teams distribute parallel for \
                   map(always, to: ratios[0:nw], log_gf[0:nw], log_gb[0:nw], are_valid[0:nw], \
                                   variates[0:nw]) \
-                  map(always, from: accepted[0:nw])")
+                  is_device_ptr(accepted)")
   for (size_t iw = 0; iw < nw; iw++)
   {
     const RT prob = std::norm(ratios[iw]) * std::exp(log_gb[iw] - log_gf[iw]);
@@ -312,9 +315,11 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
           dev_accepted.resize(num_walkers);
           for (int iw = 0; iw < num_walkers; ++iw)
             dev_valid[iw] = (are_valid[iw] && !rejects[iw]) ? 1 : 0;
+          // the mask is written where the accept path reads it, so the comparison takes a copy
           dmcAcceptanceOnDevice<RealType, PsiValue>(num_walkers, ratios.data(), log_gf.data(), log_gb.data(),
                                                     dev_valid.data(), accept_rands.data() + iat * num_walkers,
-                                                    dev_accepted.data());
+                                                    dev_accepted.device_data());
+          dev_accepted.updateFrom();
           for (int iw = 0; iw < num_walkers; ++iw)
           {
             const bool host_accept = are_valid[iw] && !rejects[iw] &&
@@ -325,6 +330,56 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
           }
         }
 
+        /* The decision can be made where the values already are. DMC draws its variates for the
+         * whole step up front, so the device form consumes exactly the same numbers in the same
+         * order as the host form and reaches the same answer, which is what makes this switchable
+         * rather than a different sampling. VMC cannot do this as it stands: its host form draws
+         * inside a short-circuited condition, so the sequence depends on the data.
+         *
+         * The mask stays on the device for the accept path. The host still needs the decision for
+         * its own counters and for rr_accepted, so it takes one copy of nw bytes, once, rather
+         * than the ratios and gradients it would otherwise have formed the decision from.
+         */
+        const bool device_accept = [&sft] {
+          // serialized crowd walkers means the dispatchers call the single walker forms, and a
+          // device mask has nothing to say to those, so this path is only for the batched one
+          if (sft.serializing_crowd_walkers)
+            return false;
+          const char* d = std::getenv("QMCPACK_DMC_DEVICE_ACCEPT");
+          return d && *d == '1';
+        }();
+
+        if (device_accept)
+        {
+          dev_valid.resize(num_walkers);
+          dev_accepted.resize(num_walkers);
+          for (int iw = 0; iw < num_walkers; ++iw)
+            dev_valid[iw] = (are_valid[iw] && !rejects[iw]) ? 1 : 0;
+          dmcAcceptanceOnDevice<RealType, PsiValue>(num_walkers, ratios.data(), log_gf.data(), log_gb.data(),
+                                                    dev_valid.data(), accept_rands.data() + iat * num_walkers,
+                                                    dev_accepted.device_data());
+          dev_accepted.updateFrom();
+
+          isAccepted.clear();
+          for (int iw = 0; iw < num_walkers; ++iw)
+            if (dev_accepted[iw])
+            {
+              crowd.incAccept();
+              isAccepted.push_back(true);
+              rr_accepted[iw] += rr[iw];
+            }
+            else
+            {
+              crowd.incReject();
+              isAccepted.push_back(false);
+            }
+
+          TrialWaveFunction::mw_accept_rejectMoveFromDeviceMask(walker_twfs, walker_elecs, iat,
+                                                                dev_accepted.device_data(), true);
+          ps_dispatcher.flex_accept_rejectMove<CT>(walker_elecs, iat, isAccepted);
+        }
+        else
+        {
         isAccepted.clear();
 
         for (int iw = 0; iw < num_walkers; ++iw)
@@ -344,6 +399,7 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         twf_dispatcher.flex_accept_rejectMove(walker_twfs, walker_elecs, iat, isAccepted, true);
 
         ps_dispatcher.flex_accept_rejectMove<CT>(walker_elecs, iat, isAccepted);
+        }
       }
     }
 
