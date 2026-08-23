@@ -39,9 +39,10 @@ namespace
  * left on the device depends on that form having run, and a small case otherwise has no way
  * to be driven down the batched path deliberately.
  *
- * Lowering it is not only a performance choice. A two ion cell driven down the batched path
- * produces a NaN kinetic energy, so the threshold is holding a broken configuration out of
- * reach as well as a slow one. Raise it freely; lower it only to reproduce that.
+ * Lowering it is a performance choice only. It once also held out a two ion cell that came
+ * back with a NaN kinetic energy, from the electron-ion table reporting device temp distances
+ * ready before they were written; that is fixed in the table, so the batched path is correct
+ * at any work and this is free to tune.
  */
 size_t batchedWorkThreshold()
 {
