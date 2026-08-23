@@ -107,6 +107,19 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   else
     multi_splines_ptr = std::make_unique<MultiBspline<ST>>(xyz_grid, xyz_bc, num_splines);
 
+  /* What a deck asks for and what the aligned division produces are not the same thing:
+   * a table with few enough orbitals lands entirely in the first block whatever was
+   * requested. Report the division so a run that intended to spread a table over the
+   * devices of a node can tell whether it did.
+   */
+  if (multi_splines_ptr->getNumBlocks() > 1)
+  {
+    app_log() << "  Coefficients divided into " << multi_splines_ptr->getNumBlocks() << " blocks holding";
+    for (size_t ib = 0; ib < multi_splines_ptr->getNumBlocks(); ib++)
+      app_log() << " " << multi_splines_ptr->getBlock(ib).num_splines;
+    app_log() << " splines." << std::endl;
+  }
+
   auto& multi_splines(*multi_splines_ptr);
   app_log() << "MEMORY " << multi_splines.sizeInByte() / (1 << 20) << " MB allocated "
             << "for the coefficients in 3D spline orbital representation" << std::endl;
