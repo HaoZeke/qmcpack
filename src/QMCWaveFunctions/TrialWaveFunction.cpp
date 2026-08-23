@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 #include "TrialWaveFunction.h"
+#include <omp.h>
 #include "ResourceCollection.h"
 #include "Utilities/IteratorUtility.h"
 #include "Concurrency/Info.hpp"
@@ -861,6 +862,49 @@ void TrialWaveFunction::mw_accept_rejectMove(const RefVectorWithLeader<TrialWave
     wavefunction_components[i]->mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
     for (int iw = 0; iw < wf_list.size(); iw++)
       if (isAccepted[iw])
+      {
+        wf_list[iw].log_real_ += std::real(wfc_list[iw].get_log_value());
+        wf_list[iw].PhaseValue += std::imag(wfc_list[iw].get_log_value());
+      }
+  }
+}
+
+void TrialWaveFunction::mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                                          const RefVectorWithLeader<ParticleSet>& p_list,
+                                                          int iat,
+                                                          const char* accept_mask,
+                                                          bool safe_to_delay)
+{
+  auto& wf_leader = wf_list.getLeader();
+  ScopedTimer local_timer(wf_leader.TWF_timers_[ACCEPT_TIMER]);
+  const int num_wfc             = wf_leader.Z.size();
+  auto& wavefunction_components = wf_leader.Z;
+  const int nw                  = wf_list.size();
+
+  /* The running log value and phase are kept on the wavefunction objects, and they are only
+   * accumulated for walkers that accepted, so the decision is needed here on the host. It is
+   * fetched once, for every component, rather than once per component, and it is nw bytes
+   * against the ratios and gradients the decision would otherwise have been formed from.
+   */
+  std::vector<char> host_mask(nw);
+  omp_target_memcpy(host_mask.data(), const_cast<char*>(accept_mask), nw, 0, 0, omp_get_initial_device(),
+                    omp_get_default_device());
+
+  for (int iw = 0; iw < nw; iw++)
+    if (host_mask[iw])
+    {
+      wf_list[iw].log_real_  = 0;
+      wf_list[iw].PhaseValue = 0;
+    }
+
+  for (int i = 0; i < num_wfc; i++)
+  {
+    ScopedTimer z_timer(wf_leader.WFC_timers_[ACCEPT_TIMER + TIMER_SKIP * i]);
+    const auto wfc_list(extractWFCRefList(wf_list, i));
+    wavefunction_components[i]->mw_accept_rejectMoveFromDeviceMask(wfc_list, p_list, iat, accept_mask,
+                                                                   safe_to_delay);
+    for (int iw = 0; iw < nw; iw++)
+      if (host_mask[iw])
       {
         wf_list[iw].log_real_ += std::real(wfc_list[iw].get_log_value());
         wf_list[iw].PhaseValue += std::imag(wfc_list[iw].get_log_value());

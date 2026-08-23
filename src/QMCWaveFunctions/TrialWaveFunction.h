@@ -462,6 +462,18 @@ public:
                                    const std::vector<bool>& isAccepted,
                                    bool safe_to_delay = false);
 
+  /** accept or reject from a device-resident mask, over every component
+   *
+   *  The decision stays where it was computed. Components that can drive their accept from the
+   *  mask do so; the rest fall back to bringing it over, which is still one transfer of nw bytes
+   *  rather than the values the decision would have been made from.
+   */
+  static void mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                                const RefVectorWithLeader<ParticleSet>& p_list,
+                                                int iat,
+                                                const char* accept_mask,
+                                                bool safe_to_delay = false);
+
   /** complete all the delayed or asynchronous operations before leaving the p-by-p move region.
    *  See WaveFunctionComponent::completeUpdates for more detail */
   void completeUpdates();
