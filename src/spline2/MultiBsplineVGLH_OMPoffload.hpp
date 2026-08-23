@@ -266,8 +266,13 @@ inline void evaluate_vgh_impl(const typename qmcplusplus::bspline_traits<T, 3>::
  * @param out_offset The stride of val_grads_hess
  */
 template<typename T>
-inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
-                                 const T* restrict spline_coefs,
+inline void evaluate_vgh_impl_v2(const T* restrict spline_coefs,
+                                 const intptr_t xs,
+                                 const intptr_t ys,
+                                 const intptr_t zs,
+                                 const T dxInv,
+                                 const T dyInv,
+                                 const T dzInv,
                                  int ix,
                                  int iy,
                                  int iz,
@@ -284,9 +289,6 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
                                  T* restrict val_grads_hess,
                                  const size_t out_offset)
 {
-  const intptr_t xs = spline_m->x_stride;
-  const intptr_t ys = spline_m->y_stride;
-  const intptr_t zs = spline_m->z_stride;
 
   T val = T();
   T gx  = T();
@@ -332,9 +334,6 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
       val += pre00 * sum0;
     }
 
-  const T dxInv = spline_m->x_grid.delta_inv;
-  const T dyInv = spline_m->y_grid.delta_inv;
-  const T dzInv = spline_m->z_grid.delta_inv;
   // put data back to the result vector
   val_grads_hess[0]              = val;
   val_grads_hess[out_offset]     = gx * dxInv;
@@ -362,6 +361,32 @@ inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3
  *
  *  symGGt is the symmetrised metric the caller already forms once per team.
  */
+/** the descriptor form, forwarding to the strided one */
+template<typename T>
+inline void evaluate_vgh_impl_v2(const typename qmcplusplus::bspline_traits<T, 3>::SplineType* restrict spline_m,
+                                 const T* restrict spline_coefs,
+                                 int ix,
+                                 int iy,
+                                 int iz,
+                                 const int index,
+                                 const T a[4],
+                                 const T b[4],
+                                 const T c[4],
+                                 const T da[4],
+                                 const T db[4],
+                                 const T dc[4],
+                                 const T d2a[4],
+                                 const T d2b[4],
+                                 const T d2c[4],
+                                 T* restrict val_grads_hess,
+                                 const size_t out_offset)
+{
+  evaluate_vgh_impl_v2(spline_coefs, spline_m->x_stride, spline_m->y_stride, spline_m->z_stride,
+                       static_cast<T>(spline_m->x_grid.delta_inv), static_cast<T>(spline_m->y_grid.delta_inv),
+                       static_cast<T>(spline_m->z_grid.delta_inv), ix, iy, iz, index, a, b, c, da, db, dc, d2a, d2b,
+                       d2c, val_grads_hess, out_offset);
+}
+
 template<typename T>
 inline void evaluate_vgl_impl_v2(const T* restrict spline_coefs,
                                  const intptr_t xs,
