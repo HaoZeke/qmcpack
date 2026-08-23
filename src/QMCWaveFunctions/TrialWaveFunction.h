@@ -402,8 +402,9 @@ public:
    *
    * The product is seeded with one and each component multiplies its own factor in where
    * that factor already is, so an acceptance test can read the value without the host
-   * having finished the product first. The host result is still produced, so a caller can
-   * compare the two.
+   * having finished the product first. ratios and grad_new are not produced: a component
+   * whose state is device resident never forms them, so they are returned as NaN and a
+   * caller needing host values calls mw_calcRatioGrad.
    */
   static void mw_calcRatioGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
                                      const RefVectorWithLeader<ParticleSet>& p_list,
@@ -412,6 +413,22 @@ public:
                                      std::vector<GradType>& grad_new,
                                      Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                                      Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum);
+
+  /** the total gradient at the current position, summed in device memory
+   *
+   * @param grads_device_now one gradient per walker, flat as [nw][DIM], in device memory
+   *
+   * Seeded with zero, then each component adds its own term where that term already is.
+   * A component with no device path stages its host value up, so the sum is complete
+   * either way and the drift can be formed on the device from it. grad_now carries the
+   * host values only from the components that still produce them, so it is not a
+   * complete gradient and is not used as one.
+   */
+  static void mw_evalGradDevice(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
+                                const RefVectorWithLeader<ParticleSet>& p_list,
+                                int iat,
+                                std::vector<GradType>& grad_now,
+                                Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now);
 
   /** Prepare internal data for updating WFC correspond to a particle group
    *  Particle groups usually correspond to determinants of different spins.

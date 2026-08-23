@@ -114,9 +114,10 @@ public:
    *  proposal can be formed where they are: new = R[iat] + drift + delta, read from device
    *  memory and written to the device buffer the distance tables consume.
    *
-   *  drifts and deltas are [nw][DIM] flat, matching what DriftModifierUNR::getDriftsDevice
-   *  writes. The host copy of the proposal is not produced here; a caller that needs it
-   *  keeps using mw_copyActivePos.
+   *  drifts is a device pointer, [nw][DIM] flat, as DriftModifierUNR::getDriftsDevice
+   *  writes it. deltas comes from the host, where the variates are drawn. The host copy of
+   *  the proposal is not produced here; a caller that needs it keeps using
+   *  mw_copyActivePos.
    */
   void mw_makeActivePosOnDevice(const RefVectorWithLeader<DynamicCoordinates>& coords_list,
                                 size_t iat,
@@ -138,7 +139,7 @@ public:
     auto* mw_rosa_ptr          = mw_rsoa_ptrs.data();
 
     PRAGMA_OFFLOAD("omp target teams distribute parallel for \
-                    map(always, to: drifts[0:nw * dim], deltas[0:nw * dim])")
+                    is_device_ptr(drifts) map(always, to: deltas[0:nw * dim])")
     for (size_t iw = 0; iw < nw; iw++)
       for (int id = 0; id < dim; id++)
         mw_pos_ptr[iw + mw_pos_stride * id] =

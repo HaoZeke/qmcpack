@@ -231,6 +231,9 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   size_t device_accept_mismatches = 0;
   Vector<PsiValue, OffloadPinnedAllocator<PsiValue>> device_ratio_prod;
   Vector<QMCTraits::ValueType, OffloadPinnedAllocator<QMCTraits::ValueType>> device_grad_sum;
+  /// the gradient at the current position and the drift formed from it, both device side
+  Vector<QMCTraits::ValueType, OffloadPinnedAllocator<QMCTraits::ValueType>> device_grad_now;
+  Vector<RealType, OffloadPinnedAllocator<RealType>> device_drifts;
   /// forward drift, displacement and validity for one electron, packed into one transfer
   Vector<RealType, OffloadPinnedAllocator<RealType>> decision_packed;
 
@@ -314,11 +317,41 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         std::transform(deltas.positions.begin(), deltas.positions.end(), rr.begin(),
                        [t = taus.tauovermass](auto& delta_r) { return t * dot(delta_r, delta_r); });
 
-        twf_dispatcher.flex_evalGrad(walker_twfs, walker_elecs, iat, grads_now);
-        sft.drift_modifier.getDrifts(taus, grads_now, drifts);
+        /* The gradient, the drift and the proposal it feeds are all one chain, and the
+         * device form keeps the gradient and the drift there: the components add their
+         * terms into device_grad_now and the modifier scales it into device_drifts,
+         * neither of which the host forms. The host form copies each result down between
+         * the steps.
+         */
+        if (device_decision_possible)
+        {
+          constexpr int dim = QMCTraits::DIM;
+          device_drifts.resize(num_walkers * dim);
+          TrialWaveFunction::mw_evalGradDevice(walker_twfs, walker_elecs, iat, grads_now.grads_positions,
+                                               device_grad_now);
+          sft.drift_modifier.getDriftsDevice(taus.tauovermass, num_walkers, dim, device_grad_now.device_data(),
+                                             device_drifts.device_data());
+          /* The drift is read back because the move still needs a host position: the
+           * lattice validity test and the distance tables' per walker temp arrays are
+           * both host side, and a component whose accept reads those arrays depends on
+           * them. Once that state is device resident this copy goes and the proposal is
+           * formed by mw_makeActivePosOnDevice from device_drifts directly.
+           */
+          device_drifts.updateFrom();
+          for (int iw = 0; iw < num_walkers; iw++)
+            for (int id = 0; id < dim; id++)
+              drifts.positions[iw][id] = device_drifts[iw * dim + id];
+          scaleBySqrtTau(taus, deltas);
+          drifts += deltas;
+        }
+        else
+        {
+          twf_dispatcher.flex_evalGrad(walker_twfs, walker_elecs, iat, grads_now);
+          sft.drift_modifier.getDrifts(taus, grads_now, drifts);
 
-        scaleBySqrtTau(taus, deltas);
-        drifts += deltas;
+          scaleBySqrtTau(taus, deltas);
+          drifts += deltas;
+        }
 
 // in DMC this was done here, changed to match VMCBatched pending factoring to common source
 // if (rr > m_r2max)

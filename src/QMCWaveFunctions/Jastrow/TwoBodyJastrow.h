@@ -241,6 +241,17 @@ public:
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
 
+  /** the stored gradient at the moved electron, added where it already is
+   *
+   * dUat is device resident across the particle loop, so this component's term in the
+   * running sum is a read of it. Nothing goes to the host.
+   */
+  void mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<ParticleSet>& p_list,
+                         int iat,
+                         std::vector<GradType>& grad_now,
+                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const override;
+
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override;
   void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,

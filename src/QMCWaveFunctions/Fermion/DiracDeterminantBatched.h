@@ -172,6 +172,17 @@ public:
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
 
+  /** the gradient at the current position, left in device memory
+   *
+   * The update engine forms it there already; this stops before the copy down and adds
+   * the widened result into the caller's running sum.
+   */
+  void mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                         const RefVectorWithLeader<ParticleSet>& p_list,
+                         int iat,
+                         std::vector<GradType>& grad_now,
+                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const override;
+
   void mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
                             int iat,
