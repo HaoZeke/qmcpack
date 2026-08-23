@@ -257,6 +257,7 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
                                         const REAL* mw_dist, // [nw][DIM+1][n_padded]
                                         REAL* mw_allUat,     // [nw][DIM+2][n_padded]
                                         REAL* mw_cur_allu,   // [nw][3][n_padded]
+                                        REAL* mw_log_delta,  // [nw], the caller's log value change
                                         Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer,
                                         const char* accept_mask)
 {
@@ -302,7 +303,7 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
                     map(to: grp_ids[:n_src]) \
                     map(to: mw_dist[:dist_stride*nw]) \
                     map(to: mw_vgl[:(DIM+2)*nw]) \
-                    map(always, from: mw_allUat[:nw * n_padded * (DIM + 2)]) \
+                    map(always, from: mw_log_delta[0:nw]) \
                     map(to: accept_mask[:accept_mask ? nw : 0])")
   for (int iw = 0; iw < nw; iw++)
   {
@@ -312,6 +313,14 @@ void BsplineFunctor<REAL>::mw_updateVGL(const int iat,
     int* mw_max_index = reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
     int* accepted_indices = mw_max_index + num_groups;
     const int ip = accept_mask ? (accept_mask[iw] != 0 ? iw : -1) : accepted_indices[iw];
+
+    /* The caller's log value moves by the difference between the stored value at the moved
+     * particle and the proposed one, and it does that for every walker, accepted or not, which is
+     * what the host form this replaces does. Formed here so the state itself can stay on the
+     * device: this is nw numbers where the state is nw by n_padded by DIM+2.
+     */
+    mw_log_delta[iw] = (mw_allUat + iw * n_padded)[iat] - (mw_vgl + iw * (DIM + 2))[0];
+
     if (ip < 0)
       continue; // rejected walker, the branch is taken here rather than by the loop bound
 

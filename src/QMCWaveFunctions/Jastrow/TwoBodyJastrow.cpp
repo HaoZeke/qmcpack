@@ -37,6 +37,8 @@ struct TwoBodyJastrowMultiWalkerMem : public Resource
   Matrix<T, OffloadPinnedAllocator<T>> mw_vgl;
   /// memory pool for Uat, dUat, d2Uat [Nw][N_padded] + [Nw][DIM][N_padded] + [Nw][N_padded]
   Vector<T, OffloadPinnedAllocator<T>> mw_allUat;
+  /// per-walker change in the log value from an accept, so the state itself can stay on device
+  Vector<T, OffloadPinnedAllocator<T>> mw_log_delta;
   /// memory pool for cur_u, cur_du, cur_d2u [3][Nw][N_padded]. 3 is for value, first and second derivatives.
   Vector<T, OffloadPinnedAllocator<T>> mw_cur_allu;
 
@@ -199,6 +201,10 @@ void TwoBodyJastrow<FT>::mw_evaluateRatios(const RefVectorWithLeader<WaveFunctio
   FT::mw_evaluateV(NumGroups, F.data() + igt * NumGroups, wfc_leader.N, grp_ids.data(), nVPs, mw_refPctls.data(),
                    dt_leader.getMultiWalkerDataPtr(), dt_leader.getPerTargetPctlStrideSize(), mw_vals.data(),
                    wfc_leader.mw_mem_handle_.getResource().transfer_buffer);
+
+  // Uat lives on the device across the particle loop; this is one of the two readers
+  // that bring it back, and it runs once per step rather than once per particle
+  wfc_leader.mw_mem_handle_.getResource().mw_allUat.updateFrom();
 
   size_t ivp = 0;
   for (int iw = 0; iw < nw; ++iw)
@@ -480,7 +486,8 @@ void TwoBodyJastrow<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionComp
   FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
                      mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
                      wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
-  mw_vgl.updateFrom(); // read on the host just below
+  mw_vgl.updateFrom();     // read on the host just below
+  mw_allUat.updateFrom();  // the accept leaves the stored state on the device
 
   for (int iw = 0; iw < nw; iw++)
   {
@@ -548,22 +555,16 @@ void TwoBodyJastrow<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComp
     return;
   }
 
-  assert(this == &wfc_list.getLeader());
-  auto& wfc_leader      = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
-  auto& p_leader        = p_list.getLeader();
-  const auto& dt_leader = p_leader.getDistTableAA(my_table_ID_);
-  const int nw          = wfc_list.size();
+  auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  assert(this == &wfc_leader);
+  const int nw = wfc_list.size();
 
-  auto& mw_vgl = wfc_leader.mw_mem_handle_.getResource().mw_vgl;
-  mw_vgl.resize(nw, DIM + 2);
+  mw_evaluateProposedVGL(wfc_list, p_list, iat);
 
-  auto& mw_allUat   = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
-  auto& mw_cur_allu = wfc_leader.mw_mem_handle_.getResource().mw_cur_allu;
-
-  FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
-                     mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_cur_allu.data(),
-                     wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
-  mw_vgl.updateFrom(); // read on the host just below
+  auto& mw_vgl    = wfc_leader.mw_mem_handle_.getResource().mw_vgl;
+  auto& mw_allUat = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
+  mw_vgl.updateFrom();     // read on the host just below
+  mw_allUat.updateFrom();  // the accept leaves the stored state on the device
 
   for (int iw = 0; iw < nw; iw++)
   {
@@ -573,6 +574,25 @@ void TwoBodyJastrow<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionComp
     for (int idim = 0; idim < ndim; idim++)
       grad_new[iw][idim] += mw_vgl[iw][idim + 1];
   }
+}
+
+template<typename FT>
+void TwoBodyJastrow<FT>::mw_evaluateProposedVGL(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                                const RefVectorWithLeader<ParticleSet>& p_list,
+                                                int iat) const
+{
+  auto& wfc_leader      = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  auto& p_leader        = p_list.getLeader();
+  const auto& dt_leader = p_leader.getDistTableAA(my_table_ID_);
+  const int nw          = wfc_list.size();
+
+  auto& mw_vgl = wfc_leader.mw_mem_handle_.getResource().mw_vgl;
+  mw_vgl.resize(nw, DIM + 2);
+
+  FT::mw_evaluateVGL(iat, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N, grp_ids.data(), nw,
+                     mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
+                     wfc_leader.mw_mem_handle_.getResource().mw_cur_allu.data(),
+                     wfc_leader.mw_mem_handle_.getResource().mw_ratiograd_buffer);
 }
 
 template<typename FT>
@@ -591,13 +611,15 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
     return;
   }
 
-  mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
-
   /* Uat and the value just computed for the proposed position both sit in resident
    * storage, so the ratio is a difference and an exponential away from being formed on
-   * the device. Taking it there is what lets a caller compare it against the variate
-   * without the value coming to the host first.
+   * the device. Nothing here reads either on the host, so neither is fetched: the host
+   * copies of Uat, dUat and d2Uat are refreshed by the readers that do need them,
+   * mw_evaluateRatios and mw_evaluateGL, once per step rather than once per particle.
+   * ratios and grad_new are left untouched for the same reason.
    */
+  mw_evaluateProposedVGL(wfc_list, p_list, iat);
+
   auto& wfc_leader   = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
   auto& mw_res       = wfc_leader.mw_mem_handle_.getResource();
   const int nw       = wfc_list.size();
@@ -694,16 +716,19 @@ void TwoBodyJastrow<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
   auto& mw_allUat   = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
   auto& mw_cur_allu = wfc_leader.mw_mem_handle_.getResource().mw_cur_allu;
 
-  for (int iw = 0; iw < nw; iw++)
-  {
-    auto& wfc = wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw);
-    wfc.log_value_ += wfc.Uat[iat] - mw_vgl[iw][0];
-  }
+  auto& mw_log_delta = wfc_leader.mw_mem_handle_.getResource().mw_log_delta;
+  mw_log_delta.resize(nw);
 
-  // this call may go asynchronous, then need to wait at mw_calcRatio mw_ratioGrad and mw_completeUpdates
+  /* The state stays on the device; what comes back is nw numbers. A host reader of Uat, dUat or
+   * d2Uat asks for them, which is what the fetches in the ratio paths below are for.
+   */
   FT::mw_updateVGL(iat, isAccepted, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N,
                    grp_ids.data(), nw, mw_vgl.data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(), mw_allUat.data(),
-                   mw_cur_allu.data(), wfc_leader.mw_mem_handle_.getResource().mw_update_buffer);
+                   mw_cur_allu.data(), mw_log_delta.data(),
+                   wfc_leader.mw_mem_handle_.getResource().mw_update_buffer);
+
+  for (int iw = 0; iw < nw; iw++)
+    wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw).log_value_ += mw_log_delta[iw];
 }
 
 template<typename FT>
@@ -840,7 +865,10 @@ void TwoBodyJastrow<FT>::mw_evaluateGL(const RefVectorWithLeader<WaveFunctionCom
     return;
   }
 
-  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<TwoBodyJastrow<FT>>();
+  assert(this == &wfc_leader);
+  // computeGL sums the host Uat, dUat and d2Uat, which the accept path leaves on the device
+  wfc_leader.mw_mem_handle_.getResource().mw_allUat.updateFrom();
   for (int iw = 0; iw < wfc_list.size(); iw++)
   {
     auto& wfc      = wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw);
