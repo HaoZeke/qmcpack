@@ -33,29 +33,6 @@
 
 namespace qmcplusplus
 {
-/** one team's share of one block of a distributed spline table
- *
- * The blocks differ only in how many orbitals they hold and where those orbitals start,
- * and they share one grid, so flattening every (block, team) pair into a single list
- * lets one kernel cover them all: a team reads its record and needs to know nothing
- * about which block the record came from. Without this the evaluation launches a kernel
- * per block, and the launches are what distributing costs.
- */
-template<typename ST>
-struct SplineBlockTeam
-{
-  /// device address of the block's coefficients
-  const ST* coefs;
-  std::intptr_t x_stride;
-  std::intptr_t y_stride;
-  std::intptr_t z_stride;
-  /// the team's range of orbital indices within the block
-  int first;
-  int last;
-  /// where the block's orbitals start in the output
-  std::size_t out_offset;
-};
-
 /** class to match std::complex<ST> spline with BsplineSet::ValueType (complex) SPOs with OpenMP offload
  * @tparam ST precision of spline
  *
@@ -212,45 +189,8 @@ public:
     buildBlockTeams();
   }
 
-  /** flatten the blocks into one team list, once, after the coefficients are on device
-   *
-   * finalize() is what leaves each block's device descriptor holding a device address
-   * for its coefficients, so the addresses gathered here are only valid after it. This
-   * runs outside any threaded region, which is what lets the list be built once and read
-   * by every crowd.
-   */
-  void buildBlockTeams()
-  {
-    const size_t num_blocks   = SplineInst->getNumBlocks();
-    const auto& block_offsets = SplineInst->getBlockOffsets();
-    // the orbitals a team interpolates, matching the chunking the evaluation uses
-    constexpr size_t chunk = 512;
-
-    std::vector<SplineBlockTeam<ST>> host_teams;
-    for (size_t ib = 0; ib < num_blocks; ib++)
-    {
-      auto& block = SplineInst->getBlock(ib);
-      if (block.num_splines == 0)
-        continue;
-      // the host descriptor keeps the host address; the device one was repaired to the
-      // device address, and use_device_ptr reads that same address without remapping
-      auto* coefs = block.coefs;
-      ST* dev_coefs = nullptr;
-      PRAGMA_OFFLOAD("omp target data use_device_ptr(coefs)")
-      { dev_coefs = coefs; }
-
-      const size_t block_splines = static_cast<size_t>(block.num_splines);
-      for (size_t first = 0; first < block_splines; first += chunk)
-        host_teams.push_back(SplineBlockTeam<ST>{dev_coefs, block.x_stride, block.y_stride, block.z_stride,
-                                                 static_cast<int>(first),
-                                                 static_cast<int>(std::min(first + chunk, block_splines)),
-                                                 block_offsets[ib]});
-    }
-
-    block_teams_ = std::make_shared<OffloadVector<SplineBlockTeam<ST>>>(host_teams.size());
-    std::copy(host_teams.begin(), host_teams.end(), block_teams_->begin());
-    block_teams_->updateTo();
-  }
+  /// flatten the blocks into one team list, once, after the coefficients are on device
+  void buildBlockTeams() { buildSplineBlockTeams<ST>(*SplineInst, block_teams_); }
 
   /** remap kPoints to pack the double copy */
   inline void resize_kpoints() override
