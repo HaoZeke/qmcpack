@@ -11,6 +11,7 @@
 
 #include "MultiBsplineOffloadMapperPeer.hpp"
 #include "Message/UniformCommunicateError.h"
+#include "Host/OutputManager.h"
 #include <iostream>
 #include "config.h"
 
@@ -111,6 +112,24 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
       throw UniformCommunicateError("MultiBsplineOffloadMapperPeer: omp_target_associate_ptr failed!");
 
     device_ptrs_[ib] = dptr;
+  }
+
+  /* What a run gets out of this is invisible otherwise. A node holding one copy of a
+   * read only table per device spends that memory on nothing, and it is device memory
+   * that limits walkers per device, so say how many copies there are and what the
+   * arrangement costs against one copy per rank.
+   */
+  size_t shared_bytes = 0;
+  for (int ib = 0; ib < nblocks; ib++)
+    shared_bytes += Base::host_bsplines_.getBlock(ib).coefs_size * sizeof(T);
+  const double mib = static_cast<double>(shared_bytes) / (1 << 20);
+  if (comm_.rank() == 0)
+  {
+    if (nranks > 1)
+      app_log() << "  Spline coefficients: one device copy of " << mib << " MiB shared across " << nranks
+                << " ranks, against " << mib * nranks << " MiB for a copy each." << std::endl;
+    else
+      app_log() << "  Spline coefficients: " << mib << " MiB on this rank's device, not shared." << std::endl;
   }
 }
 
