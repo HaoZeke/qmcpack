@@ -71,7 +71,8 @@ cudaError_t add_delay_list_save_sigma_VGL_batched(cudaStream_t hstream,
                                                   T* const d2phi_out[],
                                                   const int norb,
                                                   const int n_accepted,
-                                                  const int batch_count);
+                                                  const int batch_count,
+                                                  const char* accept_mask = nullptr);
 
 template<typename T>
 cudaError_t applyW_batched(cudaStream_t hstream,
