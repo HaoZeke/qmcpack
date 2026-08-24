@@ -280,7 +280,8 @@ private:
                            const std::vector<Value*>& psiM_l_list,
                            const std::vector<bool>& isAccepted,
                            const OffloadMWVGLArray<Value>& phi_vgl_v,
-                           const std::vector<Value>& ratios)
+                           const std::vector<Value>& ratios,
+                           const Value* ratio_inv_device = nullptr)
   {
     auto& engine_leader = engines.getLeader();
     engine_leader.guard_no_delay();
@@ -332,10 +333,11 @@ private:
       ptr_buffer[3][iw] = mw_rcopy.device_data() + norb * iw;
       if (isAccepted[iw])
       {
-        ptr_buffer[4][iw]  = psiM_g_list[count];
-        ptr_buffer[5][iw]  = psiM_l_list[count];
-        c_ratio_inv[iw]    = Value(-1) / ratios[iw];
-        accept_mask[iw]    = 1;
+        ptr_buffer[4][iw] = psiM_g_list[count];
+        ptr_buffer[5][iw] = psiM_l_list[count];
+        // left alone when the caller formed these where the ratios already are
+        c_ratio_inv[iw] = ratio_inv_device ? Value(0) : Value(-1) / ratios[iw];
+        accept_mask[iw] = 1;
         count++;
       }
       else
@@ -364,8 +366,12 @@ private:
           reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 4);
       Value** d2psiM_mw_out =
           reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 5);
-      Value* ratio_inv_mw =
-          reinterpret_cast<Value*>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 6);
+      /* The reciprocals are the caller's if it formed them on the device, which is what lets
+       * the ratios stay there: nothing in this sequence then needs them on the host.
+       */
+      Value* ratio_inv_mw = ratio_inv_device
+          ? const_cast<Value*>(ratio_inv_device)
+          : reinterpret_cast<Value*>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 6);
       const char* accept_mask_dev =
           reinterpret_cast<const char*>(updateRow_buffer_H2D.device_data() + (sizeof(Value*) * 6 + sizeof(Value)) * nw);
 
@@ -705,7 +711,8 @@ public:
                                   const std::vector<Value*>& psiM_l_list,
                                   const std::vector<bool>& isAccepted,
                                   const OffloadMWVGLArray<Value>& phi_vgl_v,
-                                  const std::vector<Value>& ratios)
+                                  const std::vector<Value>& ratios,
+                                  const Value* ratio_inv_device = nullptr)
   {
     auto& engine_leader = engines.getLeader();
     // invRow consumed, mark invRow_id unset
@@ -713,7 +720,8 @@ public:
 
     if (engine_leader.no_delayed_update_)
     {
-      mw_updateRow(engines, mw_rsc, psiMinv_refs, rowchanged, psiM_g_list, psiM_l_list, isAccepted, phi_vgl_v, ratios);
+      mw_updateRow(engines, mw_rsc, psiMinv_refs, rowchanged, psiM_g_list, psiM_l_list, isAccepted, phi_vgl_v, ratios,
+                   ratio_inv_device);
       return;
     }
 
@@ -762,8 +770,9 @@ public:
         ptr_buffer[9][iw]  = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
         ptr_buffer[10][iw] = psiM_g_list[count_accepted];
         ptr_buffer[11][iw] = psiM_l_list[count_accepted];
-        c_ratio_inv[iw]    = Value(1) / ratios[iw];
-        accept_mask[iw]    = 1;
+        // left alone when the caller formed these where the ratios already are
+        c_ratio_inv[iw] = ratio_inv_device ? Value(0) : Value(1) / ratios[iw];
+        accept_mask[iw] = 1;
         count_accepted++;
       }
       else
@@ -810,8 +819,10 @@ public:
         reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 10);
     Value** d2psiM_mw_out =
         reinterpret_cast<Value**>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 11);
-    Value* ratio_inv_mw_ptr =
-        reinterpret_cast<Value*>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 12);
+    // the caller's if it formed them on the device, for the reason mw_updateRow gives
+    Value* ratio_inv_mw_ptr = ratio_inv_device
+        ? const_cast<Value*>(ratio_inv_device)
+        : reinterpret_cast<Value*>(accept_rejectRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 12);
     const char* accept_mask_dev = reinterpret_cast<const char*>(accept_rejectRow_buffer_H2D.device_data() +
                                                                (sizeof(Value*) * 12 + sizeof(Value)) * nw);
 

@@ -83,6 +83,26 @@ struct DiracDeterminantBatched<PL, VT, FPVT>::DiracDeterminantBatchedMultiWalker
    */
   std::vector<Value*> psiM_g_dev_ptr_list;
   std::vector<Value*> psiM_l_dev_ptr_list;
+  /** the accepted ratios' contribution to the log value, summed where the ratios are
+   *
+   * The accept needs the log of every accepted ratio, and reading those on the host is a
+   * blocking transfer per electron. The modulus and the argument are summed on the device
+   * instead, as [2][nw] with the moduli first, and folded into the components' log values
+   * once per step rather than once per electron.
+   */
+  DualVector<LogAccumReal> mw_log_accum;
+  /// non-zero where an accepted ratio was zero, which is a bug and not a rejection
+  DualVector<char> mw_zero_seen;
+  /// the reciprocals the rank one correction scales by, formed beside the log
+  DualVector<Value> mw_ratio_inv;
+  /** the ratios in this component's value type rather than the orbital set's
+   *
+   * The orbital set writes its own type and the accept arithmetic is in this one, so the
+   * conversion rides along in the kernel that already reads the orbital set's values.
+   */
+  DualVector<Value> mw_ratio_value;
+  /// whether mw_log_accum holds anything not yet folded
+  bool log_accum_pending = false;
   ///
   typename UpdateEngine::MultiWalkerResource engine_rsc;
 };
@@ -465,15 +485,19 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
 
   // the orbital set writes its own value type, which need not be the type the product
   // over components is formed in, so the widening happens where the values already are
+  mw_res.mw_ratio_value.resize(nw);
   const auto* src_ptr  = mw_res.ratios_device_local.device_data();
   const auto* sgrad_ptr = mw_res.grads_device_local.device_data();
   auto* dst_ptr        = ratios_device_prod.device_data();
   auto* gsum_ptr       = grads_device_sum.device_data();
+  auto* rval_ptr       = mw_res.mw_ratio_value.device_data();
   constexpr int dim    = OHMMS_DIM;
   PRAGMA_OFFLOAD("omp target teams distribute parallel for \
-                  is_device_ptr(src_ptr, sgrad_ptr, dst_ptr, gsum_ptr)")
+                  is_device_ptr(src_ptr, sgrad_ptr, dst_ptr, gsum_ptr, rval_ptr)")
   for (int iw = 0; iw < nw; iw++)
   {
+    // the accept reads this one, in the type its own arithmetic is in
+    rval_ptr[iw] = static_cast<Value>(src_ptr[iw]);
     if (assign)
     {
       dst_ptr[iw] = static_cast<PsiValue>(src_ptr[iw]);
@@ -662,6 +686,157 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_accept_rejectMove(
 /** move was rejected. copy the real container to the temporary to move on
 */
 template<PlatformKind PL, typename VT, typename FPVT>
+void DiracDeterminantBatched<PL, VT, FPVT>::mw_accept_rejectMoveFromDeviceMask(
+    const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+    const RefVectorWithLeader<ParticleSet>& p_list,
+    int iat,
+    const char* accept_mask,
+    const std::vector<bool>& isAccepted,
+    bool safe_to_delay) const
+{
+  assert(this == &wfc_list.getLeader());
+  auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  auto& mw_res     = wfc_leader.mw_res_handle_.getResource();
+  auto& phi_vgl_v  = mw_res.phi_vgl_v;
+
+  ScopedTimer update(UpdateTimer);
+
+  const int nw = wfc_list.size();
+  int n_accepted = 0;
+  for (int iw = 0; iw < nw; iw++)
+    if (isAccepted[iw])
+      n_accepted++;
+
+  RefVectorWithLeader<UpdateEngine> engine_list(wfc_leader.det_engine_);
+  engine_list.reserve(nw);
+  auto& psiM_g_dev_ptr_list = mw_res.psiM_g_dev_ptr_list;
+  auto& psiM_l_dev_ptr_list = mw_res.psiM_l_dev_ptr_list;
+  psiM_g_dev_ptr_list.assign(n_accepted, nullptr);
+  psiM_l_dev_ptr_list.assign(n_accepted, nullptr);
+
+  const int WorkingIndex = iat - FirstIndex;
+  for (int iw = 0, count = 0; iw < nw; iw++)
+  {
+    DiracDeterminantBatched<PL, VT, FPVT>& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+    engine_list.push_back(det.det_engine_);
+    if (isAccepted[iw])
+    {
+      psiM_g_dev_ptr_list[count] = det.psiM_vgl.device_data() + psiM_vgl.capacity() + NumOrbitals * WorkingIndex * DIM;
+      psiM_l_dev_ptr_list[count] = det.psiM_vgl.device_data() + psiM_vgl.capacity() * 4 + NumOrbitals * WorkingIndex;
+      count++;
+    }
+    /* curRatio is not read in this form and is not left holding the last move's value: the
+     * host form resets it here too, and restore() and the single walker path both expect one.
+     */
+    det.curRatio = 1.0;
+  }
+
+  auto& mw_log_accum = mw_res.mw_log_accum;
+  auto& mw_zero_seen = mw_res.mw_zero_seen;
+  auto& mw_ratio_inv = mw_res.mw_ratio_inv;
+  mw_ratio_inv.resize(nw);
+  if (mw_log_accum.size() < static_cast<size_t>(2 * nw))
+  {
+    mw_log_accum.resize(2 * nw);
+    mw_zero_seen.resize(nw);
+    std::fill_n(mw_log_accum.data(), 2 * nw, LogAccumReal(0));
+    std::fill_n(mw_zero_seen.data(), nw, char(0));
+    mw_log_accum.updateTo();
+    mw_zero_seen.updateTo();
+  }
+
+  /* One kernel does all three things the ratios were fetched for. The reciprocal's sign is
+   * the engine's: the delayed form scales by 1/ratio and the immediate one by -1/ratio, and
+   * a maximum delay of one is what selects the immediate one.
+   *
+   * The arithmetic is written on the underlying reals rather than on Value, because a
+   * complex divide and a complex log are library calls that do not belong in a target
+   * region. cstride is 2 for a complex build and 1 for a real one, so the same code covers
+   * both and the compiler folds the branch.
+   */
+  constexpr int cstride  = sizeof(Value) / sizeof(Real);
+  const Real numerator   = wfc_leader.ndelay_ == 1 ? Real(-1) : Real(1);
+  const auto* rat_ptr    = reinterpret_cast<const Real*>(mw_res.mw_ratio_value.device_data());
+  auto* inv_ptr          = reinterpret_cast<Real*>(mw_ratio_inv.device_data());
+  auto* accum_ptr        = mw_log_accum.device_data();
+  auto* zero_ptr         = mw_zero_seen.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
+                  is_device_ptr(accept_mask, rat_ptr, inv_ptr, accum_ptr, zero_ptr)")
+  for (int iw = 0; iw < nw; iw++)
+  {
+    if (!accept_mask[iw])
+    {
+      // zero makes the rank one correction this scales an exact no-op
+      inv_ptr[iw * cstride] = Real(0);
+      if (cstride == 2)
+        inv_ptr[iw * cstride + 1] = Real(0);
+      continue;
+    }
+    const Real re   = rat_ptr[iw * cstride];
+    const Real im   = cstride == 2 ? rat_ptr[iw * cstride + 1] : Real(0);
+    const Real mag2 = re * re + im * im;
+    if (mag2 == Real(0))
+    {
+      zero_ptr[iw]          = 1;
+      inv_ptr[iw * cstride] = Real(0);
+      if (cstride == 2)
+        inv_ptr[iw * cstride + 1] = Real(0);
+      continue;
+    }
+    // numerator over a complex number, as its conjugate over its squared modulus
+    const Real scale      = numerator / mag2;
+    inv_ptr[iw * cstride] = re * scale;
+    if (cstride == 2)
+      inv_ptr[iw * cstride + 1] = -im * scale;
+    // the log of the ratio: half the log of the squared modulus, and the argument
+    accum_ptr[iw] += static_cast<LogAccumReal>(0.5) * std::log(static_cast<LogAccumReal>(mag2));
+    accum_ptr[nw + iw] += std::atan2(static_cast<LogAccumReal>(im), static_cast<LogAccumReal>(re));
+  }
+  mw_res.log_accum_pending = true;
+
+  UpdateEngine::mw_accept_rejectRow(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs, WorkingIndex,
+                                    psiM_g_dev_ptr_list, psiM_l_dev_ptr_list, isAccepted, phi_vgl_v,
+                                    mw_res.ratios_local, mw_ratio_inv.device_data());
+
+  if (!safe_to_delay)
+    UpdateEngine::mw_updateInvMat(engine_list, mw_res.engine_rsc, mw_res.psiMinv_refs);
+}
+
+template<PlatformKind PL, typename VT, typename FPVT>
+void DiracDeterminantBatched<PL, VT, FPVT>::foldDeviceLogAccum(
+    const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+    bool add)
+{
+  auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  auto& mw_res     = wfc_leader.mw_res_handle_.getResource();
+  if (!mw_res.log_accum_pending)
+    return;
+
+  const int nw = wfc_list.size();
+  mw_res.mw_log_accum.updateFrom();
+  mw_res.mw_zero_seen.updateFrom();
+
+  for (int iw = 0; iw < nw; iw++)
+    if (mw_res.mw_zero_seen[iw])
+    {
+      std::ostringstream msg;
+      msg << "DiracDeterminantBatched accepted a zero ratio for walker " << iw << "! Report a bug." << std::endl;
+      throw std::runtime_error(msg.str());
+    }
+
+  if (add)
+    for (int iw = 0; iw < nw; iw++)
+    {
+      auto& det = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
+      det.log_value_ += typename WaveFunctionComponent::LogValue(mw_res.mw_log_accum[iw], mw_res.mw_log_accum[nw + iw]);
+    }
+
+  std::fill_n(mw_res.mw_log_accum.data(), 2 * nw, LogAccumReal(0));
+  mw_res.mw_log_accum.updateTo();
+  mw_res.log_accum_pending = false;
+}
+
+template<PlatformKind PL, typename VT, typename FPVT>
 void DiracDeterminantBatched<PL, VT, FPVT>::restore(int iat)
 { curRatio = 1.0; }
 
@@ -772,6 +947,11 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evaluateGL(const RefVectorWithLea
 {
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
+  /* The device accept leaves the accepted ratios' logs summed on the device, so they are
+   * folded in before anything reads a log value. A recompute from an inversion produces the
+   * whole value and does not want them added, but it does want them cleared.
+   */
+  foldDeviceLogAccum(wfc_list, !fromscratch);
   if (fromscratch)
     mw_evaluateLog(wfc_list, p_list, G_list, L_list);
   else
