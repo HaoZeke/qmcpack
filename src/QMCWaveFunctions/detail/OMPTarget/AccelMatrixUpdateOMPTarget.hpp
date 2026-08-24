@@ -72,7 +72,19 @@ void calcGradients_batched(Queue<PlatformKind::OMPTARGET>& queue,
                            T* const grads_now,
                            const int batch_count)
 {
-  PRAGMA_OFFLOAD("omp target teams distribute is_device_ptr(Ainvrow, dpsiMrow, grads_now)")
+  /* A team reduces over n orbitals, and left to itself the compiler gives the team far more
+   * lanes than that; the ones past the work still enter the reduction tree and still cost
+   * their barriers. Same reasoning as the batched gemv and the Jastrow kernels.
+   */
+  const int team_width = [n] {
+    int width = 32;
+    while (width < n && width < 1024)
+      width *= 2;
+    return width;
+  }();
+
+  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
+                  is_device_ptr(Ainvrow, dpsiMrow, grads_now)")
   for (size_t iw = 0; iw < batch_count; iw++)
   {
     const T* __restrict__ invRow    = Ainvrow[iw];
