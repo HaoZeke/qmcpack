@@ -22,6 +22,9 @@
 #include "WaveFunctionTypes.hpp"
 #include "QueueAliases.hpp"
 #include "AccelBLAS.hpp"
+#if defined(ENABLE_CUDA)
+#include "CUDA/CUDAGraph.hpp"
+#endif
 
 namespace qmcplusplus
 {
@@ -82,6 +85,13 @@ public:
     Vector<char, OffloadPinnedAllocator<char>> updateInv_buffer_H2D;
     // mw_evalGrad pointer buffer
     Vector<char, OffloadPinnedAllocator<char>> evalGrad_buffer_H2D;
+#if defined(ENABLE_CUDA)
+    /* The electron loop issues the same short sequences over and over, so they are recorded
+     * and replayed. Only the CUDA platform has a stream to record; an OpenMP target region
+     * is submitted by the offload runtime and is not ours to capture.
+     */
+    compute::CUDAGraphCache graphs;
+#endif
     /// device addresses of the inverse spans a crowd copies to the host together
     DualVector<Value*> gather_ptrs;
     /// those spans packed back to back, so one transfer carries the crowd
@@ -321,8 +331,6 @@ private:
     // update the inverse matrix
     mw_rsc.resize_fill_constant_arrays(n_accepted);
 
-    queue.enqueueH2D(updateRow_buffer_H2D);
-
     {
       Value** Ainv_mw_ptr = reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data());
       Value** phiVGL_mw_ptr =
@@ -338,17 +346,41 @@ private:
       Value* ratio_inv_mw =
           reinterpret_cast<Value*>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 6);
 
+      // the copy and Fahy's variant of the Sherman-Morrison update, as one sequence
+      auto issue = [&] {
+        queue.enqueueH2D(updateRow_buffer_H2D);
 
-      // invoke the Fahy's variant of Sherman-Morrison update.
-      compute::BLAS::gemv_batched(blas_handle, 'T', norb, norb, cone_vec.device_data(), Ainv_mw_ptr, lda, phiVGL_mw_ptr,
-                                  1, czero_vec.device_data(), temp_mw_ptr, 1, n_accepted);
+        compute::BLAS::gemv_batched(blas_handle, 'T', norb, norb, cone_vec.device_data(), Ainv_mw_ptr, lda,
+                                    phiVGL_mw_ptr, 1, czero_vec.device_data(), temp_mw_ptr, 1, n_accepted);
 
-      compute::copyAinvRow_saveGL_batched(queue, rowchanged, norb, Ainv_mw_ptr, lda, temp_mw_ptr, rcopy_mw_ptr,
-                                          phiVGL_mw_ptr, phi_vgl_stride, dpsiM_mw_out, d2psiM_mw_out, n_accepted);
+        compute::copyAinvRow_saveGL_batched(queue, rowchanged, norb, Ainv_mw_ptr, lda, temp_mw_ptr, rcopy_mw_ptr,
+                                            phiVGL_mw_ptr, phi_vgl_stride, dpsiM_mw_out, d2psiM_mw_out, n_accepted);
 
-
-      compute::BLAS::ger_batched(blas_handle, norb, norb, ratio_inv_mw, rcopy_mw_ptr, 1, temp_mw_ptr, 1, Ainv_mw_ptr,
-                                 lda, n_accepted);
+        compute::BLAS::ger_batched(blas_handle, norb, norb, ratio_inv_mw, rcopy_mw_ptr, 1, temp_mw_ptr, 1, Ainv_mw_ptr,
+                                   lda, n_accepted);
+      };
+#if defined(ENABLE_CUDA)
+      if constexpr (PL == PlatformKind::CUDA)
+      {
+        /* Unlike the gradient sequence, the row that moved is an argument to the copy kernel
+         * and the accepted count sets the grid and the offsets, so a recording serves one
+         * pair of them. The electron loop revisits both, which is what makes caching worth
+         * it, and a reallocated buffer changes its device address and so its key.
+         */
+        using Graphs = compute::CUDAGraphCache;
+        uint64_t key = Graphs::mix(3, static_cast<uint64_t>(rowchanged));
+        key          = Graphs::mix(key, static_cast<uint64_t>(n_accepted));
+        key          = Graphs::mix(key, static_cast<uint64_t>(norb));
+        key          = Graphs::mix(key, static_cast<uint64_t>(lda));
+        key          = Graphs::mix(key, static_cast<uint64_t>(phi_vgl_stride));
+        key          = Graphs::mix(key, updateRow_buffer_H2D.device_data());
+        key          = Graphs::mix(key, cone_vec.device_data());
+        key          = Graphs::mix(key, czero_vec.device_data());
+        mw_rsc.graphs.launch(queue.getNative(), key, issue);
+      }
+      else
+#endif
+        issue();
     }
   }
 
@@ -393,17 +425,35 @@ public:
       ptr_buffer[1][iw] = dpsiM_row_list[iw];
     }
 
-    queue.enqueueH2D(evalGrad_buffer_H2D);
-
     if (grads_value_v.rows() != nw || grads_value_v.cols() != GT::Size)
       grads_value_v.resize(nw, GT::Size);
 
     const Value** invRow_ptr    = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data());
     const Value** dpsiM_row_ptr = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data()) + nw;
+    const int norb_grad         = engine_leader.invRow.size();
 
-    compute::calcGradients_batched(queue, engine_leader.invRow.size(), invRow_ptr, dpsiM_row_ptr,
-                                   grads_value_v.device_data(), nw);
-    queue.enqueueD2H(grads_value_v);
+    /* Three operations, the same three for every electron: the row that moved reaches the
+     * kernel through the pointer table rather than as an argument, so one recording serves
+     * the whole loop. The synchronisation stays outside it, since the host reads the result.
+     */
+    auto issue = [&] {
+      queue.enqueueH2D(evalGrad_buffer_H2D);
+      compute::calcGradients_batched(queue, norb_grad, invRow_ptr, dpsiM_row_ptr, grads_value_v.device_data(), nw);
+      queue.enqueueD2H(grads_value_v);
+    };
+#if defined(ENABLE_CUDA)
+    if constexpr (PL == PlatformKind::CUDA)
+    {
+      using Graphs = compute::CUDAGraphCache;
+      uint64_t key = Graphs::mix(2, static_cast<uint64_t>(nw));
+      key          = Graphs::mix(key, static_cast<uint64_t>(norb_grad));
+      key          = Graphs::mix(key, evalGrad_buffer_H2D.device_data());
+      key          = Graphs::mix(key, grads_value_v.device_data());
+      mw_rsc.graphs.launch(queue.getNative(), key, issue);
+    }
+    else
+#endif
+      issue();
     queue.sync();
 
     for (int iw = 0; iw < nw; iw++)
@@ -448,16 +498,34 @@ public:
       ptr_buffer[1][iw] = dpsiM_row_list[iw];
     }
 
-    queue.enqueueH2D(evalGrad_buffer_H2D);
-
     if (grads_value_v.rows() != nw || grads_value_v.cols() != grad_size)
       grads_value_v.resize(nw, grad_size);
 
     const Value** invRow_ptr    = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data());
     const Value** dpsiM_row_ptr = reinterpret_cast<const Value**>(evalGrad_buffer_H2D.device_data()) + nw;
+    const int norb_grad         = engine_leader.invRow.size();
 
-    compute::calcGradients_batched(queue, engine_leader.invRow.size(), invRow_ptr, dpsiM_row_ptr,
-                                   grads_value_v.device_data(), nw);
+    /* The copy and the kernel are the same two operations for every electron: the row that
+     * moved reaches the kernel through the pointer table, not as an argument, so nothing in
+     * the recording changes from one electron to the next.
+     */
+    auto issue = [&] {
+      queue.enqueueH2D(evalGrad_buffer_H2D);
+      compute::calcGradients_batched(queue, norb_grad, invRow_ptr, dpsiM_row_ptr, grads_value_v.device_data(), nw);
+    };
+#if defined(ENABLE_CUDA)
+    if constexpr (PL == PlatformKind::CUDA)
+    {
+      using Graphs  = compute::CUDAGraphCache;
+      uint64_t key  = Graphs::mix(1, static_cast<uint64_t>(nw));
+      key           = Graphs::mix(key, static_cast<uint64_t>(norb_grad));
+      key           = Graphs::mix(key, evalGrad_buffer_H2D.device_data());
+      key           = Graphs::mix(key, grads_value_v.device_data());
+      mw_rsc.graphs.launch(queue.getNative(), key, issue);
+    }
+    else
+#endif
+      issue();
     /* The consumer is an OpenMP kernel on a different stream, so the queue is still
      * drained. What this form drops is the copy down of the gradients themselves and
      * the host side unpacking that follows it.
