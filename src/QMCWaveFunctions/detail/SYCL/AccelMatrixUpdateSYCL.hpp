@@ -36,12 +36,13 @@ void copyAinvRow_saveGL_batched(Queue<PlatformKind::SYCL>& queue,
                                 const size_t phi_vgl_stride,
                                 T* const dphi_out[],
                                 T* const d2phi_out[],
-                                const int batch_count)
+                                const int batch_count,
+                                const char* accept_mask = nullptr)
 {
   try
   {
     SYCL::copyAinvRow_saveGL_batched(queue.getNative(), rowchanged, n, Ainv, lda, temp, rcopy, phi_vgl_in,
-                                     phi_vgl_stride, dphi_out, d2phi_out, batch_count);
+                                     phi_vgl_stride, dphi_out, d2phi_out, batch_count, accept_mask);
   }
   catch (sycl::exception& e)
   {

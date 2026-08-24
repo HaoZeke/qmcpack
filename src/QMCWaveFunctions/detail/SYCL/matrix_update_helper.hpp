@@ -32,7 +32,8 @@ sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                        T* const dphi_out[],
                                        T* const d2phi_out[],
                                        int batch_count,
-                                       const std::vector<sycl::event>& dependencies = {});
+                                       const char* accept_mask                        = nullptr,
+                                       const std::vector<sycl::event>& dependencies   = {});
 
 template<typename T, int DIM = 3>
 sycl::event calcGradients_batched(sycl::queue& aq,

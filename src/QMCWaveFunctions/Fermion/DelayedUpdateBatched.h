@@ -304,72 +304,96 @@ private:
     const int lda               = psiMinv_refs[0].get().cols();
     const int nw                = engines.size();
     const size_t phi_vgl_stride = nw * norb;
-    mw_temp.resize(norb * n_accepted);
-    mw_rcopy.resize(norb * n_accepted);
+
+    /* Natural walker order with a per-walker mask, rather than accepted-first packing.
+     * c_ratio_inv is zero for a rejected walker, which makes the rank one correction it
+     * scales an exact no-op, so every batched call runs over all nw walkers and neither
+     * the grids nor the offsets into the transfer buffer depend on how many accepted.
+     * That is what the delayed path already does, and it is what lets a recording of this
+     * sequence be keyed on the moved row alone.
+     */
+    mw_temp.resize(norb * nw);
+    mw_rcopy.resize(norb * nw);
 
     constexpr size_t num_ptrs_packed = 6; // it must match packing and unpacking
-    updateRow_buffer_H2D.resize((sizeof(Value*) * num_ptrs_packed + sizeof(Value)) * n_accepted);
+    updateRow_buffer_H2D.resize((sizeof(Value*) * num_ptrs_packed + sizeof(Value) + sizeof(char)) * nw);
 
     // to handle T** of Ainv, psi_v, temp, rcopy
-    Matrix<Value*> ptr_buffer(reinterpret_cast<Value**>(updateRow_buffer_H2D.data()), num_ptrs_packed, n_accepted);
+    Matrix<Value*> ptr_buffer(reinterpret_cast<Value**>(updateRow_buffer_H2D.data()), num_ptrs_packed, nw);
     Value* c_ratio_inv =
-        reinterpret_cast<Value*>(updateRow_buffer_H2D.data() + sizeof(Value*) * num_ptrs_packed * n_accepted);
+        reinterpret_cast<Value*>(updateRow_buffer_H2D.data() + sizeof(Value*) * num_ptrs_packed * nw);
+    char* accept_mask = reinterpret_cast<char*>(updateRow_buffer_H2D.data() +
+                                                (sizeof(Value*) * num_ptrs_packed + sizeof(Value)) * nw);
     for (int iw = 0, count = 0; iw < isAccepted.size(); iw++)
+    {
+      ptr_buffer[0][iw] = psiMinv_refs[iw].get().device_data();
+      ptr_buffer[1][iw] = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
+      ptr_buffer[2][iw] = mw_temp.device_data() + norb * iw;
+      ptr_buffer[3][iw] = mw_rcopy.device_data() + norb * iw;
       if (isAccepted[iw])
       {
-        ptr_buffer[0][count] = psiMinv_refs[iw].get().device_data();
-        ptr_buffer[1][count] = const_cast<Value*>(phi_vgl_v.device_data_at(0, iw, 0));
-        ptr_buffer[2][count] = mw_temp.device_data() + norb * count;
-        ptr_buffer[3][count] = mw_rcopy.device_data() + norb * count;
-        ptr_buffer[4][count] = psiM_g_list[count];
-        ptr_buffer[5][count] = psiM_l_list[count];
-
-        c_ratio_inv[count] = Value(-1) / ratios[iw];
+        ptr_buffer[4][iw]  = psiM_g_list[count];
+        ptr_buffer[5][iw]  = psiM_l_list[count];
+        c_ratio_inv[iw]    = Value(-1) / ratios[iw];
+        accept_mask[iw]    = 1;
         count++;
       }
+      else
+      {
+        // the gradient and laplacian outputs are only reached on the accepted branch
+        ptr_buffer[4][iw] = nullptr;
+        ptr_buffer[5][iw] = nullptr;
+        c_ratio_inv[iw]   = Value(0); // makes the rank one correction an exact no-op
+        accept_mask[iw]   = 0;
+      }
+    }
 
     // update the inverse matrix
-    mw_rsc.resize_fill_constant_arrays(n_accepted);
+    // the constant vectors the batched calls scale by are now nw long, like the calls
+    mw_rsc.resize_fill_constant_arrays(nw);
 
     {
       Value** Ainv_mw_ptr = reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data());
       Value** phiVGL_mw_ptr =
-          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted);
+          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw);
       Value** temp_mw_ptr =
-          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 2);
+          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 2);
       Value** rcopy_mw_ptr =
-          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 3);
+          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 3);
       Value** dpsiM_mw_out =
-          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 4);
+          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 4);
       Value** d2psiM_mw_out =
-          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 5);
+          reinterpret_cast<Value**>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 5);
       Value* ratio_inv_mw =
-          reinterpret_cast<Value*>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * n_accepted * 6);
+          reinterpret_cast<Value*>(updateRow_buffer_H2D.device_data() + sizeof(Value*) * nw * 6);
+      const char* accept_mask_dev =
+          reinterpret_cast<const char*>(updateRow_buffer_H2D.device_data() + (sizeof(Value*) * 6 + sizeof(Value)) * nw);
 
       // the copy and Fahy's variant of the Sherman-Morrison update, as one sequence
       auto issue = [&] {
         queue.enqueueH2D(updateRow_buffer_H2D);
 
         compute::BLAS::gemv_batched(blas_handle, 'T', norb, norb, cone_vec.device_data(), Ainv_mw_ptr, lda,
-                                    phiVGL_mw_ptr, 1, czero_vec.device_data(), temp_mw_ptr, 1, n_accepted);
+                                    phiVGL_mw_ptr, 1, czero_vec.device_data(), temp_mw_ptr, 1, nw);
 
         compute::copyAinvRow_saveGL_batched(queue, rowchanged, norb, Ainv_mw_ptr, lda, temp_mw_ptr, rcopy_mw_ptr,
-                                            phiVGL_mw_ptr, phi_vgl_stride, dpsiM_mw_out, d2psiM_mw_out, n_accepted);
+                                            phiVGL_mw_ptr, phi_vgl_stride, dpsiM_mw_out, d2psiM_mw_out, nw,
+                                            accept_mask_dev);
 
         compute::BLAS::ger_batched(blas_handle, norb, norb, ratio_inv_mw, rcopy_mw_ptr, 1, temp_mw_ptr, 1, Ainv_mw_ptr,
-                                   lda, n_accepted);
+                                   lda, nw);
       };
 #if defined(ENABLE_CUDA)
       if constexpr (PL == PlatformKind::CUDA)
       {
-        /* Unlike the gradient sequence, the row that moved is an argument to the copy kernel
-         * and the accepted count sets the grid and the offsets, so a recording serves one
-         * pair of them. The electron loop revisits both, which is what makes caching worth
-         * it, and a reallocated buffer changes its device address and so its key.
+        /* The row that moved is an argument to the copy kernel, so a recording serves one
+         * row; the mask took the accepted count out of the grids and the offsets, so it
+         * serves every decision for that row. That is one recording per electron of the
+         * loop. A reallocated buffer changes its device address and so its key.
          */
         using Graphs = compute::CUDAGraphCache;
         uint64_t key = Graphs::mix(3, static_cast<uint64_t>(rowchanged));
-        key          = Graphs::mix(key, static_cast<uint64_t>(n_accepted));
+        key          = Graphs::mix(key, static_cast<uint64_t>(nw));
         key          = Graphs::mix(key, static_cast<uint64_t>(norb));
         key          = Graphs::mix(key, static_cast<uint64_t>(lda));
         key          = Graphs::mix(key, static_cast<uint64_t>(phi_vgl_stride));

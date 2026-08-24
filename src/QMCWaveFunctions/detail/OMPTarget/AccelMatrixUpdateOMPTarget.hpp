@@ -35,11 +35,20 @@ void copyAinvRow_saveGL_batched(Queue<PlatformKind::OMPTARGET>& queue,
                                 const size_t phi_vgl_stride,
                                 T* const dphi_out[],
                                 T* const d2phi_out[],
-                                const int batch_count)
+                                const int batch_count,
+                                const char* accept_mask = nullptr)
 {
-  PRAGMA_OFFLOAD("omp target teams distribute is_device_ptr(Ainv, temp, rcopy, phi_vgl_in, dphi_out, d2phi_out)")
+  PRAGMA_OFFLOAD("omp target teams distribute \
+                  is_device_ptr(Ainv, temp, rcopy, phi_vgl_in, dphi_out, d2phi_out, accept_mask)")
   for (size_t iw = 0; iw < batch_count; iw++)
   {
+    /* With a mask the caller runs over every walker rather than packing the accepted ones
+     * first, which is what lets the grid and the pointer offsets stop depending on how many
+     * accepted. A rejected walker has no output rows, so it is skipped before anything is
+     * dereferenced.
+     */
+    if (accept_mask && !accept_mask[iw])
+      continue;
     const T* __restrict__ Ainv_iw   = Ainv[iw];
     T* __restrict__ temp_iw         = temp[iw];
     T* __restrict__ rcopy_iw        = rcopy[iw];

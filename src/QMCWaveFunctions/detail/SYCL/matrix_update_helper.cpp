@@ -30,13 +30,17 @@ sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                        T* const dphi_out[],
                                        T* const d2phi_out[],
                                        const int batch_count,
+                                       const char* accept_mask,
                                        const std::vector<sycl::event>& dependencies)
 {
   constexpr int COLBS = 128;
 
   return aq.parallel_for(sycl::nd_range<1>{{static_cast<size_t>(batch_count * COLBS)}, {static_cast<size_t>(COLBS)}},
                          dependencies, [=](sycl::nd_item<1> item) {
-                           const int iw                    = item.get_group(0); //blockIdx.x;
+                           const int iw = item.get_group(0); //blockIdx.x;
+                           // a rejected walker has no output rows; see the CUDA form
+                           if (accept_mask && !accept_mask[iw])
+                             return;
                            const T* __restrict__ Ainv_iw   = Ainv[iw];
                            T* __restrict__ temp_iw         = temp[iw];
                            T* __restrict__ rcopy_iw        = rcopy[iw];
@@ -79,6 +83,7 @@ template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                                 float* const dphi_out[],
                                                 float* const d2phi_out[],
                                                 const int batch_count,
+                                                const char* accept_mask,
                                                 const std::vector<sycl::event>& dependencies);
 
 template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
@@ -93,6 +98,7 @@ template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                                 double* const dphi_out[],
                                                 double* const d2phi_out[],
                                                 const int batch_count,
+                                                const char* accept_mask,
                                                 const std::vector<sycl::event>& dependencies);
 
 template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
@@ -107,6 +113,7 @@ template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                                 std::complex<float>* const dphi_out[],
                                                 std::complex<float>* const d2phi_out[],
                                                 const int batch_count,
+                                                const char* accept_mask,
                                                 const std::vector<sycl::event>& dependencies);
 
 template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
@@ -121,6 +128,7 @@ template sycl::event copyAinvRow_saveGL_batched(sycl::queue& aq,
                                                 std::complex<double>* const dphi_out[],
                                                 std::complex<double>* const d2phi_out[],
                                                 const int batch_count,
+                                                const char* accept_mask,
                                                 const std::vector<sycl::event>& dependencies);
 
 template<typename T, int DIM>

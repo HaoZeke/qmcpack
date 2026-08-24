@@ -41,9 +41,17 @@ __global__ void copyAinvRow_saveGL_kernel(const int rowchanged,
                                           const T* const phi_vgl_in[],
                                           const size_t phi_vgl_stride,
                                           T* const dphi_out[],
-                                          T* const d2phi_out[])
+                                          T* const d2phi_out[],
+                                          const char* __restrict__ accept_mask)
 {
-  const int iw                    = blockIdx.x;
+  const int iw = blockIdx.x;
+  /* With a mask the caller runs over every walker rather than packing the accepted ones
+   * first, which is what lets the grid and the pointer offsets stop depending on how many
+   * accepted. A rejected walker has no output rows to write to, so it returns before
+   * anything is dereferenced.
+   */
+  if (accept_mask && !accept_mask[iw])
+    return;
   const T* __restrict__ Ainv_iw   = Ainv[iw];
   T* __restrict__ temp_iw         = temp[iw];
   T* __restrict__ rcopy_iw        = rcopy[iw];
@@ -85,7 +93,8 @@ cudaError_t copyAinvRow_saveGL_batched<float>(cudaStream_t hstream,
                                               const size_t phi_vgl_stride,
                                               float* const dphi_out[],
                                               float* const d2phi_out[],
-                                              const int batch_count)
+                                              const int batch_count,
+                                              const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -95,7 +104,7 @@ cudaError_t copyAinvRow_saveGL_batched<float>(cudaStream_t hstream,
   dim3 dimGrid(batch_count);
   copyAinvRow_saveGL_kernel<float, COLBS><<<dimGrid, dimBlock, 0, hstream>>>(rowchanged, n, Ainv, lda, temp, rcopy,
                                                                              phi_vgl_in, phi_vgl_stride, dphi_out,
-                                                                             d2phi_out);
+                                                                             d2phi_out, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -111,7 +120,8 @@ cudaError_t copyAinvRow_saveGL_batched<double>(cudaStream_t hstream,
                                                const size_t phi_vgl_stride,
                                                double* const dphi_out[],
                                                double* const d2phi_out[],
-                                               const int batch_count)
+                                               const int batch_count,
+                                               const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -121,7 +131,7 @@ cudaError_t copyAinvRow_saveGL_batched<double>(cudaStream_t hstream,
   dim3 dimGrid(batch_count);
   copyAinvRow_saveGL_kernel<double, COLBS><<<dimGrid, dimBlock, 0, hstream>>>(rowchanged, n, Ainv, lda, temp, rcopy,
                                                                               phi_vgl_in, phi_vgl_stride, dphi_out,
-                                                                              d2phi_out);
+                                                                              d2phi_out, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -137,7 +147,8 @@ cudaError_t copyAinvRow_saveGL_batched<std::complex<float>>(cudaStream_t hstream
                                                             const size_t phi_vgl_stride,
                                                             std::complex<float>* const dphi_out[],
                                                             std::complex<float>* const d2phi_out[],
-                                                            const int batch_count)
+                                                            const int batch_count,
+                                                            const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -148,7 +159,7 @@ cudaError_t copyAinvRow_saveGL_batched<std::complex<float>>(cudaStream_t hstream
   copyAinvRow_saveGL_kernel<cuComplex, COLBS>
       <<<dimGrid, dimBlock, 0, hstream>>>(rowchanged, n, (const cuComplex**)Ainv, lda, (cuComplex**)temp,
                                           (cuComplex**)rcopy, (const cuComplex**)phi_vgl_in, phi_vgl_stride,
-                                          (cuComplex**)dphi_out, (cuComplex**)d2phi_out);
+                                          (cuComplex**)dphi_out, (cuComplex**)d2phi_out, accept_mask);
   return cudaPeekAtLastError();
 }
 
@@ -164,7 +175,8 @@ cudaError_t copyAinvRow_saveGL_batched<std::complex<double>>(cudaStream_t hstrea
                                                              const size_t phi_vgl_stride,
                                                              std::complex<double>* const dphi_out[],
                                                              std::complex<double>* const d2phi_out[],
-                                                             const int batch_count)
+                                                             const int batch_count,
+                                                             const char* accept_mask)
 {
   if (batch_count == 0)
     return cudaSuccess;
@@ -175,7 +187,7 @@ cudaError_t copyAinvRow_saveGL_batched<std::complex<double>>(cudaStream_t hstrea
   copyAinvRow_saveGL_kernel<cuDoubleComplex, COLBS>
       <<<dimGrid, dimBlock, 0, hstream>>>(rowchanged, n, (const cuDoubleComplex**)Ainv, lda, (cuDoubleComplex**)temp,
                                           (cuDoubleComplex**)rcopy, (const cuDoubleComplex**)phi_vgl_in, phi_vgl_stride,
-                                          (cuDoubleComplex**)dphi_out, (cuDoubleComplex**)d2phi_out);
+                                          (cuDoubleComplex**)dphi_out, (cuDoubleComplex**)d2phi_out, accept_mask);
   return cudaPeekAtLastError();
 }
 
