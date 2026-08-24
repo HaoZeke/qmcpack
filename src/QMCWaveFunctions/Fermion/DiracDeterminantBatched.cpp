@@ -449,9 +449,13 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
     ratios_local.resize(nw);
     grad_new_local.resize(nw);
 
+    /* No host gradients: this component's term reaches the caller through
+     * grads_device_sum, and TrialWaveFunction::mw_calcRatioGradDevice poisons grad_new
+     * because a component with device resident state leaves its slot unfilled.
+     */
     wfc_leader.phi_.mw_evaluateVGLandDetRatioGradsDevice(phi_list, p_list, iat, psiMinv_row_dev_ptr_list, phi_vgl_v,
                                                          ratios_local, grad_new_local, mw_res.ratios_device_local,
-                                                         mw_res.grads_device_local);
+                                                         mw_res.grads_device_local, false);
   }
 
   wfc_leader.UpdateMode = ORB_PBYP_PARTIAL;
@@ -460,7 +464,7 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
     auto& det      = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
     det.UpdateMode = ORB_PBYP_PARTIAL;
     ratios[iw] = det.curRatio = ratios_local[iw];
-    grad_new[iw] += grad_new_local[iw];
+    // grad_new is not summed: grad_new_local holds no host gradient in this form
   }
 
   // the orbital set writes its own value type, which need not be the type the product

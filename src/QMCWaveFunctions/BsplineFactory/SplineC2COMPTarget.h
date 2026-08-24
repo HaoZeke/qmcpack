@@ -276,7 +276,8 @@ public:
                                             std::vector<ValueType>& ratios,
                                             std::vector<GradType>& grads,
                                             OffloadValueVector& ratios_device,
-                                            OffloadValueVector& grads_device) const override;
+                                            OffloadValueVector& grads_device,
+                                            bool want_host_grads) const override;
 
   void assign_vgh(const PointType& r,
                   ValueVector& psi,
