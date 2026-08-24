@@ -482,8 +482,12 @@ public:
   /** accept or reject from a device-resident mask, over every component
    *
    *  The decision stays where it was computed. Components that can drive their accept from the
-   *  mask do so; the rest fall back to bringing it over, which is still one transfer of nw bytes
-   *  rather than the values the decision would have been made from.
+   *  mask do so; the rest are handed it on the host, fetched once here rather than once per
+   *  component, which is one transfer of nw bytes rather than the values the decision would
+   *  have been made from.
+   *
+   *  This form leaves log_real_ and PhaseValue poisoned. mw_evaluateGL re-sums both from the
+   *  components, so a caller of this has to run it before reading getLogPsi or getPhase.
    */
   static void mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLeader<TrialWaveFunction>& wf_list,
                                                 const RefVectorWithLeader<ParticleSet>& p_list,

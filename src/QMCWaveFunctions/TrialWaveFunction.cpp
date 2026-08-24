@@ -916,34 +916,43 @@ void TrialWaveFunction::mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLe
   auto& wavefunction_components = wf_leader.Z;
   const int nw                  = wf_list.size();
 
-  /* The running log value and phase are kept on the wavefunction objects, and they are only
-   * accumulated for walkers that accepted, so the decision is needed here on the host. It is
-   * fetched once, for every component, rather than once per component, and it is nw bytes
-   * against the ratios and gradients the decision would otherwise have been formed from.
+  /* The decision is fetched once here and handed to every component. No component overrides
+   * this yet, so each of them would otherwise fetch the same nw bytes for itself, and that is
+   * a blocking transfer per component per electron.
+   *
+   * a local buffer of nw bytes rather than a member: this type is mapped to the device in
+   * places, so its layout is not somewhere to put a container. A device address rather than a
+   * mapped buffer, so this is a copy between devices rather than an update of a buffer's own
+   * device copy.
    */
   std::vector<char> host_mask(nw);
   omp_target_memcpy(host_mask.data(), const_cast<char*>(accept_mask), nw, 0, 0, omp_get_initial_device(),
                     omp_get_default_device());
-
+  std::vector<bool> isAccepted(nw);
   for (int iw = 0; iw < nw; iw++)
-    if (host_mask[iw])
-    {
-      wf_list[iw].log_real_  = 0;
-      wf_list[iw].PhaseValue = 0;
-    }
+    isAccepted[iw] = host_mask[iw] != 0;
 
   for (int i = 0; i < num_wfc; i++)
   {
     ScopedTimer z_timer(wf_leader.WFC_timers_[ACCEPT_TIMER + TIMER_SKIP * i]);
     const auto wfc_list(extractWFCRefList(wf_list, i));
-    wavefunction_components[i]->mw_accept_rejectMoveFromDeviceMask(wfc_list, p_list, iat, accept_mask,
+    wavefunction_components[i]->mw_accept_rejectMoveFromDeviceMask(wfc_list, p_list, iat, accept_mask, isAccepted,
                                                                    safe_to_delay);
-    for (int iw = 0; iw < nw; iw++)
-      if (host_mask[iw])
-      {
-        wf_list[iw].log_real_ += std::real(wfc_list[iw].get_log_value());
-        wf_list[iw].PhaseValue += std::imag(wfc_list[iw].get_log_value());
-      }
+  }
+
+  /* The running log value and phase are not accumulated here. mw_evaluateGL zeroes both and
+   * re-sums them from the components before any caller of this reads getLogPsi, so summing them
+   * per electron produces a number that is thrown away, once per component per electron.
+   *
+   * They are poisoned rather than left alone so that a caller reading them without that
+   * recomputation fails instead of proceeding on a stale value, the same way
+   * mw_calcRatioGradDevice poisons the ratios it does not form on the host.
+   */
+  const auto poison = std::numeric_limits<RealType>::quiet_NaN();
+  for (int iw = 0; iw < nw; iw++)
+  {
+    wf_list[iw].log_real_  = poison;
+    wf_list[iw].PhaseValue = poison;
   }
 }
 
