@@ -301,13 +301,7 @@ struct SoaDistanceTableAAOMPTarget : public DTD_BConds<T, D, SC>, public Distanc
 
     {
       ScopedTimer offload(offload_timer_);
-      /* nowait, which is what the contract above this function already claims: the
-       * synchronisation is ParticleSet's, at the taskwait ending
-       * mw_computeNewPosDistTables. Without it the depend clause has nothing to order,
-       * because a target region without nowait is synchronous whatever it depends on, and
-       * the two distance tables' moves run one after the other instead of together.
-       */
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(nw * num_teams) nowait \
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(nw * num_teams) \
                           depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
       for (int iw = 0; iw < nw; ++iw)
         for (int team_id = 0; team_id < num_teams; team_id++)
