@@ -258,6 +258,9 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
   }();
   std::vector<PsiValue> dev_ratios;
   std::vector<TrialWaveFunction::GradType> dev_grads;
+  /// host values for the device cross-check, kept apart from the ones the step uses
+  TWFGrads<CT> chk_grads(num_walkers);
+  std::vector<PsiValue> chk_ratios(num_walkers);
   size_t device_ratio_mismatches = 0;
   size_t device_grad_mismatches  = 0;
   for (size_t i = 0; i < accept_rands.size(); i++)
@@ -381,25 +384,36 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
         if constexpr (CT == CoordsType::POS)
           if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
           {
-            TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, dev_ratios, dev_grads,
-                                                      device_ratio_prod, device_grad_sum);
+            /* The host values have to be computed here rather than read from ratios and
+             * grads_new. On this path mw_calcRatioGradDevice poisons ratios, and a
+             * comparison against a NaN is false however wrong the device value is, so
+             * reading it makes the check pass without testing anything. grads_new is not
+             * written on this path at all, so reading it compares against another
+             * electron's gradient and fails however right the device value is.
+             */
+            twf_dispatcher.flex_calcRatioGrad(walker_twfs, walker_elecs, iat, chk_ratios, chk_grads);
             device_ratio_prod.updateFrom();
             device_grad_sum.updateFrom();
             for (int iw = 0; iw < num_walkers; iw++)
             {
-              const RealType mag  = std::abs(ratios[iw]);
-              const RealType diff = std::abs(device_ratio_prod[iw] - ratios[iw]);
+              const RealType mag  = std::abs(chk_ratios[iw]);
+              const RealType diff = std::abs(device_ratio_prod[iw] - chk_ratios[iw]);
               if (diff > RealType(1e-9) * std::max(mag, RealType(1)))
                 device_ratio_mismatches++;
               for (int id = 0; id < QMCTraits::DIM; id++)
               {
-                const RealType gmag  = std::abs(grads_new.grads_positions[iw][id]);
-                const RealType gdiff = std::abs(device_grad_sum[iw * QMCTraits::DIM + id] -
-                                                grads_new.grads_positions[iw][id]);
+                const RealType gmag = std::abs(chk_grads.grads_positions[iw][id]);
+                const RealType gdiff =
+                    std::abs(device_grad_sum[iw * QMCTraits::DIM + id] - chk_grads.grads_positions[iw][id]);
                 if (gdiff > RealType(1e-9) * std::max(gmag, RealType(1)))
                   device_grad_mismatches++;
               }
             }
+            /* The host form above left the components' state as it computes it, and the
+             * accept below reads the device form's. Running it again restores that.
+             */
+            TrialWaveFunction::mw_calcRatioGradDevice(walker_twfs, walker_elecs, iat, ratios, dev_grads,
+                                                      device_ratio_prod, device_grad_sum);
           }
 
         if (!device_decision_possible)
