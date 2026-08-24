@@ -67,6 +67,8 @@ public:
   using Grad          = typename WFT::Grad;
   using Hess          = typename WFT::Hess;
   using Real          = typename WFT::Real;
+  /// the real type the running log value is kept in, which is full precision whatever VT is
+  using LogAccumReal = typename WaveFunctionComponent::LogValue::value_type;
   using FullPrecGrad  = TinyVector<FullPrecValue, DIM>;
 
   // the understanding of dual memory space needs to follow UpdateEngine
@@ -178,6 +180,28 @@ public:
    * The update engine forms it there already; this stops before the copy down and adds
    * the widened result into the caller's running sum.
    */
+  /** accept from the device mask, leaving the ratios where the orbital set left them
+   *
+   * The host form needs every accepted ratio: for the reciprocal the rank one correction
+   * scales by, for the log value, and for the zero check. All three are done here on the
+   * device instead, so nothing brings the ratios down. The log is accumulated rather than
+   * applied, because applying it means reading it, and mw_evaluateGL folds it once per step.
+   */
+  void mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                                          const RefVectorWithLeader<ParticleSet>& p_list,
+                                          int iat,
+                                          const char* accept_mask,
+                                          const std::vector<bool>& isAccepted,
+                                          bool safe_to_delay) const override;
+
+  /** add what the device accumulated into the components' log values, and clear it
+   *
+   * Called by mw_evaluateGL before it re-sums them. add is false when the caller is about
+   * to recompute the log values from an inversion, which discards rather than uses the
+   * accumulator, and it still has to be cleared.
+   */
+  static void foldDeviceLogAccum(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list, bool add);
+
   void mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                          const RefVectorWithLeader<ParticleSet>& p_list,
                          int iat,
