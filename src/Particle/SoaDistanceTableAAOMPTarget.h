@@ -257,10 +257,20 @@ struct SoaDistanceTableAAOMPTarget : public DTD_BConds<T, D, SC>, public Distanc
   }
 
   /** evaluate the temporary pair relations when a move is proposed
-   * this implementation is asynchronous and the synchronization is managed at ParticleSet.
-   * Transferring results to host depends on DTModes::NEED_TEMP_DATA_ON_HOST.
-   * If the temporary pair distance are consumed on the device directly, the device to host data transfer can be
-   * skipped as an optimization.
+   *
+   * The copy back to the host is asynchronous and ParticleSet's taskwait joins it.
+   * Whether it happens at all depends on DTModes::NEED_TEMP_DATA_ON_HOST: a consumer that
+   * reads the distances on the device does not pay for it.
+   *
+   * The compute kernel below is synchronous, and deliberately. It carries a depend clause
+   * and no nowait, so the clause orders nothing. Adding nowait measures 2.13x slower over
+   * 4 crowds and costs nothing over 1, because what it spends is the concurrency between
+   * crowds: each one's kernels occupy their own stream and overlap, worth 1.91 in device
+   * kernel time over wall clock, while an asynchronous region goes through the hidden
+   * helper thread and they do not. Setting LIBOMP_USE_HIDDEN_HELPER_TASK to FALSE removes
+   * the penalty and leaves the asynchronous form no faster than this one, so there is
+   * nothing here to win. A transfer survives that path; a kernel issued once per electron
+   * per crowd does not.
    */
   void mw_move(const RefVectorWithLeader<DistanceTable>& dt_list,
                const RefVectorWithLeader<ParticleSet>& p_list,
