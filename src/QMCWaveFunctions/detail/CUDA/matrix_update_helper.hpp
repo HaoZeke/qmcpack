@@ -44,7 +44,8 @@ cudaError_t copyAinvRow_saveGL_batched(cudaStream_t hstream,
                                        const size_t phi_vgl_stride,
                                        T* const dphi_out[],
                                        T* const d2phi_out[],
-                                       const int batch_count);
+                                       const int batch_count,
+                                       const char* accept_mask = nullptr);
 
 /** calculate gradients
  */
