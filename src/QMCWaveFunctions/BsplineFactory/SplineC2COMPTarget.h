@@ -254,6 +254,20 @@ public:
    *  same sum in a target region so the values exist on the device. Only this entry point
    *  pays for it, so callers of the form above are unaffected.
    */
+  /** the per team partials the ratio and gradient are reduced from, left on the device
+   *
+   * Both public forms need exactly this and differ only in where they sum it: the host
+   * form brings the partials down, the device form sums them where they are. ratios and
+   * grads are read for their size only.
+   */
+  void evaluateDetRatioGradPartials(const RefVectorWithLeader<SPOSet>& spo_list,
+                                    const RefVectorWithLeader<ParticleSet>& P_list,
+                                    int iat,
+                                    const std::vector<const ValueType*>& invRow_ptr_list,
+                                    OffloadMWVGLArray& phi_vgl_v,
+                                    std::vector<ValueType>& ratios,
+                                    std::vector<GradType>& grads) const;
+
   void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSet>& spo_list,
                                             const RefVectorWithLeader<ParticleSet>& P_list,
                                             int iat,

@@ -256,6 +256,21 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
     return d && *d == '1';
 #endif
   }();
+  /* Whether the gradient, the drift and the proposal are formed on the device.
+   *
+   * Separate from the decision because the chain does not yet end there: the move needs a
+   * host position for the lattice validity test and for the distance tables' per walker
+   * temp arrays, so the drift is read back, and the fold kernels that formed it are paid
+   * for nothing. Measured at 134 us per electron against the host prologue on one device.
+   * It stays exercisable, and switching it on is what the move's own residency
+   * (qmcpack-vve0) has to be measured against.
+   */
+  const bool device_prologue = [device_decision_possible] {
+    if (!device_decision_possible)
+      return false;
+    const char* d = std::getenv("QMCPACK_DMC_DEVICE_DRIFT");
+    return d && *d == '1';
+  }();
   std::vector<PsiValue> dev_ratios;
   std::vector<TrialWaveFunction::GradType> dev_grads;
   size_t device_ratio_mismatches = 0;
@@ -323,7 +338,7 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
          * neither of which the host forms. The host form copies each result down between
          * the steps.
          */
-        if (device_decision_possible)
+        if (device_prologue)
         {
           constexpr int dim = QMCTraits::DIM;
           device_drifts.resize(num_walkers * dim);

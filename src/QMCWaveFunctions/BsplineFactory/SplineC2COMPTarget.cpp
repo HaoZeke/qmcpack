@@ -879,25 +879,26 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGradsDevice(
     OffloadValueVector& ratios_device,
     OffloadValueVector& grads_device) const
 {
-  mw_evaluateVGLandDetRatioGrads(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v, ratios, grads);
+  /* The per team partials stay where the kernel wrote them and are summed there, so the
+   * complete ratio and gradient exist on the device without num_pos by NumTeams by four
+   * values coming down for it. The arithmetic matches the host loop, including the
+   * division by the ratio for the gradients.
+   */
+  evaluateDetRatioGradPartials(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v, ratios, grads);
 
-  // the kernel above left per-team partials in rg_private; sum them here on the device so
-  // the complete values exist there, matching the host loop including the division by the
-  // ratio for the gradients
-  auto& phi_leader     = spo_list.getCastedLeader<SplineC2COMPTarget<ST>>();
-  auto& mw_mem         = phi_leader.mw_mem_handle_.getResource();
-  auto& rg_private     = mw_mem.rg_private;
-  const size_t nw      = ratios.size();
-  const int dim        = QMCTraits::DIM;
+  auto& phi_leader    = spo_list.getCastedLeader<SplineC2COMPTarget<ST>>();
+  auto& mw_mem        = phi_leader.mw_mem_handle_.getResource();
+  auto& rg_private    = mw_mem.rg_private;
+  const size_t nw     = ratios.size();
+  const int dim       = QMCTraits::DIM;
   ratios_device.resize(nw);
   grads_device.resize(nw * dim);
-  const int nteams     = static_cast<int>(rg_private.cols() / 4);
-  const size_t stride  = rg_private.cols();
-  auto* rg_ptr         = rg_private.data();
-  auto* rd_ptr         = ratios_device.data();
-  auto* gd_ptr         = grads_device.data();
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for \
-                  map(always, from: rd_ptr[0:nw], gd_ptr[0:nw * dim])")
+  const int nteams    = static_cast<int>(rg_private.cols() / 4);
+  const size_t stride = rg_private.cols();
+  const auto* rg_ptr  = rg_private.device_data();
+  auto* rd_ptr        = ratios_device.device_data();
+  auto* gd_ptr        = grads_device.device_data();
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(rg_ptr, rd_ptr, gd_ptr)")
   for (size_t iw = 0; iw < nw; iw++)
   {
     ValueType r(0);
@@ -912,10 +913,25 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGradsDevice(
       gd_ptr[iw * dim + idim] = g / r;
     }
   }
+
+  /* The determinant's accept still reads the ratio on the host, for its zero check, its
+   * log value and the rank one correction the update engine scales by it, so the summed
+   * values are asked for. That is nw and nw times DIM numbers rather than the partials
+   * they were reduced from, and it is the last thing standing between this path and a
+   * ratio the host never sees. qmcpack-ln8k.
+   */
+  ratios_device.updateFrom();
+  grads_device.updateFrom();
+  for (size_t iw = 0; iw < nw; iw++)
+  {
+    ratios[iw] = ratios_device[iw];
+    for (int idim = 0; idim < dim; idim++)
+      grads[iw][idim] = grads_device[iw * dim + idim];
+  }
 }
 
 template<typename ST>
-void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPOSet>& spo_list,
+void SplineC2COMPTarget<ST>::evaluateDetRatioGradPartials(const RefVectorWithLeader<SPOSet>& spo_list,
                                                             const RefVectorWithLeader<ParticleSet>& P_list,
                                                             int iat,
                                                             const std::vector<const ValueType*>& invRow_ptr_list,
@@ -987,7 +1003,8 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
   auto* prim_lattice_G_ptr       = prim_lattice_G_offload->data();
   auto* myKcart_ptr              = myKcart->data();
   auto* phi_vgl_ptr              = phi_vgl_v.data();
-  auto* rg_private_ptr           = rg_private.data();
+  // written only by the kernels below; a host reader asks for it with updateFrom
+  auto* rg_private_ptr           = rg_private.device_data();
   const size_t buffer_H2D_stride = buffer_H2D.cols();
   const size_t phi_vgl_stride    = num_pos * orb_size;
 
@@ -1018,8 +1035,8 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
       const auto* spline_ptr = &SplineInst->getBlock(0);
 
       PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) thread_limit(team_width) \
-                      map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
-                      map(always, from: rg_private_ptr[0:rg_private.size()])")
+                      is_device_ptr(rg_private_ptr) \
+                      map(always, to: buffer_H2D_ptr[:buffer_H2D.size()])")
       for (int iw = 0; iw < num_pos; iw++)
         for (int team_id = 0; team_id < NumTeams; team_id++)
         {
@@ -1121,6 +1138,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
 
     {
       PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(num_block_teams*num_pos) \
+                      is_device_ptr(rg_private_ptr) \
                       map(always, to: buffer_H2D_ptr[:buffer_H2D.size()])")
       for (int iw = 0; iw < num_pos; iw++)
         for (int t = 0; t < num_block_teams; t++)
@@ -1177,8 +1195,7 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
     }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) thread_limit(team_width) \
-                    map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
-                    map(always, from: rg_private_ptr[0:rg_private.size()])")
+                    map(always, to: buffer_H2D_ptr[:buffer_H2D.size()])")
     for (int iw = 0; iw < num_pos; iw++)
       for (int team_id = 0; team_id < NumTeams; team_id++)
       {
@@ -1235,8 +1252,31 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithL
         rg_private_ptr[(iw * NumTeams + team_id) * 4 + 2] = grad_y;
         rg_private_ptr[(iw * NumTeams + team_id) * 4 + 3] = grad_z;
       }
-  }
     }
+  }
+}
+
+template<typename ST>
+void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPOSet>& spo_list,
+                                                            const RefVectorWithLeader<ParticleSet>& P_list,
+                                                            int iat,
+                                                            const std::vector<const ValueType*>& invRow_ptr_list,
+                                                            OffloadMWVGLArray& phi_vgl_v,
+                                                            std::vector<ValueType>& ratios,
+                                                            std::vector<GradType>& grads) const
+{
+  evaluateDetRatioGradPartials(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v, ratios, grads);
+
+  auto& phi_leader     = spo_list.getCastedLeader<SplineC2COMPTarget<ST>>();
+  auto& rg_private     = phi_leader.mw_mem_handle_.getResource().rg_private;
+  const size_t num_pos = ratios.size();
+  const int NumTeams   = static_cast<int>(rg_private.cols() / 4);
+
+  /* The per team partials are summed here, on the host, so they come down: num_pos by
+   * NumTeams by four values every electron. The device form sums them where they are and
+   * asks for nothing of this size.
+   */
+  rg_private.updateFrom();
 
   for (int iw = 0; iw < num_pos; iw++)
   {

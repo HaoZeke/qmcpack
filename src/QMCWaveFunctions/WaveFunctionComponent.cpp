@@ -99,13 +99,21 @@ void WaveFunctionComponent::mw_evalGradDevice(const RefVectorWithLeader<WaveFunc
 
   /* The host values have to reach the sum the device side steps read, so they are staged
    * once and added there. A component that overrides this never forms them at all.
+   *
+   * The staging buffer is kept across calls. A pinned allocation carries a device
+   * allocation and a pointer association with it, and this runs once per electron per
+   * component, so allocating here would cost more than the transfer it stages. One per
+   * thread, which is one per crowd.
    */
   constexpr int dim = OHMMS_DIM;
-  Vector<ValueType, OffloadPinnedAllocator<ValueType>> staged(nw * dim);
+  static thread_local Vector<ValueType, OffloadPinnedAllocator<ValueType>> staged;
+  if (staged.size() < static_cast<size_t>(nw) * dim)
+    staged.resize(nw * dim);
   for (int iw = 0; iw < nw; iw++)
     for (int id = 0; id < dim; id++)
       staged[iw * dim + id] = static_cast<ValueType>(grad_now[iw][id]);
-  staged.updateTo();
+  // only the part in use goes up, since the buffer may be larger than this crowd needs
+  staged.updateTo(static_cast<size_t>(nw) * dim, 0);
 
   const auto* src_ptr = staged.device_data();
   auto* dst_ptr       = grads_device_now.device_data();
