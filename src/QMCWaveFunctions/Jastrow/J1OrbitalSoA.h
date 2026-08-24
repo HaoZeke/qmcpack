@@ -491,7 +491,8 @@ public:
                           std::vector<PsiValue>& ratios,
                           std::vector<GradType>& grad_new,
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
+                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                          bool assign) const override;
 
   /** send the crowd state up if a single walker path wrote it on the host */
   static void syncHostState(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list);
@@ -512,7 +513,8 @@ public:
                          const RefVectorWithLeader<ParticleSet>& p_list,
                          int iat,
                          std::vector<GradType>& grad_now,
-                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const override;
+                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                         bool assign) const override;
 
   /** recompute on the host, then send the state up
    *

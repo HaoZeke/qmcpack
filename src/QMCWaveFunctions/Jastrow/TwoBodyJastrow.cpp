@@ -611,12 +611,13 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
                                            std::vector<PsiValue>& ratios,
                                            std::vector<GradType>& grad_new,
                                            Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
+                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                                           bool assign) const
 {
   if (!use_offload_)
   {
     WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
-                                              grads_device_sum);
+                                              grads_device_sum, assign);
     return;
   }
 
@@ -645,9 +646,23 @@ void TwoBodyJastrow<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFuncti
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, vgl_ptr, rd_ptr, gs_ptr)")
   for (int iw = 0; iw < nw; iw++)
   {
-    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
-    for (int id = 0; id < nd; id++)
-      gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+    const auto factor = static_cast<PsiValue>(std::exp(uat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
+    if (assign)
+    {
+      /* Assigning owns the whole DIM range, not just the nd dimensions that carry a term:
+       * the rest would otherwise hold the previous electron's sum.
+       */
+      rd_ptr[iw] = factor;
+      for (int id = 0; id < dim; id++)
+        gs_ptr[iw * dim + id] =
+            id < nd ? static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]) : ValueType(0);
+    }
+    else
+    {
+      rd_ptr[iw] *= factor;
+      for (int id = 0; id < nd; id++)
+        gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+    }
   }
 }
 
@@ -724,11 +739,12 @@ void TwoBodyJastrow<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctio
                                            const RefVectorWithLeader<ParticleSet>& p_list,
                                            int iat,
                                            std::vector<GradType>& grad_now,
-                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+                                           Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                                           bool assign) const
 {
   if (!use_offload_)
   {
-    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now);
+    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now, assign);
     return;
   }
 
@@ -746,11 +762,27 @@ void TwoBodyJastrow<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctio
   const int nd        = static_cast<int>(wfc_leader.ndim);
   const size_t base   = static_cast<size_t>(nw) * npad;
 
+  /* Only the first nd dimensions carry a term. Adding leaves the rest alone, which is
+   * right while something else has zeroed them; assigning has to write them, so the loop
+   * covers the whole DIM range and the tail gets the zero the seed kernel used to write.
+   */
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(uat_ptr, dst_ptr)")
   for (int iw = 0; iw < nw; iw++)
-    for (int id = 0; id < nd; id++)
-      dst_ptr[iw * dim + id] +=
+    for (int id = 0; id < dim; id++)
+    {
+      if (id >= nd)
+      {
+        if (assign)
+          dst_ptr[iw * dim + id] = ValueType(0);
+        continue;
+      }
+      const auto term =
           static_cast<ValueType>(uat_ptr[base + iw * npad * dim + static_cast<size_t>(id) * npad + iat]);
+      if (assign)
+        dst_ptr[iw * dim + id] = term;
+      else
+        dst_ptr[iw * dim + id] += term;
+    }
 }
 
 template<typename FT>

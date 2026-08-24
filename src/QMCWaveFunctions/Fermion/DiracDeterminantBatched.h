@@ -170,7 +170,8 @@ public:
                           std::vector<PsiValue>& ratios,
                           std::vector<Grad>& grad_new,
                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const override;
+                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                          bool assign) const override;
 
   /** the gradient at the current position, left in device memory
    *
@@ -181,7 +182,8 @@ public:
                          const RefVectorWithLeader<ParticleSet>& p_list,
                          int iat,
                          std::vector<GradType>& grad_now,
-                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const override;
+                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                         bool assign) const override;
 
   void mw_ratioGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                             const RefVectorWithLeader<ParticleSet>& p_list,
