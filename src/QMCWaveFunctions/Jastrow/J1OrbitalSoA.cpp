@@ -98,8 +98,6 @@ struct J1OrbitalSoAMultiWalkerMem : public Resource
    * write the stored state where the kernels read it.
    */
   Vector<T, OffloadPinnedAllocator<T>> mw_allVat;
-  // the log value change the accept kernel forms, one per walker
-  Vector<T, OffloadPinnedAllocator<T>> mw_log_delta;
   // the stored gradient at one electron, gathered for a host reader, [nw][DIM]
   Vector<T, OffloadPinnedAllocator<T>> mw_grad_at;
   // the accepted walker list the accept kernel branches on, or the mask's own indices
@@ -294,9 +292,9 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
   /* The accept writes three numbers at the moved electron and moves the log value by the
    * difference between the stored value there and the proposed one. All four come from
    * mw_vgl, which the ratio kernel left on the device, and the state they land in is
-   * device resident too, so the whole thing is one kernel over the crowd and nw scalars
-   * come back. The host form is a per walker call that reads and writes the same state
-   * on the host, which is what makes the state's residency the thing that decides.
+   * device resident too, so the whole thing is one kernel over the crowd and nothing comes
+   * back. The host form is a per walker call that reads and writes the same state on the
+   * host, which is what makes the state's residency the thing that decides.
    */
   if constexpr (HasMwEvaluateVGL<FT>::value)
   {
@@ -304,9 +302,7 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
         wfc_leader.mw_mem_handle_.getResource().mw_vgl_on_device)
     {
       auto& mw_mem       = wfc_leader.mw_mem_handle_.getResource();
-      auto& mw_log_delta = mw_mem.mw_log_delta;
       auto& mw_accepted  = mw_mem.mw_accepted;
-      mw_log_delta.resize(nw);
       mw_accepted.resize(nw);
       for (int iw = 0; iw < nw; iw++)
         mw_accepted[iw] = isAccepted[iw] ? 1 : 0;
@@ -318,34 +314,31 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
       const auto* vgl_ptr = mw_mem.mw_vgl.device_data();
       auto* vat_ptr       = mw_mem.mw_allVat.device_data();
       const auto* acc_ptr = mw_accepted.device_data();
-      auto* delta_ptr     = mw_log_delta.device_data();
       const size_t nwz    = nw;
 
       PRAGMA_OFFLOAD("omp target teams distribute parallel for \
-                      is_device_ptr(vgl_ptr, vat_ptr, acc_ptr, delta_ptr)")
+                      is_device_ptr(vgl_ptr, vat_ptr, acc_ptr)")
       for (size_t iw = 0; iw < nwz; iw++)
       {
         if (!acc_ptr[iw])
-        {
-          delta_ptr[iw] = valT(0);
           continue;
-        }
         valT* Vat  = vat_ptr + iw * npad;
         valT* Grad = vat_ptr + nwz * npad + iw * npad * dim;
         valT* Lap  = vat_ptr + nwz * npad * (dim + 1) + iw * npad;
 
         const valT* vgl = vgl_ptr + iw * vstr;
-        delta_ptr[iw]   = Vat[iat] - vgl[0];
         Vat[iat]        = vgl[0];
         for (int id = 0; id < dim; id++)
           Grad[iat * dim + id] = vgl[id + 1];
         // the kernel stores the negated laplacian, as the host form's curLap does
         Lap[iat] = -vgl[dim + 1];
       }
-      mw_log_delta.updateFrom();
-
-      for (int iw = 0; iw < nw; iw++)
-        wfc_list.getCastedElement<J1OrbitalSoA<FT>>(iw).log_value_ += mw_log_delta[iw];
+      /* log_value_ is not moved here. mw_evaluateGL recomputes it from the stored state
+       * once per step, before anything reads it: the batched drivers take getLogPsi only
+       * after that call, and TrialWaveFunction rebuilds its own running total there from
+       * every component. Tracking it per electron would mean a copy down of nw numbers,
+       * and a device synchronisation with it, for a value nothing reads at that point.
+       */
       return;
     }
   }

@@ -39,7 +39,6 @@ struct TwoBodyJastrowMultiWalkerMem : public Resource
   /// memory pool for Uat, dUat, d2Uat [Nw][N_padded] + [Nw][DIM][N_padded] + [Nw][N_padded]
   Vector<T, OffloadPinnedAllocator<T>> mw_allUat;
   /// per-walker change in the log value from an accept, so the state itself can stay on device
-  Vector<T, OffloadPinnedAllocator<T>> mw_log_delta;
   // the stored gradient at one electron, gathered for a host reader, [nw][DIM]
   Vector<T, OffloadPinnedAllocator<T>> mw_grad_at;
   /// memory pool for cur_u, cur_du, cur_d2u [3][Nw][N_padded]. 3 is for value, first and second derivatives.
@@ -831,18 +830,20 @@ void TwoBodyJastrow<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFunc
   auto& mw_allUat   = wfc_leader.mw_mem_handle_.getResource().mw_allUat;
   auto& mw_cur_allu = wfc_leader.mw_mem_handle_.getResource().mw_cur_allu;
 
-  auto& mw_log_delta = wfc_leader.mw_mem_handle_.getResource().mw_log_delta;
-  mw_log_delta.resize(nw);
-
-  /* The state stays on the device; what comes back is nw numbers. A host reader of Uat, dUat or
-   * d2Uat asks for them, which is what the fetches in the ratio paths below are for.
+  /* The state stays on the device and nothing comes back. A host reader of Uat, dUat or
+   * d2Uat asks for them, which is what the fetches in the ratio paths and in
+   * mw_evaluateGL and mw_evaluateRatios are for.
    */
   FT::mw_updateVGL(iat, isAccepted, NumGroups, F.data() + p_leader.GroupID[iat] * NumGroups, wfc_leader.N,
                    grp_ids.data(), nw, mw_vgl.device_data(), N_padded, dt_leader.getMultiWalkerTempDataPtr(),
-                   mw_allUat.device_data(), mw_cur_allu.data(), mw_log_delta.data(),
+                   mw_allUat.device_data(), mw_cur_allu.data(),
                    wfc_leader.mw_mem_handle_.getResource().mw_update_buffer);
-  for (int iw = 0; iw < nw; iw++)
-    wfc_list.getCastedElement<TwoBodyJastrow<FT>>(iw).log_value_ += mw_log_delta[iw];
+  /* log_value_ is not moved here. mw_evaluateGL recomputes it from the stored state once
+   * per step, before anything reads it: the batched drivers take getLogPsi only after that
+   * call, and TrialWaveFunction rebuilds its own running total there from every component.
+   * Tracking it per electron would mean a copy down of nw numbers, and a device
+   * synchronisation with it, for a value nothing reads at that point.
+   */
 }
 
 template<typename FT>
