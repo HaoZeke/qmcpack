@@ -878,7 +878,8 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGradsDevice(
     std::vector<GradType>& grads,
     OffloadValueVector& ratios_device,
     OffloadValueVector& grads_device,
-    bool want_host_grads) const
+    bool want_host_grads,
+    bool want_host_ratios) const
 {
   /* The per team partials stay where the kernel wrote them and are summed there, so the
    * complete ratio and gradient exist on the device without num_pos by NumTeams by four
@@ -915,15 +916,17 @@ void SplineC2COMPTarget<ST>::mw_evaluateVGLandDetRatioGradsDevice(
     }
   }
 
-  /* The determinant's accept still reads the ratio on the host, for its zero check, its
-   * log value and the rank one correction the update engine scales by it, so the summed
-   * ratios are asked for. That is nw numbers rather than the partials they were reduced
-   * from, and it is the last thing standing between this path and a ratio the host never
-   * sees. qmcpack-ln8k.
+  /* Both of these are blocking transfers, so neither happens unless something reads what
+   * it brings. A determinant accepting from the device mask forms the reciprocal, the log
+   * and the zero check on the device, so it asks for neither and the ratio never reaches
+   * the host at all.
    */
-  ratios_device.updateFrom();
-  for (size_t iw = 0; iw < nw; iw++)
-    ratios[iw] = ratios_device[iw];
+  if (want_host_ratios)
+  {
+    ratios_device.updateFrom();
+    for (size_t iw = 0; iw < nw; iw++)
+      ratios[iw] = ratios_device[iw];
+  }
 
   /* The gradients are a separate question and the answer is different: a caller summing on
    * the device reads grads_device, not grads, so fetching it is a blocking transfer per

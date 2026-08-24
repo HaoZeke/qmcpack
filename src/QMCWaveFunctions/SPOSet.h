@@ -384,10 +384,9 @@ public:
    *  small transfer; an implementation whose kernel already holds the values overrides this.
    *  Callers that do not need the device copies keep using the form above and pay nothing.
    *
-   *  want_host_grads says whether grads is read. A caller whose gradient is summed on the
-   *  device does not read it, and bringing it down is a blocking transfer per electron for
-   *  a value nothing looks at. ratios has no such flag: the determinant needs its own ratio
-   *  on the host whatever the caller does with the sum.
+   *  want_host_grads and want_host_ratios say whether grads and ratios are read. A caller
+   *  that sums on the device and accepts from a device mask reads neither, and bringing
+   *  either down is a blocking transfer per electron for values nothing looks at.
    */
   virtual void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSetT>& spo_list,
                                                     const RefVectorWithLeader<ParticleSet>& P_list,
@@ -398,7 +397,8 @@ public:
                                                     std::vector<GradType>& grads,
                                                     OffloadValueVector& ratios_device,
                                                     OffloadValueVector& grads_device,
-                                                    bool want_host_grads) const;
+                                                    bool want_host_grads,
+                                                    bool want_host_ratios) const;
 
   /** evaluate the values, gradients and laplacians of this single-particle orbital sets and determinant ratio
    *  and grads of multiple walkers. Device data of phi_vgl_v must be up-to-date upon return.

@@ -213,9 +213,10 @@ void SPOSetT<T>::mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<
                                                       std::vector<GradType>& grads,
                                                       OffloadValueVector& ratios_device,
                                                       OffloadValueVector& grads_device,
-                                                      bool want_host_grads) const
+                                                      bool want_host_grads,
+                                                      bool want_host_ratios) const
 {
-  // this form computes on the host, so grads exists whether or not it is wanted
+  // this form computes on the host, so both exist whether or not they are wanted
   mw_evaluateVGLandDetRatioGrads(spo_list, P_list, iat, invRow_ptr_list, phi_vgl_v, ratios, grads);
 
   const size_t nw = ratios.size();

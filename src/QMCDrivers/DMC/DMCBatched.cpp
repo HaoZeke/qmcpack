@@ -396,8 +396,13 @@ void DMCBatched::advanceWalkers(const StateForThread& sft,
          * something to average away. Spinor coordinates carry a second gradient the
          * device form does not produce, so they are left out.
          */
+        /* Only where the device form is the one in use. It leaves the ratios on the device,
+         * so running it on the host driven path would poison curRatio for an accept that
+         * reads it.
+         */
         if constexpr (CT == CoordsType::POS)
-          if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO"); d && *d == '1')
+          if (const char* d = std::getenv("QMCPACK_CHECK_DEVICE_RATIO");
+              device_decision_possible && d && *d == '1')
           {
             /* The host values have to be computed here rather than read from ratios and
              * grads_new. On this path mw_calcRatioGradDevice poisons ratios, and a

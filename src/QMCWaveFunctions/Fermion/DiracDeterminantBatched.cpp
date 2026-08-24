@@ -475,7 +475,7 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
      */
     wfc_leader.phi_.mw_evaluateVGLandDetRatioGradsDevice(phi_list, p_list, iat, psiMinv_row_dev_ptr_list, phi_vgl_v,
                                                          ratios_local, grad_new_local, mw_res.ratios_device_local,
-                                                         mw_res.grads_device_local, false);
+                                                         mw_res.grads_device_local, false, false);
   }
 
   wfc_leader.UpdateMode = ORB_PBYP_PARTIAL;
@@ -483,8 +483,12 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
   {
     auto& det      = wfc_list.getCastedElement<DiracDeterminantBatched<PL, VT, FPVT>>(iw);
     det.UpdateMode = ORB_PBYP_PARTIAL;
-    ratios[iw] = det.curRatio = ratios_local[iw];
-    // grad_new is not summed: grad_new_local holds no host gradient in this form
+    /* Poisoned rather than left holding the last move's value: the ratio is not brought
+     * down in this form, and a reader of curRatio here is reading something this path never
+     * formed. The accept from the device mask does not read it.
+     */
+    ratios[iw] = det.curRatio = PsiValue(std::numeric_limits<RealType>::quiet_NaN());
+    // grad_new is not summed either: grad_new_local holds no host gradient in this form
   }
 
   // the orbital set writes its own value type, which need not be the type the product
