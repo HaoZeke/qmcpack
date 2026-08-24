@@ -387,17 +387,23 @@ public:
    *  the host, which means the values it was made from came back from the device. This form takes
    *  the decision where it was computed instead.
    *
-   *  The base implementation brings the mask over and calls the host form, so every component is
-   *  correct as soon as a caller uses this, and a component that can drive its accept from the
-   *  mask directly overrides it. That keeps the two paths from diverging while the overrides are
-   *  written one at a time.
+   *  The base implementation calls the host form, so every component is correct as soon as a
+   *  caller uses this, and a component that can drive its accept from the mask directly
+   *  overrides it and ignores the host copy. That keeps the two paths from diverging while the
+   *  overrides are written one at a time.
+   *
+   *  Both forms of the same decision are passed because the caller has already paid for the
+   *  host one. A component fetching it for itself costs a blocking transfer per component per
+   *  electron, and every component needs it until every component overrides this.
    *
    *  @param accept_mask device address of nw bytes, non-zero where the walker accepted
+   *  @param isAccepted  the same decision on the host, fetched once by the caller
    */
   virtual void mw_accept_rejectMoveFromDeviceMask(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
                                                  const RefVectorWithLeader<ParticleSet>& p_list,
                                                  int iat,
                                                  const char* accept_mask,
+                                                 const std::vector<bool>& isAccepted,
                                                  bool safe_to_delay = false) const;
 
   /** complete all the delayed or asynchronous operations before leaving the p-by-p move region.

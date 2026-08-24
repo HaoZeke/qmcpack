@@ -198,22 +198,13 @@ void WaveFunctionComponent::mw_accept_rejectMoveFromDeviceMask(
     const RefVectorWithLeader<ParticleSet>& p_list,
     int iat,
     const char* accept_mask,
+    const std::vector<bool>& isAccepted,
     bool safe_to_delay) const
 {
-  // A component without its own device path still has to accept, so the mask comes over and the
-  // host form runs. One transfer of nw bytes, against the values the host form would otherwise
-  // have needed to make the decision from.
-  const int nw = wfc_list.size();
-  // a local buffer of nw bytes rather than a member: this type is mapped to the device in places,
-  // so its layout is not somewhere to put a container
-  std::vector<char> host_mask(nw);
-  // a device address rather than a mapped buffer, so this is a copy between devices rather than
-  // an update of a buffer's own device copy
-  omp_target_memcpy(host_mask.data(), const_cast<char*>(accept_mask), nw, 0, 0, omp_get_initial_device(),
-                    omp_get_default_device());
-  std::vector<bool> isAccepted(nw);
-  for (int iw = 0; iw < nw; iw++)
-    isAccepted[iw] = host_mask[iw] != 0;
+  /* A component without its own device path still has to accept, and the decision it needs is
+   * already on the host: the caller fetched it once for all of them. Fetching it here instead
+   * is a blocking transfer per component per electron for the same nw bytes.
+   */
   mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
 }
 
