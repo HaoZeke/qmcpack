@@ -142,10 +142,23 @@ void MultiBsplineOffloadMapperPeer<T>::updateToDevice()
   for (int ib = 0; ib < Base::host_bsplines_.getNumBlocks(); ib++)
     if (comm_.rank() == ib % nranks)
     {
-      auto* spline_m = &Base::host_bsplines_.getBlock(ib);
-      auto* coefs    = Base::block_coefs_[ib];
-      cudaErrorCheck(cudaMemcpy(device_ptrs_[ib], coefs, spline_m->coefs_size * sizeof(T), cudaMemcpyHostToDevice),
-                     "cudaMemcpy failed in MultiBsplineOffloadMapperPeer!");
+      auto* spline_m         = &Base::host_bsplines_.getBlock(ib);
+      auto* coefs            = Base::block_coefs_[ib];
+      const size_t coefs_len = spline_m->coefs_size;
+
+      /* A block with nothing IPC-owned behind it is one this rank mapped through the
+       * offload runtime, because a single rank has no peer to share with. Its device
+       * memory belongs to that runtime, so the runtime updates it; a raw copy would be
+       * aimed at the null pointer mapToDevice left here to say so.
+       */
+      if (device_ptrs_[ib] == nullptr)
+      {
+        const T* coefs_local = coefs;
+        PRAGMA_OFFLOAD("omp target update to(coefs_local[:coefs_len])")
+      }
+      else
+        cudaErrorCheck(cudaMemcpy(device_ptrs_[ib], coefs, coefs_len * sizeof(T), cudaMemcpyHostToDevice),
+                       "cudaMemcpy failed in MultiBsplineOffloadMapperPeer!");
     }
   comm_.barrier();
 }
