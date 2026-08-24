@@ -458,7 +458,12 @@ public:
     if (temp_data_on_device_)
     {
       ScopedTimer offload(offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2)                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
+      /* nowait for the same reason as the AA table's move: the join is ParticleSet's
+       * taskwait. Here it also lets the per walker host loop below, which computes the
+       * host distances itself and reads nothing the kernel writes, run while the kernel
+       * does. move_input is not touched again until that taskwait has passed.
+       */
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) nowait                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
       for (int iw = 0; iw < nw_local; ++iw)
         for (int jat = 0; jat < num_sources_local; ++jat)
         {
