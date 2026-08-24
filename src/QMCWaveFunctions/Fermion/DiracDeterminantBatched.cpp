@@ -230,7 +230,8 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evalGradDevice(
     const RefVectorWithLeader<ParticleSet>& p_list,
     int iat,
     std::vector<GradType>& grad_now,
-    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+    bool assign) const
 {
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
@@ -260,7 +261,10 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evalGradDevice(
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
   for (int iw = 0; iw < nw; iw++)
     for (int id = 0; id < dim; id++)
-      dst_ptr[iw * dim + id] += static_cast<ValueType>(src_ptr[iw * dim + id]);
+      if (assign)
+        dst_ptr[iw * dim + id] = static_cast<ValueType>(src_ptr[iw * dim + id]);
+      else
+        dst_ptr[iw * dim + id] += static_cast<ValueType>(src_ptr[iw * dim + id]);
 }
 
 template<PlatformKind PL, typename VT, typename FPVT>
@@ -414,7 +418,8 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
     std::vector<PsiValue>& ratios,
     std::vector<Grad>& grad_new,
     Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
+    Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+    bool assign) const
 {
   assert(this == &wfc_list.getLeader());
   auto& wfc_leader     = wfc_list.getCastedLeader<DiracDeterminantBatched<PL, VT, FPVT>>();
@@ -469,9 +474,18 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_ratioGradDevice(
                   is_device_ptr(src_ptr, sgrad_ptr, dst_ptr, gsum_ptr)")
   for (int iw = 0; iw < nw; iw++)
   {
-    dst_ptr[iw] *= static_cast<PsiValue>(src_ptr[iw]);
-    for (int id = 0; id < dim; id++)
-      gsum_ptr[iw * dim + id] += static_cast<ValueType>(sgrad_ptr[iw * dim + id]);
+    if (assign)
+    {
+      dst_ptr[iw] = static_cast<PsiValue>(src_ptr[iw]);
+      for (int id = 0; id < dim; id++)
+        gsum_ptr[iw * dim + id] = static_cast<ValueType>(sgrad_ptr[iw * dim + id]);
+    }
+    else
+    {
+      dst_ptr[iw] *= static_cast<PsiValue>(src_ptr[iw]);
+      for (int id = 0; id < dim; id++)
+        gsum_ptr[iw * dim + id] += static_cast<ValueType>(sgrad_ptr[iw * dim + id]);
+    }
   }
 }
 

@@ -92,7 +92,8 @@ void WaveFunctionComponent::mw_evalGradDevice(const RefVectorWithLeader<WaveFunc
                                               const RefVectorWithLeader<ParticleSet>& p_list,
                                               int iat,
                                               std::vector<GradType>& grad_now,
-                                              Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+                                              Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                                              bool assign) const
 {
   const int nw = wfc_list.size();
   mw_evalGrad(wfc_list, p_list, iat, grad_now);
@@ -120,7 +121,10 @@ void WaveFunctionComponent::mw_evalGradDevice(const RefVectorWithLeader<WaveFunc
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
   for (int iw = 0; iw < nw; iw++)
     for (int id = 0; id < dim; id++)
-      dst_ptr[iw * dim + id] += src_ptr[iw * dim + id];
+      if (assign)
+        dst_ptr[iw * dim + id] = src_ptr[iw * dim + id];
+      else
+        dst_ptr[iw * dim + id] += src_ptr[iw * dim + id];
 }
 
 void WaveFunctionComponent::mw_evalGradWithSpin(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
@@ -219,7 +223,8 @@ void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFun
                                                std::vector<PsiValue>& ratios,
                                                std::vector<GradType>& grad_new,
                                                Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                                               Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
+                                               Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                                               bool assign) const
 {
   // the component's own contribution, before the caller's running values are touched
   const int nw = wfc_list.size();
@@ -247,9 +252,18 @@ void WaveFunctionComponent::mw_ratioGradDevice(const RefVectorWithLeader<WaveFun
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(z_ptr, g_ptr, prod_ptr, gsum_ptr)")
   for (int iw = 0; iw < nw; iw++)
   {
-    prod_ptr[iw] *= z_ptr[iw];
-    for (int id = 0; id < dim; id++)
-      gsum_ptr[iw * dim + id] += g_ptr[iw * dim + id];
+    if (assign)
+    {
+      prod_ptr[iw] = z_ptr[iw];
+      for (int id = 0; id < dim; id++)
+        gsum_ptr[iw * dim + id] = g_ptr[iw * dim + id];
+    }
+    else
+    {
+      prod_ptr[iw] *= z_ptr[iw];
+      for (int id = 0; id < dim; id++)
+        gsum_ptr[iw * dim + id] += g_ptr[iw * dim + id];
+    }
   }
 
   // the caller's host gradient accumulates the same way the non device form does

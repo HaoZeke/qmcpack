@@ -315,12 +315,17 @@ public:
    *
    * @param ratios_device_prod one running product per walker, in device memory
    *
-   * The caller seeds the accumulator with one and hands it to each component in turn, so
-   * the product the acceptance test needs is built where the values already are. Folding
-   * the multiply into the component's own kernel is what keeps this free: a component
-   * that assigned instead would cost the caller a kernel per component per move.
+   * The caller hands the accumulator to each component in turn, so the product the
+   * acceptance test needs is built where the values already are. Folding the multiply into
+   * the component's own kernel is what keeps this free: a component that needed a kernel
+   * of its own would cost the caller one per component per move.
    *
-   * grads_device_sum is the matching running sum, flat as [nw][DIM], seeded with zero.
+   * grads_device_sum is the matching running sum, flat as [nw][DIM].
+   *
+   * assign says this component is the first over both, so it writes them rather than
+   * folding into them and neither needs a seeding pass. A component asked to assign owns
+   * every element it does not write a term into: whatever it leaves untouched holds the
+   * previous electron's values.
    *
    * The default form computes on the host and folds both results in, so a component with
    * no device path stays correct and merely costs one small transfer.
@@ -331,14 +336,20 @@ public:
                                   std::vector<PsiValue>& ratios,
                                   std::vector<GradType>& grad_new,
                                   Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                                  Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const;
+                                  Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                                  bool assign) const;
 
   /** the component's gradient term at the current position, summed in device memory
    *
-   * grads_device_now is the running sum over components, flat as [nw][DIM], seeded with
-   * zero by the caller. A component whose gradient is already device resident adds to it
-   * without the value passing through the host, which is what lets the drift and the
-   * proposed position be formed there too.
+   * grads_device_now is the running sum over components, flat as [nw][DIM]. A component
+   * whose gradient is already device resident adds to it without the value passing through
+   * the host, which is what lets the drift and the proposed position be formed there too.
+   *
+   * assign says this component is the first over the buffer, so it writes its term rather
+   * than adding to it and the buffer needs no separate zeroing. A component asked to
+   * assign owns every element it does not write a term into: whatever it leaves untouched
+   * holds the previous electron's sum. The zeroing kernel this replaces cost a launch and
+   * a synchronisation per electron, which on this device is more than the sum itself.
    *
    * The default form computes on the host and sends the result up, so a component with no
    * device path stays correct at the cost of one small transfer.
@@ -347,7 +358,8 @@ public:
                                  const RefVectorWithLeader<ParticleSet>& p_list,
                                  int iat,
                                  std::vector<GradType>& grad_now,
-                                 Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const;
+                                 Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                                 bool assign) const;
 
   /** a move for iat-th particle is accepted. Update the current content.
    * @param P target ParticleSet

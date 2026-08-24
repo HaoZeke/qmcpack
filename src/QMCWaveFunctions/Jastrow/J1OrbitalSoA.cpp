@@ -482,13 +482,14 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
                                           std::vector<PsiValue>& ratios,
                                           std::vector<GradType>& grad_new,
                                           Vector<PsiValue, OffloadPinnedAllocator<PsiValue>>& ratios_device_prod,
-                                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum) const
+                                          Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_sum,
+                                          bool assign) const
 {
   syncHostState(wfc_list);
   if constexpr (!HasMwEvaluateVGL<FT>::value)
   {
     WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
-                                              grads_device_sum);
+                                              grads_device_sum, assign);
     return;
   }
   else
@@ -507,7 +508,7 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
       !deviceTempDistancesReady(p_list.getLeader(), wfc_leader.myTableID))
   {
     WaveFunctionComponent::mw_ratioGradDevice(wfc_list, p_list, iat, ratios, grad_new, ratios_device_prod,
-                                              grads_device_sum);
+                                              grads_device_sum, assign);
     return;
   }
 
@@ -545,9 +546,19 @@ void J1OrbitalSoA<FT>::mw_ratioGradDevice(const RefVectorWithLeader<WaveFunction
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vgl_ptr, vat_ptr, rd_ptr, gs_ptr)")
   for (size_t iw = 0; iw < nwz; iw++)
   {
-    rd_ptr[iw] *= static_cast<PsiValue>(std::exp(vat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
-    for (int id = 0; id < dim; id++)
-      gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+    const auto factor = static_cast<PsiValue>(std::exp(vat_ptr[iw * npad + iat] - vgl_ptr[iw * vstr]));
+    if (assign)
+    {
+      rd_ptr[iw] = factor;
+      for (int id = 0; id < dim; id++)
+        gs_ptr[iw * dim + id] = static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+    }
+    else
+    {
+      rd_ptr[iw] *= factor;
+      for (int id = 0; id < dim; id++)
+        gs_ptr[iw * dim + id] += static_cast<ValueType>(vgl_ptr[iw * vstr + id + 1]);
+    }
   }
   }
 }
@@ -642,12 +653,13 @@ void J1OrbitalSoA<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionC
                                          const RefVectorWithLeader<ParticleSet>& p_list,
                                          int iat,
                                          std::vector<GradType>& grad_now,
-                                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now) const
+                                         Vector<ValueType, OffloadPinnedAllocator<ValueType>>& grads_device_now,
+                                         bool assign) const
 {
   syncHostState(wfc_list);
   if (!use_offload_)
   {
-    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now);
+    WaveFunctionComponent::mw_evalGradDevice(wfc_list, p_list, iat, grad_now, grads_device_now, assign);
     return;
   }
 
@@ -663,8 +675,14 @@ void J1OrbitalSoA<FT>::mw_evalGradDevice(const RefVectorWithLeader<WaveFunctionC
   PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(vat_ptr, dst_ptr)")
   for (size_t iw = 0; iw < nwz; iw++)
     for (int id = 0; id < dim; id++)
-      dst_ptr[iw * dim + id] +=
+    {
+      const auto term =
           static_cast<ValueType>(vat_ptr[nwz * npad + iw * npad * dim + static_cast<size_t>(iat) * dim + id]);
+      if (assign)
+        dst_ptr[iw * dim + id] = term;
+      else
+        dst_ptr[iw * dim + id] += term;
+    }
 }
 
 template<typename FT>
