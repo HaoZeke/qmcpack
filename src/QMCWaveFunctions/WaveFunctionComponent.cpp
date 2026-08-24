@@ -99,26 +99,28 @@ void WaveFunctionComponent::mw_evalGradDevice(const RefVectorWithLeader<WaveFunc
   mw_evalGrad(wfc_list, p_list, iat, grad_now);
 
   /* The host values have to reach the sum the device side steps read, so they are staged
-   * once and added there. A component that overrides this never forms them at all.
+   * and added there. A component that overrides this never forms them at all.
    *
-   * The staging buffer is kept across calls. A pinned allocation carries a device
-   * allocation and a pointer association with it, and this runs once per electron per
-   * component, so allocating here would cost more than the transfer it stages. One per
-   * thread, which is one per crowd.
+   * The buffer is a plain host vector carrying no device allocation of its own, and the
+   * pragma maps it for the duration of the region. A container that owns a device
+   * allocation must not be reachable from thread_local storage: its destructor runs from a
+   * TLS destructor at exit, by which point the offload runtime is finalised, and unmapping
+   * then dereferences freed state. The buffer is still kept across calls, because this runs
+   * once per electron per component.
    */
   constexpr int dim = OHMMS_DIM;
-  static thread_local Vector<ValueType, OffloadPinnedAllocator<ValueType>> staged;
-  if (staged.size() < static_cast<size_t>(nw) * dim)
-    staged.resize(nw * dim);
+  static thread_local std::vector<ValueType> staged;
+  const size_t n_used = static_cast<size_t>(nw) * dim;
+  if (staged.size() < n_used)
+    staged.resize(n_used);
   for (int iw = 0; iw < nw; iw++)
     for (int id = 0; id < dim; id++)
       staged[iw * dim + id] = static_cast<ValueType>(grad_now[iw][id]);
-  // only the part in use goes up, since the buffer may be larger than this crowd needs
-  staged.updateTo(static_cast<size_t>(nw) * dim, 0);
 
-  const auto* src_ptr = staged.device_data();
+  const auto* src_ptr = staged.data();
   auto* dst_ptr       = grads_device_now.device_data();
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(src_ptr, dst_ptr)")
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for is_device_ptr(dst_ptr) \
+                  map(always, to: src_ptr[0:n_used])")
   for (int iw = 0; iw < nw; iw++)
     for (int id = 0; id < dim; id++)
       if (assign)
