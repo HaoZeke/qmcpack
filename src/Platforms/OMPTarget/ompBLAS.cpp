@@ -12,6 +12,7 @@
 
 #include "ompBLAS.hpp"
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include "config.h"
 #if !defined(OPENMP_NO_COMPLEX)
@@ -490,6 +491,25 @@ ompBLAS_status gemv<std::complex<double>>(ompBLAS_handle& handle,
 #endif
 
 
+/** the team width a reduction of this extent wants
+ *
+ *  A team reduces over `extent` elements, and left to itself the compiler picks a team far
+ *  wider than that: the lanes past the work still enter the reduction tree and still cost
+ *  their barriers. The batched gemv over 54 orbitals and 64 walkers measured 51 us of
+ *  kernel time this way, a third of all device time in a DMC step, for 186 thousand
+ *  multiply-adds.
+ */
+inline int reductionTeamWidth(const int extent)
+{
+  int width = 32;
+  while (width < extent && width < 1024)
+    width *= 2;
+  if (const char* c = std::getenv("QMCPACK_OMPBLAS_TEAM_WIDTH"))
+    if (const int v = std::atoi(c); v > 0)
+      width = v;
+  return width;
+}
+
 template<typename T>
 ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
                                  const char trans,
@@ -513,7 +533,9 @@ ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
     if (incx != 1)
       throw std::runtime_error("incx!=1 are not implemented in ompBLAS::gemv_batched_impl trans='T'!");
 
+    const int team_width = reductionTeamWidth(m);
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * n) \
+                               thread_limit(team_width) \
                                is_device_ptr(A, x, y, alpha, beta)")
     for (uint32_t ib = 0; ib < batch_count; ib++)
       for (uint32_t i = 0; i < n; i++)
@@ -534,7 +556,9 @@ ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
     if (incx != 1)
       throw std::runtime_error("incx!=1 are not implemented in ompBLAS::gemv_batched_impl trans='N'!");
 
+    const int team_width = reductionTeamWidth(n);
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * n) \
+                               thread_limit(team_width) \
                                is_device_ptr(A, x, y, alpha, beta)")
     for (uint32_t ib = 0; ib < batch_count; ib++)
       for (uint32_t i = 0; i < m; i++)
