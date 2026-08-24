@@ -458,6 +458,12 @@ public:
     if (temp_data_on_device_)
     {
       ScopedTimer offload(offload_timer_);
+      /* Synchronous, as the AA table's move is and for the measured reason given there:
+       * nowait costs 2.13x over 4 crowds by routing their kernels through the hidden
+       * helper thread instead of leaving them on separate streams, and gains nothing once
+       * that thread is disabled. The depend clause orders nothing without nowait and is
+       * kept to describe the dependency.
+       */
       PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2)                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
       for (int iw = 0; iw < nw_local; ++iw)
         for (int jat = 0; jat < num_sources_local; ++jat)
