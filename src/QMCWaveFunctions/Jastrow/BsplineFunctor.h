@@ -406,6 +406,7 @@ struct BsplineFunctor : public OptimizableFunctorBase
                            const REAL* mw_dist, // [nw][DIM+1][n_padded]
                            REAL* mw_allUat,     // [nw][DIM+2][n_padded]
                            REAL* mw_cur_allu,   // [nw][3][n_padded]
+                           REAL* mw_log_delta,  // [nw], the caller's log value change
                            Vector<char, OffloadPinnedAllocator<char>>& transfer_buffer,
                             const char* accept_mask = nullptr);
 
