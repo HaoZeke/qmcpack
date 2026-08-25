@@ -38,29 +38,40 @@ void copyAinvRow_saveGL_batched(Queue<PlatformKind::OMPTARGET>& queue,
                                 const int batch_count,
                                 const char* accept_mask = nullptr)
 {
-  PRAGMA_OFFLOAD("omp target teams distribute \
+  /* One combined construct rather than teams distribute wrapped around a separate parallel
+   * for. The split form leaves a sequential region between them, and a target region shaped
+   * that way compiles to generic mode: one thread runs the sequential part behind a state
+   * machine while the rest of the block waits, which is what the runtime reports for this
+   * kernel and what holds it to a handful of active warps per SM.
+   *
+   * The scalar update the sequential region carried is done by one iteration of the
+   * collapsed loop. It is safe there because no iteration reads temp: the loop reads Ainv
+   * and phi_vgl_in and writes rcopy, dphi_out and d2phi_out.
+   */
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
                   is_device_ptr(Ainv, temp, rcopy, phi_vgl_in, dphi_out, d2phi_out, accept_mask)")
   for (size_t iw = 0; iw < batch_count; iw++)
-  {
-    /* With a mask the caller runs over every walker rather than packing the accepted ones
-     * first, which is what lets the grid and the pointer offsets stop depending on how many
-     * accepted. A rejected walker has no output rows, so it is skipped before anything is
-     * dereferenced.
-     */
-    if (accept_mask && !accept_mask[iw])
-      continue;
-    const T* __restrict__ Ainv_iw   = Ainv[iw];
-    T* __restrict__ temp_iw         = temp[iw];
-    T* __restrict__ rcopy_iw        = rcopy[iw];
-    const T* __restrict__ phi_in_iw = phi_vgl_in[iw];
-    T* __restrict__ dphi_out_iw     = dphi_out[iw];
-    T* __restrict__ d2phi_out_iw    = d2phi_out[iw];
-
-    temp_iw[rowchanged] = temp_iw[rowchanged] - T(1);
-
-    PRAGMA_OFFLOAD("omp parallel for")
     for (size_t col_id = 0; col_id < n; col_id++)
     {
+      /* With a mask the caller runs over every walker rather than packing the accepted ones
+       * first, which is what lets the grid and the pointer offsets stop depending on how many
+       * accepted. A rejected walker has no output rows, so it is skipped before anything is
+       * dereferenced.
+       */
+      if (accept_mask && !accept_mask[iw])
+        continue;
+      const T* __restrict__ Ainv_iw   = Ainv[iw];
+      T* __restrict__ rcopy_iw        = rcopy[iw];
+      const T* __restrict__ phi_in_iw = phi_vgl_in[iw];
+      T* __restrict__ dphi_out_iw     = dphi_out[iw];
+      T* __restrict__ d2phi_out_iw    = d2phi_out[iw];
+
+      if (col_id == 0)
+      {
+        T* __restrict__ temp_iw = temp[iw];
+        temp_iw[rowchanged]     = temp_iw[rowchanged] - T(1);
+      }
+
       rcopy_iw[col_id] = Ainv_iw[rowchanged * lda + col_id];
 
       // the following copying data on the device is not part of SM-1
@@ -70,7 +81,6 @@ void copyAinvRow_saveGL_batched(Queue<PlatformKind::OMPTARGET>& queue,
       dphi_out_iw[col_id * 3 + 2] = phi_in_iw[col_id + phi_vgl_stride * 3];
       d2phi_out_iw[col_id]        = phi_in_iw[col_id + phi_vgl_stride * 4];
     }
-  }
 }
 
 template<typename T>
@@ -81,40 +91,29 @@ void calcGradients_batched(Queue<PlatformKind::OMPTARGET>& queue,
                            T* const grads_now,
                            const int batch_count)
 {
-  /* A team reduces over n orbitals, and left to itself the compiler gives the team far more
-   * lanes than that; the ones past the work still enter the reduction tree and still cost
-   * their barriers. Same reasoning as the batched gemv and the Jastrow kernels.
+  /* One thread per walker and dimension, each summing the whole row, rather than a team
+   * reducing over the row with the sums written outside the parallel region.
+   *
+   * The second shape puts a sequential region on both sides of an inner parallel for, and
+   * the compiler answers that with generic mode: one thread walks the sequential parts
+   * behind a state machine while the rest of the block waits. The runtime reports the mode
+   * per launch, and this kernel was generic. Three numbers per walker over n orbitals is a
+   * few thousand multiplies in total, so the arithmetic was never what this cost.
    */
-  const int team_width = [n] {
-    int width = 32;
-    while (width < n && width < 1024)
-      width *= 2;
-    return width;
-  }();
-
-  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
+  PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
                   is_device_ptr(Ainvrow, dpsiMrow, grads_now)")
   for (size_t iw = 0; iw < batch_count; iw++)
-  {
-    const T* __restrict__ invRow    = Ainvrow[iw];
-    const T* __restrict__ dpsiM_row = dpsiMrow[iw];
-
-    T sum_x = 0;
-    T sum_y = 0;
-    T sum_z = 0;
-
-    PRAGMA_OFFLOAD("omp parallel for reduction(+: sum_x,sum_y,sum_z)")
-    for (size_t col_id = 0; col_id < n; col_id++)
+    for (int idim = 0; idim < 3; idim++)
     {
-      sum_x += invRow[col_id] * dpsiM_row[col_id * 3];
-      sum_y += invRow[col_id] * dpsiM_row[col_id * 3 + 1];
-      sum_z += invRow[col_id] * dpsiM_row[col_id * 3 + 2];
-    }
+      const T* __restrict__ invRow    = Ainvrow[iw];
+      const T* __restrict__ dpsiM_row = dpsiMrow[iw];
 
-    grads_now[iw * 3]     = sum_x;
-    grads_now[iw * 3 + 1] = sum_y;
-    grads_now[iw * 3 + 2] = sum_z;
-  }
+      T sum = 0;
+      for (size_t col_id = 0; col_id < n; col_id++)
+        sum += invRow[col_id] * dpsiM_row[col_id * 3 + idim];
+
+      grads_now[iw * 3 + idim] = sum;
+    }
 }
 
 template<typename T>
