@@ -491,25 +491,6 @@ ompBLAS_status gemv<std::complex<double>>(ompBLAS_handle& handle,
 #endif
 
 
-/** the team width a reduction of this extent wants
- *
- *  A team reduces over `extent` elements, and left to itself the compiler picks a team far
- *  wider than that: the lanes past the work still enter the reduction tree and still cost
- *  their barriers. The batched gemv over 54 orbitals and 64 walkers measured 51 us of
- *  kernel time this way, a third of all device time in a DMC step, for 186 thousand
- *  multiply-adds.
- */
-inline int reductionTeamWidth(const int extent)
-{
-  int width = 32;
-  while (width < extent && width < 1024)
-    width *= 2;
-  if (const char* c = std::getenv("QMCPACK_OMPBLAS_TEAM_WIDTH"))
-    if (const int v = std::atoi(c); v > 0)
-      width = v;
-  return width;
-}
-
 template<typename T>
 ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
                                  const char trans,
@@ -533,15 +514,26 @@ ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
     if (incx != 1)
       throw std::runtime_error("incx!=1 are not implemented in ompBLAS::gemv_batched_impl trans='T'!");
 
-    const int team_width = reductionTeamWidth(m);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * n) \
-                               thread_limit(team_width) \
+    /* One thread per output element, each walking its own dot product, rather than a team
+     * per output element reducing across threads.
+     *
+     * The reducing shape leaves the write outside the inner parallel region, and a target
+     * region shaped that way compiles to generic mode: one thread runs the sequential part
+     * behind a state machine while the rest of the block waits. The runtime reports the
+     * mode per launch and this kernel was generic. It is worth caring about here because
+     * over 54 orbitals and 64 walkers this call measured 51 microseconds of kernel time,
+     * about a third of all device time in a DMC step, for 186 thousand multiply-adds; the
+     * arithmetic was never the cost.
+     *
+     * batch_count times n dot products is enough work to spread without a team reduction,
+     * and each thread's own loop over the contracted index needs no barrier at all.
+     */
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
                                is_device_ptr(A, x, y, alpha, beta)")
     for (uint32_t ib = 0; ib < batch_count; ib++)
       for (uint32_t i = 0; i < n; i++)
       {
         T dot_sum(0);
-        PRAGMA_OFFLOAD("omp parallel for simd reduction(+: dot_sum)")
         for (uint32_t j = 0; j < m; j++)
           dot_sum += x[ib][j] * A[ib][i * lda + j];
         if (beta[ib] == T(0))
@@ -556,15 +548,13 @@ ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
     if (incx != 1)
       throw std::runtime_error("incx!=1 are not implemented in ompBLAS::gemv_batched_impl trans='N'!");
 
-    const int team_width = reductionTeamWidth(n);
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * n) \
-                               thread_limit(team_width) \
+    // same reshaping as the transposed branch above, and for the same reason
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
                                is_device_ptr(A, x, y, alpha, beta)")
     for (uint32_t ib = 0; ib < batch_count; ib++)
       for (uint32_t i = 0; i < m; i++)
       {
         T dot_sum(0);
-        PRAGMA_OFFLOAD("omp parallel for simd reduction(+: dot_sum)")
         for (uint32_t j = 0; j < n; j++)
           dot_sum += x[ib][j] * A[ib][j * lda + i];
         if (beta[ib] == T(0))
