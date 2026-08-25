@@ -102,82 +102,89 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
    * pays nothing.
    */
 
-  /* Same reasoning as mw_evaluateV: a team reduces over n_src sources, which is the ion
-   * count for a one-body Jastrow and the electron count for a two-body one, so the team
-   * is far wider than the work unless it is told otherwise.
+  /* Two combined constructs rather than one teams distribute wrapped around a parallel for
+   * whose results are written after it.
+   *
+   * The single-region form leaves a sequential prologue and five writes on either side of
+   * the inner parallel for, and a target region shaped that way carries a generic prologue:
+   * the runtime reports this kernel as Generic-SPMD rather than SPMD. Reshaping the same
+   * arithmetic into two regions that are each SPMD from the start costs one more launch and
+   * pays for it, on the same reasoning that took the matrix update kernels from generic to
+   * SPMD.
+   *
+   * The split is along what each part needs. The first writes cur_allu, one entry per
+   * source, and needs the functor table; the second reduces cur_allu into the five numbers
+   * per walker and needs nothing but the distances. j == iat is skipped in both, so that
+   * entry of cur_allu stays untouched exactly as the single region left it.
+   *
+   * The mapping sits outside both so the data movement is what it was: the distances go up
+   * once and cur_allu comes down once, rather than once per region.
    */
-  const int team_width = [n_src] {
-    int width = 32;
-    while (width < n_src && width < 1024)
-      width *= 2;
-    if (const char* c = std::getenv("QMCPACK_JASTROW_TEAM_WIDTH"))
-      if (const int v = std::atoi(c); v > 0)
-        width = v;
-    return width;
-  }();
-
-  PRAGMA_OFFLOAD("omp target teams distribute thread_limit(team_width) \
-                    is_device_ptr(transfer_buffer_ptr, mw_vgl) \
-                    map(to: grp_ids[:n_src]) \
-                    map(to: mw_dist[:dist_stride*nw]) \
+  PRAGMA_OFFLOAD("omp target data map(to: grp_ids[:n_src], mw_dist[:dist_stride*nw]) \
                     map(from: mw_cur_allu[:n_padded*3*nw])")
-  for (int ip = 0; ip < nw; ip++)
   {
-    REAL val_sum(0);
-    REAL grad_x(0);
-    REAL grad_y(0);
-    REAL grad_z(0);
-    REAL lapl(0);
-
-    const REAL* dist   = mw_dist + ip * dist_stride;
-    const REAL* dipl_x = dist + n_padded;
-    const REAL* dipl_y = dist + n_padded * 2;
-    const REAL* dipl_z = dist + n_padded * 3;
-
-    REAL** mw_coefs        = reinterpret_cast<REAL**>(transfer_buffer_ptr);
-    REAL* mw_DeltaRInv     = reinterpret_cast<REAL*>(transfer_buffer_ptr + sizeof(REAL*) * num_groups);
-    REAL* mw_cutoff_radius = mw_DeltaRInv + num_groups;
-    int* mw_max_index = reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
-
-    REAL* cur_allu = mw_cur_allu + ip * n_padded * 3;
-
-    PRAGMA_OFFLOAD("omp parallel for reduction(+: val_sum, grad_x, grad_y, grad_z, lapl)")
-    for (int j = 0; j < n_src; j++)
-    {
-      if (j == iat)
-        continue;
-      const int ig        = grp_ids[j];
-      const REAL* coefs   = mw_coefs[ig];
-      REAL DeltaRInv      = mw_DeltaRInv[ig];
-      REAL cutoff_radius  = mw_cutoff_radius[ig];
-      const int max_index = mw_max_index[ig];
-
-      REAL r = dist[j];
-      REAL u(0);
-      REAL dudr(0);
-      REAL d2udr2(0);
-      if (r < cutoff_radius)
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
+                      is_device_ptr(transfer_buffer_ptr)")
+    for (int ip = 0; ip < nw; ip++)
+      for (int j = 0; j < n_src; j++)
       {
-        u = evaluate_impl(r, coefs, DeltaRInv, max_index, dudr, d2udr2);
-        dudr *= REAL(1) / r;
-      }
-      // save u, dudr/r and d2udr2 to cur_allu
-      cur_allu[j]                = u;
-      cur_allu[j + n_padded]     = dudr;
-      cur_allu[j + n_padded * 2] = d2udr2;
-      val_sum += u;
-      lapl += d2udr2 + (DIM - 1) * dudr;
-      grad_x += dudr * dipl_x[j];
-      grad_y += dudr * dipl_y[j];
-      grad_z += dudr * dipl_z[j];
-    }
+        if (j == iat)
+          continue;
 
-    REAL* vgl = mw_vgl + ip * (DIM + 2);
-    vgl[0]    = val_sum;
-    vgl[1]    = grad_x;
-    vgl[2]    = grad_y;
-    vgl[3]    = grad_z;
-    vgl[4]    = -lapl;
+        REAL** mw_coefs    = reinterpret_cast<REAL**>(transfer_buffer_ptr);
+        REAL* mw_DeltaRInv = reinterpret_cast<REAL*>(transfer_buffer_ptr + sizeof(REAL*) * num_groups);
+        REAL* mw_cutoff_radius = mw_DeltaRInv + num_groups;
+        int* mw_max_index =
+            reinterpret_cast<int*>(transfer_buffer_ptr + (sizeof(REAL*) + sizeof(REAL) * 2) * num_groups);
+
+        const int ig        = grp_ids[j];
+        const REAL* coefs   = mw_coefs[ig];
+        REAL DeltaRInv      = mw_DeltaRInv[ig];
+        REAL cutoff_radius  = mw_cutoff_radius[ig];
+        const int max_index = mw_max_index[ig];
+
+        REAL r = mw_dist[ip * dist_stride + j];
+        REAL u(0);
+        REAL dudr(0);
+        REAL d2udr2(0);
+        if (r < cutoff_radius)
+        {
+          u = evaluate_impl(r, coefs, DeltaRInv, max_index, dudr, d2udr2);
+          dudr *= REAL(1) / r;
+        }
+        // save u, dudr/r and d2udr2 to cur_allu
+        REAL* cur_allu             = mw_cur_allu + ip * n_padded * 3;
+        cur_allu[j]                = u;
+        cur_allu[j + n_padded]     = dudr;
+        cur_allu[j + n_padded * 2] = d2udr2;
+      }
+
+    /* One thread per walker and output component. Five serial sums over n_src rather than
+     * five reductions across a team, which is what lets this be a combined construct.
+     */
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) is_device_ptr(mw_vgl)")
+    for (int ip = 0; ip < nw; ip++)
+      for (int comp = 0; comp < DIM + 2; comp++)
+      {
+        const REAL* dist     = mw_dist + ip * dist_stride;
+        const REAL* cur_allu = mw_cur_allu + ip * n_padded * 3;
+
+        REAL sum(0);
+        for (int j = 0; j < n_src; j++)
+        {
+          if (j == iat)
+            continue;
+          if (comp == 0)
+            sum += cur_allu[j];
+          else if (comp == DIM + 1)
+            // the laplacian, negated on the way out as the single region did
+            sum -= cur_allu[j + n_padded * 2] + REAL(DIM - 1) * cur_allu[j + n_padded];
+          else
+            // the gradient, one displacement component per comp
+            sum += cur_allu[j + n_padded] * dist[n_padded * comp + j];
+        }
+        mw_vgl[ip * (DIM + 2) + comp] = sum;
+      }
   }
 }
 
