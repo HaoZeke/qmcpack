@@ -326,19 +326,14 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   auto pp_component = std::find_if(O_leader.PPset.begin(), O_leader.PPset.end(), [](auto& ptr) { return bool(ptr); });
   assert(pp_component != std::end(O_leader.PPset));
 
-  /* 1 batches a whole group, spanning electrons and ions. 2 batches one electron at a
-   * time, spanning ions only, so its sets carry a single reference electron and it needs
-   * nothing of the wavefunction beyond what the per-job path already asks for.
+  /* 1 batches a whole group, spanning electrons and ions. The deck asks through
+   * batch_electrons on the pseudopotential; the environment can ask as well, which is
+   * how one deck is measured both ways without editing it, and 0 declines whatever the
+   * deck said.
    */
   const char* collapse_env = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
-  /* The deck asks through batch_electrons on the pseudopotential. The environment can
-   * ask as well, which is how one deck is measured both ways without editing it, and is
-   * the only way to reach 2; setting it to 0 declines whatever the deck said.
-   */
-  const bool collapse_per_electron = collapse_env && *collapse_env == '2';
-  const bool collapse_requested =
-      !(collapse_env && *collapse_env == '0') &&
-      (O_leader.batch_electron_groups || (collapse_env && (*collapse_env == '1' || *collapse_env == '2')));
+  const bool collapse_requested = !(collapse_env && *collapse_env == '0') &&
+      (O_leader.batch_electron_groups || (collapse_env && *collapse_env == '1'));
 
   /* Batching a whole group puts several electrons in one virtual particle set, and a
    * component reading one reference electron per set would give every quadrature point
@@ -351,17 +346,17 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
    * serialised per walker and reads one reference electron per set whatever the
    * components can otherwise do.
    */
-  const bool multi_ref_ok =
-      collapse_per_electron || (!pset_leader.isSpinor() && wf_list.getLeader().supportsMultiRefRatios());
+  const bool multi_ref_ok = !pset_leader.isSpinor() && wf_list.getLeader().supportsMultiRefRatios();
   const bool collapse_electron_loop = collapse_requested && multi_ref_ok;
 
   if (collapse_requested && !multi_ref_ok)
   {
     static std::once_flag declined;
     std::call_once(declined, [] {
-      std::cerr << "WARNING QMCPACK_NLPP_COLLAPSE_ELECTRONS asked for one batch per electron "
-                   "group, but a wavefunction component evaluates one reference electron per "
-                   "virtual particle set. Batching one electron at a time instead."
+      std::cerr << "WARNING one batch per electron group was asked for, but a wavefunction "
+                   "component evaluates one reference electron per virtual particle set. "
+                   "Using the per-job path, which is what this build does without the "
+                   "request."
                 << std::endl;
     });
   }
