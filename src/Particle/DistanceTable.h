@@ -302,6 +302,15 @@ public:
 
   virtual size_t get_num_particls_stored() const { return 0; }
 
+  /** whether getMultiWalkerTempDataPtr returns rather than throws.
+   *
+   * A consumer that can use the device form and can also fall back needs to ask
+   * before it commits: the accessor below is [[noreturn]] on this class, so a
+   * caller that guesses from its own offload flag aborts the run on any deck
+   * whose table is the base form.
+   */
+  virtual bool hasMultiWalkerTempData() const { return false; }
+
   /// return multi walker temporary pair distance table data pointer
   [[noreturn]] virtual const RealType* getMultiWalkerTempDataPtr() const
   {

@@ -148,10 +148,11 @@ void J1OrbitalSoA<FT>::mw_accept_rejectMove(const RefVectorWithLeader<WaveFuncti
   const bool needs_recompute = wfc_leader.UpdateMode == ORB_PBYP_RATIO;
   if constexpr (HasMwEvaluateVGL<FT>::value)
   {
-    if (needs_recompute && use_offload_ && static_cast<size_t>(nw) * wfc_leader.Nions >= 512)
+    auto& p_leader        = p_list.getLeader();
+    const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+    if (needs_recompute && use_offload_ && dt_leader.hasMultiWalkerTempData() &&
+        static_cast<size_t>(nw) * wfc_leader.Nions >= 512)
     {
-      auto& p_leader        = p_list.getLeader();
-      const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
       auto& mw_mem          = wfc_leader.mw_mem_handle_.getResource();
       auto& mw_vgl          = mw_mem.mw_vgl;
       auto& mw_cur_allu     = mw_mem.mw_cur_allu;
@@ -196,14 +197,14 @@ void J1OrbitalSoA<FT>::mw_calcRatio(const RefVectorWithLeader<WaveFunctionCompon
   /* Same trade as mw_ratioGrad, and the same gate: a launch against the host's reduction
    * over ions for every walker.
    */
-  if (!use_offload_ || static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  auto& p_leader        = p_list.getLeader();
+  const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
+  if (!use_offload_ || !dt_leader.hasMultiWalkerTempData() ||
+      static_cast<size_t>(nw) * wfc_leader.Nions < 512)
   {
     WaveFunctionComponent::mw_calcRatio(wfc_list, p_list, iat, ratios);
     return;
   }
-
-  auto& p_leader        = p_list.getLeader();
-  const auto& dt_leader = p_leader.getDistTableAB(wfc_leader.myTableID);
   auto& mw_mem          = wfc_leader.mw_mem_handle_.getResource();
   auto& mw_vals         = mw_mem.mw_vals;
   const size_t n_padded = getAlignedSize<valT>(wfc_leader.Nions);
@@ -263,7 +264,8 @@ void J1OrbitalSoA<FT>::mw_ratioGrad(const RefVectorWithLeader<WaveFunctionCompon
    * pairs, which puts the crossover near that product, so the host loop serves the small
    * end with a margin over the one point available to anchor it.
    */
-  if (static_cast<size_t>(nw) * wfc_leader.Nions < 512)
+  if (!dt_leader.hasMultiWalkerTempData() ||
+      static_cast<size_t>(nw) * wfc_leader.Nions < 512)
   {
     WaveFunctionComponent::mw_ratioGrad(wfc_list, p_list, iat, ratios, grad_new);
     return;

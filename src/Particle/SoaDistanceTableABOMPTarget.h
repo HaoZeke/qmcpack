@@ -155,6 +155,8 @@ public:
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
 
+  bool hasMultiWalkerTempData() const override { return true; }
+
   const RealType* getMultiWalkerTempDataPtr() const override
   { return mw_mem_handle_.getResource().mw_new_old_dist_displ.data(); }
 
