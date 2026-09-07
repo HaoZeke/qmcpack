@@ -103,6 +103,7 @@ public:
 
   bool isMultiSource() const { return multi_source_; }
   bool isMultiRef() const { return multi_ref_; }
+  size_t getNumJobs() const { return job_electron.size(); }
 
   /// whether this set holds the lent VPMultiWalkerMem; getMultiWalkerRefPctls throws without it
   bool getMultiWalkerRefPctlsHeld() const { return bool(mw_mem_handle_); }

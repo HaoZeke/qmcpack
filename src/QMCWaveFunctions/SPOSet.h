@@ -254,6 +254,15 @@ public:
    * @param invRow_ptr_list a list of pointers to the rows of inverse slater matrix corresponding to the particles moved virtually
    * @param ratios_list a list of returning determinant ratios
    */
+  /** whether mw_evaluateDetRatios indexes invRow_ptr_list per job rather than per walker.
+   *
+   * A virtual particle set spanning several electrons, which collapsing the NLPP electron
+   * loop produces, needs one inverse row per job. DiracDeterminantBatched supplies them that
+   * way and the orbital set has to agree; one still indexing by walker would read the wrong
+   * row without failing. Only implementations taught the per-job convention return true.
+   */
+  virtual bool supportsMultiRefDetRatios() const { return false; }
+
   virtual void mw_evaluateDetRatios(const RefVectorWithLeader<SPOSetT>& spo_list,
                                     const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
                                     const RefVector<ValueVector>& psi_list,
@@ -363,6 +372,33 @@ public:
                                               OffloadMWVGLArray& phi_vgl_v,
                                               std::vector<ValueType>& ratios,
                                               std::vector<GradType>& grads) const;
+
+  using OffloadValueVector = Vector<ValueType, OffloadPinnedAllocator<ValueType>>;
+
+  /** as mw_evaluateVGLandDetRatioGrads, and also leaves the ratios and gradients in device
+   *  memory so a device side acceptance test can read them without the host finishing the
+   *  arithmetic.
+   *
+   *  ratios_device is [nw]; grads_device is [nw][DIM] flat. The default fills both from the
+   *  host result, so an implementation that has not been ported still works and costs one
+   *  small transfer; an implementation whose kernel already holds the values overrides this.
+   *  Callers that do not need the device copies keep using the form above and pay nothing.
+   *
+   *  want_host_grads and want_host_ratios say whether grads and ratios are read. A caller
+   *  that sums on the device and accepts from a device mask reads neither, and bringing
+   *  either down is a blocking transfer per electron for values nothing looks at.
+   */
+  virtual void mw_evaluateVGLandDetRatioGradsDevice(const RefVectorWithLeader<SPOSetT>& spo_list,
+                                                    const RefVectorWithLeader<ParticleSet>& P_list,
+                                                    int iat,
+                                                    const std::vector<const ValueType*>& invRow_ptr_list,
+                                                    OffloadMWVGLArray& phi_vgl_v,
+                                                    std::vector<ValueType>& ratios,
+                                                    std::vector<GradType>& grads,
+                                                    OffloadValueVector& ratios_device,
+                                                    OffloadValueVector& grads_device,
+                                                    bool want_host_grads,
+                                                    bool want_host_ratios) const;
 
   /** evaluate the values, gradients and laplacians of this single-particle orbital sets and determinant ratio
    *  and grads of multiple walkers. Device data of phi_vgl_v must be up-to-date upon return.

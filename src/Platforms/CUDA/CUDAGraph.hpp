@@ -65,9 +65,9 @@ public:
    *  @param key    everything fn's arguments and grid shapes depend on
    */
   template<class F>
-  void launch(cudaStream_t stream, uint64_t key, F&& fn)
+  void launch(cudaStream_t stream, int site, uint64_t key, F&& fn)
   {
-    if (!enabled())
+    if (!enabled(site))
     {
       fn();
       return;
@@ -115,14 +115,28 @@ public:
   /// how many distinct sequences are recorded, for a caller that wants to bound it
   size_t size() const { return execs_.size(); }
 
-  static bool enabled()
+  /** which recordings are wanted
+   *
+   *  A recording pays for itself only if its key comes round often enough to amortise
+   *  instantiating it, which costs tens of microseconds. A sequence whose key includes
+   *  something as fine-grained as the accepted walker count has as many keys as there are
+   *  (row, count) pairs, and then it does not.
+   *
+   *  Bit 0 is the sequence whose key is the buffer layout alone, bit 1 the one that also
+   *  keys on the moved row and the accepted count. Default is neither, until the second
+   *  one's key is coarsened.
+   */
+  static int sites()
   {
-    static const bool on = [] {
-      const char* off = std::getenv("QMCPACK_CUDA_GRAPHS");
-      return !(off && *off == '0');
+    static const int mask = [] {
+      if (const char* s = std::getenv("QMCPACK_CUDA_GRAPHS"))
+        return std::atoi(s);
+      return 0;
     }();
-    return on;
+    return mask;
   }
+
+  static bool enabled(int site) { return (sites() & site) != 0; }
 
 private:
   std::unordered_map<uint64_t, cudaGraphExec_t> execs_;
