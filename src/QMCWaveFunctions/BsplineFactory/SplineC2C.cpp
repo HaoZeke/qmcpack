@@ -11,6 +11,8 @@
 
 
 #include "SplineC2C.h"
+#include <algorithm>
+#include <cstdlib>
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
@@ -21,6 +23,31 @@
 
 namespace qmcplusplus
 {
+namespace
+{
+/** the team width a determinant ratio kernel should ask for.
+ *
+ * The kernel reduces one value per spline over a team, and the loop it splits gives a
+ * team at most ChunkSizePerTeam splines. Asking for the compiler's default of 1024
+ * threads for a team that has 512 or fewer values to reduce leaves most of them idle
+ * through the reduction tree, so the width follows the work instead.
+ *
+ * The floor is 32, one warp on a CUDA device, because a narrower team cannot help:
+ * the hardware schedules a warp at a time. QMCPACK_SPLINE_TEAM_WIDTH overrides the
+ * result, which is what a sweep on a new device needs.
+ */
+int ratioKernelTeamWidth(size_t work_per_team)
+{
+  int width = 32;
+  while (width < static_cast<int>(work_per_team) && width < 1024)
+    width *= 2;
+  if (const char* c = std::getenv("QMCPACK_SPLINE_TEAM_WIDTH"))
+    if (const int v = std::atoi(c); v > 0)
+      width = v;
+  return width;
+}
+} // namespace
+
 template<typename ST>
 SplineC2C<ST>::SplineC2C(const std::string& my_name,
                          size_t size,
@@ -282,6 +309,7 @@ void SplineC2C<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
 
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+  const int team_width          = ratioKernelTeamWidth(std::min(myV.size(), ChunkSizePerTeam));
   ratios_private.resize(nVP, NumTeams);
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
@@ -302,6 +330,7 @@ void SplineC2C<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
   {
     ScopedTimer offload(offload_timer_);
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*nVP) \
+                thread_limit(team_width) \
                 map(always, to: psiinv_ptr[0:psiinv_pos_copy.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*nVP])")
     for (int iat = 0; iat < nVP; iat++)
@@ -408,6 +437,7 @@ void SplineC2C<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
 
   const size_t ChunkSizePerTeam = 512;
   const int NumTeams            = (myV.size() + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+  const int team_width          = ratioKernelTeamWidth(std::min(myV.size(), ChunkSizePerTeam));
   mw_ratios_private.resize(mw_nVP, NumTeams);
   const auto spline_padded_size = myV.size();
   const auto sposet_padded_size = getAlignedSize<ValueType>(OrbitalSetSize);
@@ -427,6 +457,7 @@ void SplineC2C<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   {
     ScopedTimer offload(offload_timer_);
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                thread_limit(team_width) \
                 map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
     for (int iat = 0; iat < mw_nVP; iat++)
