@@ -14,6 +14,8 @@
 #ifndef QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 #define QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 
+#include <algorithm>
+
 #include "Lattice/ParticleBConds3DSoa.h"
 #include "DistanceTable.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
@@ -100,7 +102,9 @@ public:
       : DTD_BConds<T, D, SC>(source.getLattice()),
         DistanceTableAB(source, target_name, DTModes::ALL_OFF),
         offload_timer_(createGlobalTimer("DTABOMPTarget::offload_" + name_, timer_level_fine)),
-        evaluate_timer_(createGlobalTimer("DTABOMPTarget::evaluate_" + name_, timer_level_fine))
+        evaluate_timer_(createGlobalTimer("DTABOMPTarget::evaluate_" + name_, timer_level_fine)),
+        move_timer_(createGlobalTimer("DTABOMPTarget::move_" + name_, timer_level_fine)),
+        update_timer_(createGlobalTimer("DTABOMPTarget::update_" + name_, timer_level_fine))
 
   {
     auto* coordinates_soa = dynamic_cast<const RealSpacePositionsOMPTarget*>(&source.getCoordinates());
@@ -324,16 +328,44 @@ public:
     DistanceTable::mw_evaluate(dt_list, p_list);
   }
 
-  ///evaluate the temporary pair relations
+  /** evaluate the temporary pair relations for one target, on the host.
+   *
+   * The batched driver moves one particle at a time through
+   * ParticleSet::computeNewPosDistTables, which calls this on every table it
+   * holds. On an all-electron cell at 256 walkers that is a million and a half
+   * calls per run against a couple of hundred batched evaluations, so a table
+   * that cannot serve it cannot be selected at all.
+   *
+   * Computed on the host, the same way the non-offload form and the AA offload
+   * form both do. The device table is what mw_evaluate fills and is not touched
+   * here: a single-particle move has no batch to place on the device, and
+   * bringing one row back to compute it would be a transfer per move.
+   */
   inline void move(const ParticleSet& P, const PosType& rnew, const IndexType iat, bool prepare_old) override
   {
-    throw std::runtime_error("Report bug! SoaDistanceTableABOMPTarget::move should never be called!");
+    ScopedTimer local_timer(move_timer_);
+
+    DTD_BConds<T, D, SC>::computeDistances(rnew, origin_.getCoordinates().getAllParticlePos(), temp_r_.data(), temp_dr_,
+                                           0, num_sources_);
+    // If the full table is not ready all the time, overwrite the current value.
+    // Without this a rejected move leaves the row undefined.
+    if (!(modes_ & DTModes::NEED_FULL_TABLE_ANYTIME) && prepare_old)
+      DTD_BConds<T, D, SC>::computeDistances(P.R[iat], origin_.getCoordinates().getAllParticlePos(),
+                                             distances_[iat].data(), displacements_[iat], 0, num_sources_);
   }
 
-  ///update the stripe for jat-th particle
+  /** accept the temporary relations into the jat-th row, on the host.
+   *
+   * The rows are references into the multi-walker device buffer while a batched
+   * section holds the resource, and plain host allocations otherwise, so this
+   * writes wherever the row currently lives, which is what the caller expects.
+   */
   inline void update(IndexType iat) override
   {
-    throw std::runtime_error("Report bug! SoaDistanceTableABOMPTarget::update should never be called!");
+    ScopedTimer local_timer(update_timer_);
+    std::copy_n(temp_r_.data(), num_sources_, distances_[iat].data());
+    for (int idim = 0; idim < D; ++idim)
+      std::copy_n(temp_dr_.data(idim), num_sources_, displacements_[iat].data(idim));
   }
 
 private:
@@ -360,6 +392,10 @@ private:
   NewTimer& offload_timer_;
   /// timer for evaluate()
   NewTimer& evaluate_timer_;
+  /// timer for the per-particle move, which the batched driver calls per step
+  NewTimer& move_timer_;
+  /// timer for the per-particle update
+  NewTimer& update_timer_;
 };
 } // namespace qmcplusplus
 #endif
