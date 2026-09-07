@@ -239,6 +239,7 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
 
     size_t k = 0;
     vp.multi_ref_ = false;
+    vp.job_electron.resize(jobs.size());
     for (size_t j = 0; j < jobs.size(); j++)
     {
       const auto& job    = jobs[j];
@@ -248,6 +249,7 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
       // silently offset from the first job's position.
       if (job.electron_id != vp.refPtcl)
         vp.multi_ref_ = true;
+      vp.job_electron[j] = job.electron_id;
       for (size_t q = 0; q < deltaV.size(); q++, k++, ivp++)
       {
         vp.R[k]                  = refp_list[iw].R[job.electron_id] + deltaV[q];
