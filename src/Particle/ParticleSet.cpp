@@ -345,12 +345,10 @@ int ParticleSet::addTable(const ParticleSet& psrc, DTModes modes)
     else
       /* the dispatcher, so an offload source selects SoaDistanceTableABOMPTarget.
        *
-       * Held off in f4cb9bc97 because that class broke the particle-by-particle path.
-       * The cause was in the class, not in selecting it: acquireResource and
-       * releaseResource zeroed num_targets_, which is what targets() reports, so a
-       * single-walker consumer between a release and the next batched section was told
-       * the table had no targets. CoulombPotential::evaluateAB loops to that count and
-       * summed over nothing, so the electron-ion energy came out exactly zero.
+       * That class has to keep num_targets_ across acquire and release, because targets()
+       * reports it and a single-walker consumer between a release and the next batched
+       * section would otherwise be told the table is empty. CoulombPotential::evaluateAB
+       * loops to that count, so the electron-ion energy would come out exactly zero.
        */
       DistTables.push_back(createDistanceTable(psrc, myName, description));
     distTableDescriptions.push_back(description.str());
