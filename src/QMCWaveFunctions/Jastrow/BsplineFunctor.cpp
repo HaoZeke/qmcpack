@@ -18,6 +18,7 @@
 // File created by: Ken Esler, kpesler@gmail.com, University of Illinois at Urbana-Champaign
 //////////////////////////////////////////////////////////////////////////////////////
 
+#include <algorithm>
 #include "BsplineFunctor.h"
 
 namespace qmcplusplus
@@ -172,7 +173,23 @@ void BsplineFunctor<REAL>::mw_evaluateV(const int num_groups,
 
   auto* transfer_buffer_ptr = transfer_buffer.data();
 
-  PRAGMA_OFFLOAD("omp target teams distribute map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
+  /* Name the team count rather than leaving it to the runtime.
+   *
+   * The iteration space is walkers times quadrature knots, which is moderate rather than
+   * large, and left unnamed it gets packed into fewer teams than the device has room for.
+   * The same clause is named in the AB distance table for the same reason.
+   *
+   * The reduction over sources stays inside the team. Giving each thread a whole pair
+   * instead was tried and measured: the kernel came out 61.9 per cent slower against this
+   * form on a 53-source cell and three times slower on a 7-source one, which is the case
+   * that shape was supposed to help. A team's threads walk the source index contiguously
+   * through the distance row; a thread owning a pair walks its own row while its
+   * neighbours walk theirs, and the reads stop coalescing.
+   */
+  const int num_teams = static_cast<int>(std::min(std::max(num_pairs / 64, 1), 65535));
+
+  PRAGMA_OFFLOAD("omp target teams distribute num_teams(num_teams) \
+                    map(always, to:transfer_buffer_ptr[:transfer_buffer.size()]) \
                     map(to: grp_ids[:n_src]) \
                     map(to:ref_at[:num_pairs], mw_dist[:dist_stride*num_pairs]) \
                     map(always, from:mw_vals[:num_pairs])")
