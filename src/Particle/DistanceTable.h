@@ -475,6 +475,15 @@ public:
   {
     throw std::runtime_error(name_ + " multi walker data pointer for temp not supported");
   }
+
+  /** whether getMultiWalkerTempDataPtr above returns rather than throws.
+   *
+   * A consumer that can use the device form and can also fall back has to ask
+   * before it commits. Guessing from its own offload flag aborts the run on any
+   * deck whose electron-ion table is the base form, which is every deck whose
+   * Jastrow did not request the offload table.
+   */
+  virtual bool hasMultiWalkerTempData() const { return false; }
 };
 } // namespace qmcplusplus
 #endif

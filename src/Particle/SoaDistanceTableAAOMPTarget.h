@@ -88,6 +88,8 @@ struct SoaDistanceTableAAOMPTarget : public DTD_BConds<T, D, SC>, public Distanc
   SoaDistanceTableAAOMPTarget(const SoaDistanceTableAAOMPTarget&) = delete;
   ~SoaDistanceTableAAOMPTarget() { PRAGMA_OFFLOAD("omp target exit data map(delete : this[:1])") }
 
+  bool hasMultiWalkerTempData() const override { return true; }
+
   const RealType* getMultiWalkerTempDataPtr() const override
   {
     return mw_mem_handle_.getResource().mw_new_old_dist_displ.data();
