@@ -406,7 +406,7 @@ private:
         key          = Graphs::mix(key, updateRow_buffer_H2D.device_data());
         key          = Graphs::mix(key, cone_vec.device_data());
         key          = Graphs::mix(key, czero_vec.device_data());
-        mw_rsc.graphs.launch(queue.getNative(), key, issue);
+        mw_rsc.graphs.launch(queue.getNative(), 2, key, issue);
       }
       else
 #endif
@@ -479,7 +479,7 @@ public:
       key          = Graphs::mix(key, static_cast<uint64_t>(norb_grad));
       key          = Graphs::mix(key, evalGrad_buffer_H2D.device_data());
       key          = Graphs::mix(key, grads_value_v.device_data());
-      mw_rsc.graphs.launch(queue.getNative(), key, issue);
+      mw_rsc.graphs.launch(queue.getNative(), 1, key, issue);
     }
     else
 #endif
@@ -551,7 +551,7 @@ public:
       key           = Graphs::mix(key, static_cast<uint64_t>(norb_grad));
       key           = Graphs::mix(key, evalGrad_buffer_H2D.device_data());
       key           = Graphs::mix(key, grads_value_v.device_data());
-      mw_rsc.graphs.launch(queue.getNative(), key, issue);
+      mw_rsc.graphs.launch(queue.getNative(), 1, key, issue);
     }
     else
 #endif
