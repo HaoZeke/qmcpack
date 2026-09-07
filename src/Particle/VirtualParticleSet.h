@@ -92,6 +92,9 @@ public:
    */
   std::vector<int> job_electron;
 
+  /// how many jobs this set carries, which is what job_electron is sized by
+  size_t getNumJobs() const { return job_electron.size(); }
+
   /** declare that the set carries one reference electron and one source.
    *
    * The multi-source and multi-reference descriptions are state of the set, and a set is
