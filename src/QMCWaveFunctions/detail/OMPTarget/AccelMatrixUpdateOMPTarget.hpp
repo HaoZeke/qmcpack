@@ -96,11 +96,17 @@ void calcGradients_batched(Queue<PlatformKind::OMPTARGET>& queue,
    *
    * The second shape puts a sequential region on both sides of an inner parallel for, and
    * the compiler answers that with generic mode: one thread walks the sequential parts
-   * behind a state machine while the rest of the block waits. The runtime reports the mode
-   * per launch, and this kernel was generic. Three numbers per walker over n orbitals is a
-   * few thousand multiplies in total, so the arithmetic was never what this cost.
+   * behind a state machine while the rest of the block waits. Three numbers per walker
+   * over n orbitals is a few thousand multiplies in total, so the arithmetic is not what
+   * either shape costs.
+   *
+   * What it costs is the walk. Collapsing the walker and dimension loops onto a combined
+   * construct makes the whole region batch_count*3 threads, a couple of warps for a batch,
+   * and hands each of them n strided loads to issue one after another. The orbitals are
+   * the dimension worth spreading a team across, so the distribute takes the collapsed
+   * walker and dimension pair and the reduction over orbitals runs inside the team.
    */
-  PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
+  PRAGMA_OFFLOAD("omp target teams distribute collapse(2) \
                   is_device_ptr(Ainvrow, dpsiMrow, grads_now)")
   for (size_t iw = 0; iw < batch_count; iw++)
     for (int idim = 0; idim < 3; idim++)
@@ -109,6 +115,7 @@ void calcGradients_batched(Queue<PlatformKind::OMPTARGET>& queue,
       const T* __restrict__ dpsiM_row = dpsiMrow[iw];
 
       T sum = 0;
+      PRAGMA_OFFLOAD("omp parallel for reduction(+: sum)")
       for (size_t col_id = 0; col_id < n; col_id++)
         sum += invRow[col_id] * dpsiM_row[col_id * 3 + idim];
 
