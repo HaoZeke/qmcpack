@@ -91,54 +91,85 @@ TEST_CASE("spline dump names one dataset per block", "[spline2]")
   comm->barrier();
 
   const std::filesystem::path file("spline_dump_per_block.h5");
+  int wrote = 0;
   if (comm->rank() == 0)
   {
     hdf_archive h5f;
-    REQUIRE(h5f.create(file));
-    int num_blocks = written->getNumBlocks();
-    h5f.write(num_blocks, splineDumpNumBlocksName());
-    REQUIRE(SplineUtils<double>::write(*written, h5f));
-    h5f.close();
+    if (h5f.create(file))
+    {
+      int num_blocks = written->getNumBlocks();
+      h5f.write(num_blocks, splineDumpNumBlocksName());
+      wrote = SplineUtils<double>::write(*written, h5f);
+      h5f.close();
+    }
   }
-  comm->barrier();
+  comm->bcast(wrote);
+  REQUIRE(wrote == 1);
 
   auto restored = makeTable<double>(grid, bc, num_splines, distributed_ranks);
 
+  // Rank 0 does the reading, and every rank asserts the outcome. A failing
+  // assertion inside a rank guard ends that rank's test case and leaves the
+  // others at the next barrier, so what crosses the guard is the answers.
+  int names_ok = 0, no_extra_dataset = 0, count_ok = 0, read_ok = 0, coefs_ok = 0;
   if (comm->rank() == 0)
   {
     hdf_archive h5f;
-    REQUIRE(h5f.open(file, H5F_ACC_RDONLY));
-
-    // Naming each block for its own index is what lets a dump be read back one
-    // block at a time. A name built by appending to the previous one round-trips
-    // through this very code and is only visible from outside it, so it is the
-    // names in the file that are checked and not just the values.
-    for (size_t iblock = 0; iblock < written->getNumBlocks(); iblock++)
-      CHECK(h5f.is_dataset(blockDatasetName(iblock)));
-    CHECK_FALSE(h5f.is_dataset(blockDatasetName(written->getNumBlocks())));
-
-    int num_blocks = 0;
-    REQUIRE(h5f.readEntry(num_blocks, splineDumpNumBlocksName()));
-    CHECK(static_cast<size_t>(num_blocks) == written->getNumBlocks());
-
-    REQUIRE(SplineUtils<double>::read(*restored, h5f));
-    h5f.close();
-
-    for (size_t iblock = 0; iblock < written->getNumBlocks(); iblock++)
+    if (h5f.open(file, H5F_ACC_RDONLY))
     {
-      const auto& from = written->getBlock(iblock);
-      const auto& to   = restored->getBlock(iblock);
-      REQUIRE(to.coefs_size == from.coefs_size);
-      size_t differ = 0;
-      for (size_t i = 0; i < from.coefs_size; i++)
-        if (to.coefs[i] != from.coefs[i])
-          differ++;
-      CHECK(differ == 0);
+      // Naming each block for its own index is what lets a dump be read back one
+      // block at a time. A name built by appending to the previous one
+      // round-trips through this very code, and is visible only from outside it,
+      // so it is the names in the file that are checked and not just the values.
+      names_ok = 1;
+      for (size_t iblock = 0; iblock < written->getNumBlocks(); iblock++)
+        if (!h5f.is_dataset(blockDatasetName(iblock)))
+          names_ok = 0;
+      no_extra_dataset = !h5f.is_dataset(blockDatasetName(written->getNumBlocks()));
+
+      int num_blocks = 0;
+      count_ok = h5f.readEntry(num_blocks, splineDumpNumBlocksName()) &&
+          static_cast<size_t>(num_blocks) == written->getNumBlocks();
+
+      read_ok = SplineUtils<double>::read(*restored, h5f);
+      h5f.close();
+    }
+
+    if (read_ok)
+    {
+      coefs_ok = 1;
+      for (size_t iblock = 0; iblock < written->getNumBlocks(); iblock++)
+      {
+        const auto& from = written->getBlock(iblock);
+        const auto& to   = restored->getBlock(iblock);
+        if (to.coefs_size != from.coefs_size)
+        {
+          coefs_ok = 0;
+          continue;
+        }
+        for (size_t i = 0; i < from.coefs_size; i++)
+          if (to.coefs[i] != from.coefs[i])
+          {
+            coefs_ok = 0;
+            break;
+          }
+      }
     }
 
     std::filesystem::remove(file);
   }
-  comm->barrier();
+
+  comm->bcast(names_ok);
+  comm->bcast(no_extra_dataset);
+  comm->bcast(count_ok);
+  comm->bcast(read_ok);
+  comm->bcast(coefs_ok);
+
+  CHECK(names_ok == 1);
+  CHECK(no_extra_dataset == 1);
+  CHECK(count_ok == 1);
+  CHECK(read_ok == 1);
+  CHECK(coefs_ok == 1);
 }
 
 } // namespace qmcplusplus
