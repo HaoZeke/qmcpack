@@ -91,8 +91,8 @@ void calcGradients_batched(Queue<PlatformKind::OMPTARGET>& queue,
                            T* const grads_now,
                            const int batch_count)
 {
-  /* One thread per walker and dimension, each summing the whole row, rather than a team
-   * reducing over the row with the sums written outside the parallel region.
+  /* A team per walker and dimension reducing over the row, rather than one thread per
+   * walker and dimension summing the whole row itself.
    *
    * The second shape puts a sequential region on both sides of an inner parallel for, and
    * the compiler answers that with generic mode: one thread walks the sequential parts
