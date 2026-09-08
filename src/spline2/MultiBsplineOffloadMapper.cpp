@@ -20,7 +20,7 @@ namespace qmcplusplus
 extern MemoryUsageAccount omptarget_mem_usage;
 
 template<typename T>
-MultiBsplineOffloadMapper<T>::MultiBsplineOffloadMapper(const HostBspline& host_bsplines)
+MultiBsplineOffloadMapper<T>::MultiBsplineOffloadMapper(const HostBspline& host_bsplines, bool map_now)
     : host_bsplines_(host_bsplines)
 {
   block_coefs_.reserve(host_bsplines_.getNumBlocks());
@@ -29,7 +29,8 @@ MultiBsplineOffloadMapper<T>::MultiBsplineOffloadMapper(const HostBspline& host_
     auto* coefs = host_bsplines_.getBlock(ib).coefs;
     block_coefs_.push_back(coefs);
   }
-  mapToDevice();
+  if (map_now)
+    mapToDevice();
 }
 
 template<typename T>

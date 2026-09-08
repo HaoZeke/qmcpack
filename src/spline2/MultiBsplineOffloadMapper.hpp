@@ -40,10 +40,17 @@ protected:
   bool owns_coefs_mapping_ = true;
 
   /// map host coefficients to devices
-  void mapToDevice();
+  virtual void mapToDevice();
 
 public:
-  MultiBsplineOffloadMapper(const HostBspline& host_bsplines);
+  /** @param map_now whether to map in this constructor.
+   *
+   * A derived class that binds the coefficients some other way has to map after its
+   * own members exist, and a virtual call from this constructor would resolve here
+   * whatever the object turns out to be. So it passes false and calls its own
+   * mapToDevice when it is ready.
+   */
+  MultiBsplineOffloadMapper(const HostBspline& host_bsplines, bool map_now = true);
 
   virtual ~MultiBsplineOffloadMapper();
 

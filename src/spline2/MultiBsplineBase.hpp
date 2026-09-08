@@ -134,6 +134,15 @@ public:
 
   virtual ~MultiBsplineBase() = default;
 
+  /** a hook for a subclass that has to fix up what it mapped, after construction.
+   *
+   * The shared and distributed offload forms associate the coefficients with device
+   * memory another process allocated, and the evaluation kernels dereference
+   * spline_m->coefs inside the target region, so the host-side pointer has to be made
+   * to resolve to that allocation once the mapping exists. Nothing to do otherwise.
+   */
+  virtual void finalize() {}
+
   size_t getNumBlocks() const { return spline_blocks.size(); }
   const auto& getBlockOffsets() const { return offsets_; }
 

@@ -22,11 +22,14 @@ namespace qmcplusplus
 {
 template<typename T>
 MultiBsplineOffloadMapperPeer<T>::MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm)
-    : Base(host_bsplines), comm_(comm)
+    : Base(host_bsplines, false), comm_(comm)
 {
   // the coefficient mappings here come from omp_target_associate_ptr against memory
   // this object may not own, so the base destructor must not try to delete them
   Base::owns_coefs_mapping_ = false;
+  // the base was told not to map: one allocation per rank is the thing this class
+  // exists to avoid, and mapping it first would then have to be undone
+  mapToDevice();
 }
 
 #if defined(ENABLE_CUDA)
