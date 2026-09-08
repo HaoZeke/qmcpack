@@ -27,7 +27,6 @@
 #include "Message/CommOperators.h"
 #include "spline2/SplineUtils.h"
 #include "spline2/MultiBspline.hpp"
-#include "spline2/MultiBsplineOffload.hpp"
 #if defined(HAVE_MPI)
 #include "spline2/MultiBsplineMPIShared.hpp"
 #include "spline2/MultiBsplineMPISharedOffload.hpp"
@@ -93,22 +92,20 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 
   const size_t num_splines = getAlignedSize<ST>(use_duplex_splines_ ? N * 2 : N);
   std::unique_ptr<MultiBsplineBase<ST>> multi_splines_ptr;
-  if (use_offload)
-  {
+  // The offload form is only needed when the coefficients are shared or divided:
+  // an offload build that keeps its own single copy uses the plain spline and
+  // SplineC2C maps it through MultiBsplineOffloadMapper, which is what upstream
+  // does. There is no MultiBsplineOffload class to construct.
 #if defined(HAVE_MPI)
-    if (shared_ranks > 1)
-      multi_splines_ptr =
-          std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines, std::move(dist_comm_ptr));
-    else
-#endif
-      multi_splines_ptr = std::make_unique<MultiBsplineOffload<ST>>(xyz_grid, xyz_bc, num_splines);
-  }
-#if defined(HAVE_MPI)
+  if (use_offload && (shared_ranks > 1 || distributed_ranks > 1))
+    multi_splines_ptr = std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines,
+                                                                           std::move(dist_comm_ptr),
+                                                                           distributed_ranks);
   else if (distributed_ranks * shared_ranks > 1)
     multi_splines_ptr = std::make_unique<MultiBsplineMPIShared<ST>>(xyz_grid, xyz_bc, num_splines,
                                                                     std::move(dist_comm_ptr), distributed_ranks);
-#endif
   else
+#endif
     multi_splines_ptr = std::make_unique<MultiBspline<ST>>(xyz_grid, xyz_bc, num_splines);
 
   auto& multi_splines(*multi_splines_ptr);
@@ -117,22 +114,16 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 
   std::unique_ptr<BsplineSet> bspline;
 #if defined(QMC_COMPLEX)
-  if (use_offload)
-    bspline = std::make_unique<SplineC2COMPTarget<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
-                                                       std::move(multi_splines_ptr), use_offload);
-  else
-    bspline = std::make_unique<SplineC2C<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
-                                              std::move(multi_splines_ptr), use_offload);
+  // one class for both, taking use_offload: upstream folded SplineC2COMPTarget in
+  bspline = std::make_unique<SplineC2C<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
+                                            std::move(multi_splines_ptr), use_offload);
 #else
+  // SplineC2ROMPTarget was folded into SplineC2R the same way, and the real
+  // build's distribution stays restricted because SplineC2R still reaches the
+  // coefficients through getSplinePtr()
   if (use_duplex_splines_)
-  {
-    if (use_offload)
-      bspline = std::make_unique<SplineC2ROMPTarget<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
-                                                         std::move(multi_splines_ptr), use_offload);
-    else
-      bspline = std::make_unique<SplineC2R<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
-                                                std::move(multi_splines_ptr), use_offload);
-  }
+    bspline = std::make_unique<SplineC2R<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
+                                              std::move(multi_splines_ptr), use_offload);
   else
     bspline = std::make_unique<SplineR2R<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
                                               std::move(multi_splines_ptr), use_offload);
