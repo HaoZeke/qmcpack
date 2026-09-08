@@ -365,13 +365,12 @@ struct test_shared_offload : public test_splines_base<T, 5>
     bs.evaluate_v(pos, v_host);
 
     MultiBsplineOffloadMapper<T> mapped_bs(bs);
-    mapped_bs.mapToDevice();
     mapped_bs.updateToDevice();
 
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
     pos_arr.updateTo();
     Vector<T, OffloadAllocator<T>> v_dev(npad);
-    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), 3, v_dev.data(), npad);
     v_dev.updateFrom();
 
     for (size_t i = 0; i < num_splines; i++)
@@ -428,13 +427,12 @@ struct test_distributed_offload : public test_splines_base<T, 5>
     bs.evaluate_v(pos, v_host);
 
     MultiBsplineOffloadMapper<T> mapped_bs(bs);
-    mapped_bs.mapToDevice();
     mapped_bs.updateToDevice();
 
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
     pos_arr.updateTo();
     Vector<T, OffloadAllocator<T>> v_dev(npad);
-    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), 3, v_dev.data(), npad);
     v_dev.updateFrom();
 
     for (size_t i = 0; i < num_splines; i++)
@@ -485,13 +483,12 @@ struct test_peer_offload : public test_splines_base<T, 5>
     bs.evaluate_v(pos, v_host);
 
     MultiBsplineOffloadMapperPeer<T> mapped_bs(bs, comm);
-    mapped_bs.mapToDevice();
     mapped_bs.updateToDevice();
 
     Vector<T, OffloadAllocator<T>> pos_arr{pos[0], pos[1], pos[2]};
     pos_arr.updateTo();
     Vector<T, OffloadAllocator<T>> v_dev(npad);
-    mapped_bs.mw_evaluate_v(1, pos_arr.data(), v_dev.data(), npad);
+    mapped_bs.mw_evaluate_v(1, pos_arr.data(), 3, v_dev.data(), npad);
     v_dev.updateFrom();
 
     for (size_t i = 0; i < num_splines; i++)
