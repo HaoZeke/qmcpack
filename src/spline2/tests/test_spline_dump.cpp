@@ -37,7 +37,11 @@ std::unique_ptr<MultiBsplineMPIShared<T>> makeTable(const Ugrid grid[3],
                                                     size_t num_splines,
                                                     unsigned distributed_ranks)
 {
-  auto comm = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size());
+  // Communicate's second argument is how many groups to split into, so one
+  // group of every rank is what holds a table distributed over all of them.
+  // The table's blocks live in one MPI-3 shared window, so those ranks are on
+  // one node either way.
+  auto comm = std::make_unique<Communicate>(*OHMMS::Controller, OHMMS::Controller->size() / distributed_ranks);
   return std::make_unique<MultiBsplineMPIShared<T>>(grid, bc, num_splines, std::move(comm), distributed_ranks);
 }
 } // namespace
