@@ -110,7 +110,7 @@ SYCLDeviceManager::SYCLDeviceManager(int& default_device_num, int& num_devices, 
   if (num_devices == 0)
     num_devices = sycl_device_count;
   else if (num_devices != sycl_device_count)
-    throw std::runtime_error("Inconsistent number of SYCL devices with the previous record!");
+    throw std::runtime_error(deviceCountMismatchMessage("SYCL", num_devices, static_cast<int>(sycl_device_count)));
   if (sycl_device_count > local_size)
     app_warning() << "More SYCL devices than the number of MPI ranks. "
                   << "Some devices will be left idle.\n"
@@ -121,7 +121,9 @@ SYCLDeviceManager::SYCLDeviceManager(int& default_device_num, int& num_devices, 
     if (default_device_num < 0)
       default_device_num = sycl_default_device_num;
     else if (default_device_num != sycl_default_device_num)
-      throw std::runtime_error("Inconsistent assigned SYCL devices with the previous record!");
+      throw std::runtime_error(deviceAssignmentMismatchMessage("SYCL", default_device_num, sycl_default_device_num,
+                                                             static_cast<int>(sycl_device_count), local_rank,
+                                                             local_size));
     default_device_queue = std::make_unique<sycl::queue>(visible_devices[sycl_default_device_num].get_context(),
                                                          visible_devices[sycl_default_device_num].get_device(),
                                                          sycl::property::queue::in_order());

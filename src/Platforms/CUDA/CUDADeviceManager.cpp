@@ -26,7 +26,7 @@ CUDADeviceManager::CUDADeviceManager(int& default_device_num, int& num_devices, 
   if (num_devices == 0)
     num_devices = cuda_device_count;
   else if (num_devices != cuda_device_count)
-    throw std::runtime_error("Inconsistent number of CUDA devices with the previous record!");
+    throw std::runtime_error(deviceCountMismatchMessage("CUDA", num_devices, cuda_device_count));
   if (cuda_device_count > local_size)
     app_warning() << "More CUDA devices than the number of MPI ranks. "
                   << "Some devices will be left idle.\n"
@@ -38,7 +38,8 @@ CUDADeviceManager::CUDADeviceManager(int& default_device_num, int& num_devices, 
     if (default_device_num < 0)
       default_device_num = cuda_default_device_num;
     else if (default_device_num != cuda_default_device_num)
-      throw std::runtime_error("Inconsistent assigned CUDA devices with the previous record!");
+      throw std::runtime_error(deviceAssignmentMismatchMessage("CUDA", default_device_num, cuda_default_device_num,
+                                                             cuda_device_count, local_rank, local_size));
 
 #pragma omp parallel
     {
