@@ -1094,7 +1094,7 @@ void MultiDiracDeterminant::mw_evaluateGrads(const RefVectorWithLeader<MultiDira
     }
 
     // restore the modified column of TpsiM.
-    PRAGMA_OFFLOAD("omp target teams distribute parallel for map(from:TpsiM_list_devptr[:nw]) \
+    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) map(from:TpsiM_list_devptr[:nw]) \
                                                        map(always,to:psiM_list_ptr[:nw])")
     for (uint32_t iw = 0; iw < nw; iw++)
       for (uint32_t i = 0; i < NumOrbitals; i++)
