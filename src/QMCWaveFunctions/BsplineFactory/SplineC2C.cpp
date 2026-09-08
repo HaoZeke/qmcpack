@@ -35,10 +35,10 @@ SplineC2C<ST>::SplineC2C(const std::string& my_name,
       SplineInst(std::move(multi_spline)),
       offload_mapper_(use_offload ? std::make_shared<MultiBsplineOffloadMapper<ST>>(*SplineInst) : nullptr)
 {
-  auto GGt_offload(dot(transpose(prim_lattice.G), prim_lattice.G));
+  auto GGt(dot(transpose(prim_lattice.G), prim_lattice.G));
   for (std::uint32_t i = 0; i < 9; i++)
   {
-    (*GGt_offload)[i]            = GGt_offload[i];
+    (*GGt_offload)[i]            = GGt[i];
     (*prim_lattice_G_offload)[i] = prim_lattice_.G[i];
   }
   prim_lattice_G_offload->updateTo();
@@ -568,8 +568,8 @@ inline void SplineC2C<ST>::assign_vgl(const PointType& r,
            g11 = prim_lattice_.G(4), g12 = prim_lattice_.G(5), g20 = prim_lattice_.G(6), g21 = prim_lattice_.G(7),
            g22 = prim_lattice_.G(8);
   const ST x = r[0], y = r[1], z = r[2];
-  const auto& GGt_offload(*GGt_offload);
-  const ST symGG[6] = {GGt_offload[0], GGt_offload[1] + GGt_offload[3], GGt_offload[2] + GGt_offload[6], GGt_offload[4], GGt_offload[5] + GGt_offload[7], GGt_offload[8]};
+  const auto& GGt(*GGt_offload);
+  const ST symGG[6] = {GGt[0], GGt[1] + GGt[3], GGt[2] + GGt[6], GGt[4], GGt[5] + GGt[7], GGt[8]};
 
   const ST* restrict k0 = myKcart_offload->data(0);
   const ST* restrict k1 = myKcart_offload->data(1);
@@ -585,7 +585,7 @@ inline void SplineC2C<ST>::assign_vgl(const PointType& r,
   const ST* restrict h12 = myH.data(4);
   const ST* restrict h22 = myH.data(5);
 
-  const auto& mKK_offload(*mKK_offload);
+  const auto& mKK(*mKK_offload);
 #pragma omp simd
   for (size_t j = first; j < last; ++j)
   {
@@ -621,8 +621,8 @@ inline void SplineC2C<ST>::assign_vgl(const PointType& r,
 
     const ST lcart_r = SymTrace(h00[jr], h01[jr], h02[jr], h11[jr], h12[jr], h22[jr], symGG);
     const ST lcart_i = SymTrace(h00[ji], h01[ji], h02[ji], h11[ji], h12[ji], h22[ji], symGG);
-    const ST lap_r   = lcart_r + mKK_offload[j] * val_r + two * (kX * dX_i + kY * dY_i + kZ * dZ_i);
-    const ST lap_i   = lcart_i + mKK_offload[j] * val_i - two * (kX * dX_r + kY * dY_r + kZ * dZ_r);
+    const ST lap_r   = lcart_r + mKK[j] * val_r + two * (kX * dX_i + kY * dY_i + kZ * dZ_i);
+    const ST lap_i   = lcart_i + mKK[j] * val_i - two * (kX * dX_r + kY * dY_r + kZ * dZ_r);
     psi[j]           = ComplexT(c * val_r - s * val_i, c * val_i + s * val_r);
     dpsi[j][0]       = ComplexT(c * gX_r - s * gX_i, c * gX_i + s * gX_r);
     dpsi[j][1]       = ComplexT(c * gY_r - s * gY_i, c * gY_i + s * gY_r);
@@ -645,7 +645,7 @@ inline void SplineC2C<ST>::assign_vgl_from_l(const PointType& r, ValueVector& ps
   const ST* restrict g1 = myG.data(1);
   const ST* restrict g2 = myG.data(2);
 
-  const auto& mKK_offload(*mKK_offload);
+  const auto& mKK(*mKK_offload);
   const size_t last_cplx = OrbitalSetSize > psi.size() ? psi.size() : OrbitalSetSize;
 #pragma omp simd
   for (size_t j = 0; j < last_cplx; ++j)
@@ -680,8 +680,8 @@ inline void SplineC2C<ST>::assign_vgl_from_l(const PointType& r, ValueVector& ps
     const ST gY_i = dY_i - val_r * kY;
     const ST gZ_i = dZ_i - val_r * kZ;
 
-    const ST lap_r = myL[jr] + mKK_offload[j] * val_r + two * (kX * dX_i + kY * dY_i + kZ * dZ_i);
-    const ST lap_i = myL[ji] + mKK_offload[j] * val_i - two * (kX * dX_r + kY * dY_r + kZ * dZ_r);
+    const ST lap_r = myL[jr] + mKK[j] * val_r + two * (kX * dX_i + kY * dY_i + kZ * dZ_i);
+    const ST lap_i = myL[ji] + mKK[j] * val_i - two * (kX * dX_r + kY * dY_r + kZ * dZ_r);
 
     psi[j]     = ComplexT(c * val_r - s * val_i, c * val_i + s * val_r);
     dpsi[j][0] = ComplexT(c * gX_r - s * gX_i, c * gX_i + s * gX_r);
