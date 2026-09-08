@@ -15,7 +15,7 @@ set(UTEST_NAME deterministic-unit_test_${SRC_DIR})
 
 set(SRCS test_multi_spline.cpp)
 if(HAVE_MPI)
-  list(APPEND SRCS test_multi_spline_MPI_shared.cpp)
+  list(APPEND SRCS test_multi_spline_MPI_shared.cpp test_spline_dump.cpp)
 endif()
 
 add_executable(${UTEST_EXE} ${SRCS})
@@ -28,3 +28,10 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+
+if(HAVE_MPI)
+  # A table distributed over more than one rank is more than one coefficient
+  # block, and the dump then holds more than one dataset. One rank cannot reach
+  # that case, so the same executable also runs on two.
+  add_unit_test(${UTEST_NAME}-r2 2 1 $<TARGET_FILE:${UTEST_EXE}>)
+endif()

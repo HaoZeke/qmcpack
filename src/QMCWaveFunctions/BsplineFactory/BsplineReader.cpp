@@ -23,6 +23,7 @@
 #include "Message/CommOperators.h"
 #include <PlatformSelector.hpp>
 #include "einspline_helper.hpp"
+#include "spline2/SplineUtils.h"
 
 #include <array>
 #include <filesystem>
@@ -116,7 +117,8 @@ std::unique_ptr<SPOSet> BsplineReader::create_spline_set(const std::string& spo_
 
 bool BsplineReader::lookforSplineDataDumpFile(const BandInfoGroup& bandgroup,
                                               const std::string& keyword,
-                                              size_t datatype_size) const
+                                              size_t datatype_size,
+                                              size_t num_blocks) const
 {
   int foundspline = 0;
   if (myComm->rank() == 0)
@@ -134,6 +136,20 @@ bool BsplineReader::lookforSplineDataDumpFile(const BandInfoGroup& bandgroup,
       int sizeD   = 0;
       foundspline = h5f.readEntry(sizeD, "sizeof");
       foundspline = (sizeD == datatype_size);
+    }
+    if (foundspline)
+    {
+      // One dataset per coefficient block, so a dump holding a different number
+      // of them cannot be read into this table. A dump carrying no count holds
+      // a single block.
+      int dump_blocks = 1;
+      if (!h5f.readEntry(dump_blocks, splineDumpNumBlocksName()))
+        dump_blocks = 1;
+      foundspline = (static_cast<size_t>(dump_blocks) == num_blocks);
+      if (!foundspline)
+        app_log() << "  Spline coefficient dump " << getSplineDumpFileName(bandgroup) << " holds " << dump_blocks
+                  << " coefficient block(s) and this run needs " << num_blocks
+                  << ". Transforming the orbitals instead of restoring them." << std::endl;
     }
     h5f.close();
   }

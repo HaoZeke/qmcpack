@@ -10,7 +10,6 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include "SplineUtils.h"
-#include <sstream>
 #include "spline2/MultiBsplineBase.hpp"
 #include "spline2/MultiBspline1D.hpp"
 #include "spline2/einspline_engine.hpp"
@@ -21,32 +20,24 @@ namespace qmcplusplus
 template<typename ST>
 bool SplineUtils<ST>::read(MultiBsplineBase<ST>& spline, hdf_archive& h5f)
 {
-  std::ostringstream o;
   bool success = true;
-  int my_index = 0;
-  do
+  for (size_t iblock = 0; iblock < spline.getNumBlocks() && success; iblock++)
   {
-    o << "spline_" << my_index;
-    einspline_engine<ST, 3> bigtable(spline.getBlock(my_index));
-    success = h5f.readEntry(bigtable, o.str());
-    my_index++;
-  } while (my_index < spline.getNumBlocks() && success);
+    einspline_engine<ST, 3> bigtable(spline.getBlock(iblock));
+    success = h5f.readEntry(bigtable, blockDatasetName(iblock));
+  }
   return success;
 }
 
 template<typename ST>
 bool SplineUtils<ST>::write(MultiBsplineBase<ST>& spline, hdf_archive& h5f)
 {
-  std::ostringstream o;
   bool success = true;
-  int my_index = 0;
-  do
+  for (size_t iblock = 0; iblock < spline.getNumBlocks() && success; iblock++)
   {
-    o << "spline_" << my_index;
-    einspline_engine<ST, 3> bigtable(spline.getBlock(my_index));
-    success = h5f.writeEntry(bigtable, o.str());
-    my_index++;
-  } while (my_index < spline.getNumBlocks() && success);
+    einspline_engine<ST, 3> bigtable(spline.getBlock(iblock));
+    success = h5f.writeEntry(bigtable, blockDatasetName(iblock));
+  }
   return success;
 }
 

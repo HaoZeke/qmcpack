@@ -16,12 +16,25 @@
 #include "hdf/hdf_archive.h"
 #include "Message/Communicate.h"
 
+#include <string>
+
 namespace qmcplusplus
 {
 template<typename T>
 class MultiBsplineBase;
 template<typename T>
 class MultiBspline1D;
+
+/** name of the dataset holding one block of coefficients in a spline dump
+ *
+ * A table distributed over N ranks is N blocks, each its own dataset, so the
+ * name has to carry the block index. Save and restore share this one function
+ * so a dump can only be read back under the name it was written with.
+ */
+inline std::string blockDatasetName(size_t iblock) { return "spline_" + std::to_string(iblock); }
+
+/// number of coefficient blocks a dump holds, recorded so a restore can refuse a different distribution
+inline const char* splineDumpNumBlocksName() { return "num_blocks"; }
 
 template<typename ST>
 class SplineUtils

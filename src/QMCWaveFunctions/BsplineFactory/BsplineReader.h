@@ -189,9 +189,18 @@ protected:
    * @param bspline the spline object being worked on
    * @return true if dumpfile pass class name and data type size check
    */
+  /** whether a restorable spline dump for this band group is already on disk
+   *
+   * @param num_blocks how many coefficient blocks the table to restore into
+   *        holds. A dump recording a different number was written under a
+   *        different distribution across ranks and holds a different set of
+   *        datasets, so it is reported as absent and the caller transforms
+   *        rather than half-reading it.
+   */
   bool lookforSplineDataDumpFile(const BandInfoGroup& bandgroup,
                                  const std::string& keyword,
-                                 size_t datatype_size) const;
+                                 size_t datatype_size,
+                                 size_t num_blocks) const;
 
   /** read planewave coefficients from h5 file
    * @param s data set full path in h5
