@@ -208,8 +208,16 @@ struct JeeIMultiWalkerMem : public Resource
   template<typename FARRAY>
   void packFunctors(const FARRAY& F, int eGroups, int iGroups)
   {
+    /* The flat index below is built from an ion group and two electron groups,
+     * so the table has iGroups * eGroups * eGroups entries and not eGroups
+     * cubed. Sizing it by the electron count is only large enough while there
+     * are no more ion species than electron groups, which is every deck with
+     * one species and two spins, and is why this held on diamond, bccH and
+     * monoO. On a cell with three ion species and two spin channels the index
+     * reaches 11 in a table of 8.
+     */
     const size_t ncombo = static_cast<size_t>(iGroups) * eGroups * eGroups;
-    fn_have.resize(static_cast<size_t>(eGroups) * eGroups * eGroups);
+    fn_have.resize(ncombo);
     std::fill(fn_have.begin(), fn_have.end(), char(0));
 
     const auto* sample = [&]() -> decltype(F(0, 0, 0)) {
@@ -229,7 +237,7 @@ struct JeeIMultiWalkerMem : public Resource
     C          = sample->getC();
     L          = VALT(0.5) * sample->cutoff_radius;
 
-    gamma_flat.resize(gamma_size * static_cast<size_t>(eGroups) * eGroups * eGroups);
+    gamma_flat.resize(gamma_size * ncombo);
     std::fill(gamma_flat.begin(), gamma_flat.end(), VALT(0));
     for (int ig = 0; ig < iGroups; ig++)
       for (int jg = 0; jg < eGroups; jg++)
@@ -747,6 +755,7 @@ public:
 
     const int Nion    = wfc_leader.Nion;
     const int eGroups = wfc_leader.eGroups;
+    const int iGroups = wfc_leader.iGroups;
     const auto& refPS = vp_leader.getRefPS();
     mem.vp_jg.resize(nVPs);
     for (size_t ivp = 0; ivp < nVPs; ivp++)
@@ -777,8 +786,8 @@ public:
     PRAGMA_OFFLOAD("omp target teams distribute \
                     map(to: refp[:nVPs], walker_of[:nVPs], jg_of[:nVPs]) \
                     map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb]) \
-                    map(to: gamma_flat[:gsize * eGroups * eGroups * eGroups], \
-                            fn_have[:eGroups * eGroups * eGroups]) \
+                    map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
+                            fn_have[:iGroups * eGroups * eGroups]) \
                     map(to: ion_cut[:Nion], ion_grp[:Nion]) \
                     map(always, from: vals[:nVPs]) \
                     is_device_ptr(mw_ei, mw_ee)")
@@ -975,6 +984,7 @@ public:
     const int Nelec_l  = wfc_leader.Nelec;
     const int Nion     = wfc_leader.Nion;
     const int eGroups  = wfc_leader.eGroups;
+    const int iGroups  = wfc_leader.iGroups;
     const int jg       = p_leader.GroupID[iat];
     const size_t nfield = 5;
 
@@ -1033,8 +1043,8 @@ public:
                       map(to: memb_ion[:n_memb], memb_grp[:n_memb]) \
                       map(to: inv_off[:n_inv_off], inv_ent[:n_inv_ent]) \
                       map(alloc: jpart_ptr[:delta_len]) \
-                      map(to: gamma_flat[:gsize * eGroups * eGroups * eGroups], \
-                              fn_have[:eGroups * eGroups * eGroups]) \
+                      map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
+                              fn_have[:iGroups * eGroups * eGroups]) \
                       map(to: ion_cut[:Nion], ion_grp[:Nion]) \
                       map(always, from: delta_ptr[:delta_len], reduce_ptr[:na * 10]) \
                       is_device_ptr(mw_ei, mw_ee)")
