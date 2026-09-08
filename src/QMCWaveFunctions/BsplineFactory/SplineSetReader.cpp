@@ -52,18 +52,16 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 
   if (use_offload)
   {
-    // Sharing is supported on offload builds: the coefficients live in one MPI-3 shared
-    // window per group of ranks and each rank maps that window onto its own device.
-    // Distributing is supported for the complex offload SPO, whose evaluation paths all
-    // walk the blocks. The real one still reaches the coefficients through
-    // getSplinePtr(), which requires a single block, so it stays restricted.
-#if !defined(QMC_COMPLEX)
-    if (distributed_ranks > 1)
-      app_warning() << "Offload implementation doesn't support distributing the memory of spline coefficients "
-                       "for real-valued orbitals. Overriding distributed_ranks to 1."
-                    << std::endl;
-    distributed_ranks = 1;
-#endif
+    // Both are supported on an offload build now. Sharing puts the coefficients in
+    // one MPI-3 shared window per group of ranks, each rank mapping that window onto
+    // its own device. Distributing divides the orbitals across the group, which needs
+    // every evaluation path to index by block: SplineC2C and SplineC2R do that
+    // directly, and SplineR2R's two multi-walker paths go through
+    // MultiBsplineOffloadMapper, which walks the blocks itself.
+    //
+    // Orbital rotation is the exception and says so where it happens: it mixes every
+    // orbital with every other, so a divided table would need a cross-block gemm
+    // rather than a change of indexing, and the three SPO classes throw for it.
 #if !defined(HAVE_MPI)
     if (shared_ranks > 1)
       app_warning() << "Sharing the memory of spline coefficients requires an MPI build. "

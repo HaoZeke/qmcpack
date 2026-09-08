@@ -13,6 +13,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 
+#include <stdexcept>
 #include "SplineR2R.h"
 #include "Concurrency/OpenMP.h"
 #include "spline2/MultiBspline.hpp"
@@ -64,6 +65,13 @@ void SplineR2R<ST>::finalizeConstruction()
 template<typename ST>
 void SplineR2R<ST>::storeParamsBeforeRotation()
 {
+  // Rotation mixes every orbital with every other, so with the coefficients divided
+  // into blocks each output block would need input from all of them: a cross-block
+  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // a single block. Saying so here beats the bare throw from getSplinePtr().
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineR2R: orbital rotation is not implemented for coefficients "
+                             "distributed across ranks; set distributed_ranks to 1 for optimisation runs.");
   const auto spline_ptr     = SplineInst->getSplinePtr();
   const auto coefs_tot_size = spline_ptr->coefs_size;
   coef_copy_                = std::make_shared<std::vector<ST>>(coefs_tot_size);
@@ -113,6 +121,13 @@ void SplineR2R<ST>::storeParamsBeforeRotation()
 template<typename ST>
 void SplineR2R<ST>::applyRotation(const ValueMatrix& rot_mat, bool use_stored_copy)
 {
+  // Rotation mixes every orbital with every other, so with the coefficients divided
+  // into blocks each output block would need input from all of them: a cross-block
+  // gemm rather than a change of indexing. Orbital optimisation therefore still needs
+  // a single block. Saying so here beats the bare throw from getSplinePtr().
+  if (SplineInst->getNumBlocks() > 1)
+    throw std::runtime_error("SplineR2R: orbital rotation is not implemented for coefficients "
+                             "distributed across ranks; set distributed_ranks to 1 for optimisation runs.");
   // SplineInst is a MultiBspline. See src/spline2/MultiBspline.hpp
   const auto spline_ptr = SplineInst->getSplinePtr();
   assert(spline_ptr != nullptr);
@@ -268,7 +283,6 @@ void SplineR2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   mw_offload_scratch.resize(spline_padded_size * mw_nVP);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr    = SplineInst->getSplinePtr();
   auto* offload_scratch_ptr = mw_offload_scratch.data();
   auto* buffer_H2D_ptr      = det_ratios_buffer_H2D.data();
   auto* ratios_private_ptr  = mw_ratios_private.data();
@@ -448,7 +462,6 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
   rg_private.resize(num_pos, NumTeams * 4);
 
   // Ye: need to extract sizes and pointers before entering target region
-  const auto* spline_ptr         = SplineInst->getSplinePtr();
   auto* buffer_H2D_ptr           = buffer_H2D.data();
   auto* offload_scratch_ptr      = mw_offload_scratch.data();
   auto* GGt_ptr                  = GGt_offload->data();
