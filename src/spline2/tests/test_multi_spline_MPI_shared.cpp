@@ -385,9 +385,10 @@ struct test_shared_offload : public test_splines_base<T, 5>
  * would let a multi-device node stop holding an identical copy of the coefficients on
  * every device. MultiBsplineOffloadMapper::mw_evaluate_v already walks the blocks,
  * taking each block's own spline pointer and coefficients and writing its results at
- * that block's offset, so the device side of that arrangement is testable now even
- * though no SPO class asks for it yet: SplineC2COMPTarget and SplineC2ROMPTarget reach
- * the coefficients through getSplinePtr(), which throws with more than one block.
+ * that block's offset. SplineC2C indexes by block on every one of its evaluation
+ * paths, so a complex offload build reaches this from a deck; SplineC2R still takes
+ * the coefficients through getSplinePtr(), which throws with more than one block, so a
+ * real-valued build does not.
  *
  * The device result is compared against the host evaluation of the same object, which
  * walks the blocks too, so what is under test is that the blocked device path agrees

@@ -36,17 +36,18 @@ namespace qmcplusplus
  * copy per group of ranks, but has no route to a device. MultiBsplineOffloadMapper
  * already maps an arbitrary host spline onto devices. This joins the two.
  *
- * Sharing is what the SPO evaluation can consume today, and it is what the reader asks
- * for. Distributing is accepted by the constructor because the machinery underneath
- * supports it, MultiBsplineMPIShared divides the orbitals into blocks and
- * MultiBsplineOffloadMapper maps and evaluates every block, but it is not yet reachable
- * from a deck: several evaluation paths in SplineC2COMPTarget and SplineC2ROMPTarget
- * still call getSplinePtr(), which throws unless there is exactly one block.
+ * Both are reachable from a deck on a complex offload build. MultiBsplineMPIShared
+ * divides the orbitals into blocks, MultiBsplineOffloadMapper maps and evaluates every
+ * block, and every evaluation path in SplineC2C now indexes by block, so
+ * SplineSetReader no longer overrides distributed_ranks to 1 there. A real-valued
+ * build still does, because SplineC2R reaches the coefficients through getSplinePtr(),
+ * which throws unless there is exactly one block.
  *
- * With one block, device memory is unchanged: each rank maps the whole table onto its
- * own device, and what shrinks is host memory, by the size of the sharing group. Device
- * memory is the ceiling that actually limits walkers per device, and only distributing
- * moves it.
+ * The distinction is worth keeping straight, because the two halves buy different
+ * things. With one block per rank, device memory is unchanged: each rank maps the whole
+ * table onto its own device and what shrinks is host memory, by the size of the sharing
+ * group. Device memory is the ceiling that limits walkers per device, and only
+ * distributing moves it.
  */
 template<typename T>
 class MultiBsplineMPISharedOffload : public MultiBsplineMPIShared<T>
@@ -85,7 +86,9 @@ public:
       mapper_ = std::make_unique<MultiBsplineOffloadMapperPeer<T>>(*this, Base::getSharingComm());
     else
       mapper_ = std::make_unique<MultiBsplineOffloadMapper<T>>(*this);
-    mapper_->mapToDevice();
+    // Both of those map in their own constructor, so there is nothing to call
+    // here. mapToDevice is protected on the base and reaching it through a base
+    // pointer would not compile even if there were.
   }
 
   /** copy the coefficients to the device and repair the device-side coefs pointer.
@@ -95,7 +98,7 @@ public:
    * the device from mapToDevice, so mapping it here copies into that allocation, and
    * naming it in the clause is what makes the assignment below store a device address
    * rather than a host one. The fixup is required because the offload kernels in
-   * SplineC2COMPTarget dereference spline_m->coefs inside the target region.
+   * SplineC2C dereference spline_m->coefs inside the target region.
    */
   void finalize() override
   {
