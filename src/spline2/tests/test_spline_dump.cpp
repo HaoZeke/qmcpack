@@ -16,6 +16,7 @@
 #include "einspline/bspline_create.h"
 #include "hdf/hdf_archive.h"
 #include "Message/Communicate.h"
+#include "Message/CommOperators.h"
 #include "Utilities/FairDivide.h"
 
 #include <filesystem>
