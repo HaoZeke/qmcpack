@@ -118,17 +118,29 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
     check_twists(*bspline, bandgroup);
   }
 
-  bool foundspline = lookforSplineDataDumpFile(bandgroup, bspline->getKeyword(), sizeof(ST));
-  if (foundspline && myComm->rank() == 0)
+  bool foundspline =
+      lookforSplineDataDumpFile(bandgroup, bspline->getKeyword(), sizeof(ST), multi_splines.getNumBlocks());
+  if (foundspline)
   {
-    Timer now;
-    hdf_archive h5f(myComm);
-    const auto splinefile = getSplineDumpFileName(bandgroup);
-    h5f.open(splinefile, H5F_ACC_RDONLY);
-    foundspline = SplineUtils<ST>::read(multi_splines, h5f);
-    if (foundspline)
-      app_log() << "  Successfully restored 3D B-spline coefficients from " << splinefile << ". The reading time is "
-                << now.elapsed() << " sec." << std::endl;
+    int restored = 0;
+    if (myComm->rank() == 0)
+    {
+      Timer now;
+      hdf_archive h5f(myComm);
+      const auto splinefile = getSplineDumpFileName(bandgroup);
+      h5f.open(splinefile, H5F_ACC_RDONLY);
+      restored = SplineUtils<ST>::read(multi_splines, h5f);
+      if (restored)
+        app_log() << "  Successfully restored 3D B-spline coefficients from " << splinefile << ". The reading time is "
+                  << now.elapsed() << " sec." << std::endl;
+      else
+        app_log() << "  Spline coefficient dump " << splinefile
+                  << " did not read back. Transforming the orbitals instead." << std::endl;
+    }
+    // Only rank 0 reads, and the alternative to reading is a collective gather,
+    // so every rank needs the same answer about which of the two happens.
+    myComm->bcast(restored);
+    foundspline = restored;
   }
 
   /* create a sub communicator. spline table is shared across MPI ranks with identical subcomm rank id.
@@ -160,6 +172,8 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
       h5f.write(classname, "class_name");
       int sizeD = sizeof(ST);
       h5f.write(sizeD, "sizeof");
+      int num_blocks = multi_splines.getNumBlocks();
+      h5f.write(num_blocks, splineDumpNumBlocksName());
       SplineUtils<ST>::write(multi_splines, h5f);
       h5f.close();
       app_log() << "  Stored spline coefficients in " << splinefile << " for potential reuse. The writing time is "
