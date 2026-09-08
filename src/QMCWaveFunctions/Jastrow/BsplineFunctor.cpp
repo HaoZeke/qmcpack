@@ -117,6 +117,12 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
    * per walker and needs nothing but the distances. j == iat is skipped in both, so that
    * entry of cur_allu stays untouched exactly as the single region left it.
    *
+   * The second region keeps a team per walker and component and reduces over the sources
+   * inside it. One thread per walker and component instead gives nw*(DIM+2) threads, a
+   * couple of warps for a batch, each walking n_src strided loads in sequence; the sources
+   * are the dimension worth spreading a team across, and the team is sized from their
+   * count the same way the value kernel's is.
+   *
    * The mapping sits outside both so the data movement is what it was: the distances go up
    * once and cur_allu comes down once, rather than once per region.
    */
@@ -159,10 +165,22 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
         cur_allu[j + n_padded * 2] = d2udr2;
       }
 
-    /* One thread per walker and output component. Five serial sums over n_src rather than
-     * five reductions across a team, which is what lets this be a combined construct.
+    /* A team per walker and output component, reducing over the sources. The team is far
+     * wider than n_src unless it is told otherwise, so it is told, and the same environment
+     * override the value kernel takes applies here.
      */
-    PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) is_device_ptr(mw_vgl)")
+    const int team_width = [n_src] {
+      int width = 32;
+      while (width < n_src && width < 1024)
+        width *= 2;
+      if (const char* c = std::getenv("QMCPACK_JASTROW_TEAM_WIDTH"))
+        if (const int v = std::atoi(c); v > 0)
+          width = v;
+      return width;
+    }();
+
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) thread_limit(team_width) \
+                      is_device_ptr(mw_vgl)")
     for (int ip = 0; ip < nw; ip++)
       for (int comp = 0; comp < DIM + 2; comp++)
       {
@@ -170,6 +188,7 @@ void BsplineFunctor<REAL>::mw_evaluateVGL(const int iat,
         const REAL* cur_allu = mw_cur_allu + ip * n_padded * 3;
 
         REAL sum(0);
+        PRAGMA_OFFLOAD("omp parallel for reduction(+: sum)")
         for (int j = 0; j < n_src; j++)
         {
           if (j == iat)
