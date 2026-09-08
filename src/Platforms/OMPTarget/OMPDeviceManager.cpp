@@ -27,7 +27,7 @@ OMPDeviceManager::OMPDeviceManager(int& default_device_num, int& num_devices, in
   if (num_devices == 0)
     num_devices = omp_device_count;
   else if (num_devices != omp_device_count)
-    throw std::runtime_error("Inconsistent number of OpenMP devices with the previous record!");
+    throw std::runtime_error(deviceCountMismatchMessage("OpenMP", num_devices, omp_device_count));
   if (omp_device_count > local_size)
     app_warning() << "More OpenMP devices than the number of MPI ranks. "
                   << "Some devices will be left idle.\n"
@@ -38,7 +38,8 @@ OMPDeviceManager::OMPDeviceManager(int& default_device_num, int& num_devices, in
     if (default_device_num < 0)
       default_device_num = omp_default_device_num;
     else if (default_device_num != omp_default_device_num)
-      throw std::runtime_error("Inconsistent assigned OpenMP devices with the previous record!");
+      throw std::runtime_error(deviceAssignmentMismatchMessage("OpenMP", default_device_num, omp_default_device_num,
+                                                             omp_device_count, local_rank, local_size));
     omp_set_default_device(omp_default_device_num);
   }
 }
