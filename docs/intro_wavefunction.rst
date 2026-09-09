@@ -309,6 +309,9 @@ Additional information:
     from k space to B-spline requires more than the available amount of
     scratch memory on the compute nodes, users can perform this step on
     fat nodes and transfer back the h5 file for QMC calculations.
+    The file holds one dataset per coefficient block, so its layout follows the
+    ``distributed_ranks`` of the run that wrote it. A run whose layout differs
+    reports the file as unusable and redoes the transformation.
 
 - skip_checks
     When converting the wave function from convertpw4qmc instead
