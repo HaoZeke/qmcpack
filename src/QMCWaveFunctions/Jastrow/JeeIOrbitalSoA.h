@@ -438,6 +438,10 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   ResourceHandle<JeeIMultiWalkerMem<valT>> mw_mem_handle_;
   /// what the batched accept spends flattening the membership for the device
   NewTimer& accept_pack_timer_;
+  /// and rebuilding the functor's gamma table, which has no gate of its own
+  NewTimer& accept_functor_timer_;
+  /// and the ion cutoffs and groups
+  NewTimer& accept_ions_timer_;
   /// and what it spends in the kernel that follows
   NewTimer& accept_kernel_timer_;
 
@@ -517,6 +521,8 @@ public:
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         Ions(ions),
         accept_pack_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_pack", timer_level_fine)),
+        accept_functor_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_functors", timer_level_fine)),
+        accept_ions_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_ions", timer_level_fine)),
         accept_kernel_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_kernel", timer_level_fine))
   {
     if (my_name_.empty())
@@ -1092,10 +1098,21 @@ public:
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    /* One timer each. The first version of this put one scope around all three and
+     * the 59.675 s it reported was attributed to the membership by reading the
+     * code, which is the mistake this campaign keeps making. packFunctors has no
+     * gate at all and rebuilds the gamma table every accept.
+     */
     {
       ScopedTimer pack(wfc_leader.accept_pack_timer_);
       mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
+    }
+    {
+      ScopedTimer functors(wfc_leader.accept_functor_timer_);
       mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+    }
+    {
+      ScopedTimer ions(wfc_leader.accept_ions_timer_);
       mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
     }
 
