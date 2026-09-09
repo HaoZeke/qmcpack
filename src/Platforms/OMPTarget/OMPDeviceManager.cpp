@@ -39,7 +39,7 @@ OMPDeviceManager::OMPDeviceManager(int& default_device_num, int& num_devices, in
       default_device_num = omp_default_device_num;
     else if (default_device_num != omp_default_device_num)
       throw std::runtime_error(deviceAssignmentMismatchMessage("OpenMP", default_device_num, omp_default_device_num,
-                                                             omp_device_count, local_rank, local_size));
+                                                               omp_device_count, local_rank, local_size));
     omp_set_default_device(omp_default_device_num);
   }
 }

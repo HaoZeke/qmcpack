@@ -122,8 +122,8 @@ SYCLDeviceManager::SYCLDeviceManager(int& default_device_num, int& num_devices, 
       default_device_num = sycl_default_device_num;
     else if (default_device_num != sycl_default_device_num)
       throw std::runtime_error(deviceAssignmentMismatchMessage("SYCL", default_device_num, sycl_default_device_num,
-                                                             static_cast<int>(sycl_device_count), local_rank,
-                                                             local_size));
+                                                               static_cast<int>(sycl_device_count), local_rank,
+                                                               local_size));
     default_device_queue = std::make_unique<sycl::queue>(visible_devices[sycl_default_device_num].get_context(),
                                                          visible_devices[sycl_default_device_num].get_device(),
                                                          sycl::property::queue::in_order());
