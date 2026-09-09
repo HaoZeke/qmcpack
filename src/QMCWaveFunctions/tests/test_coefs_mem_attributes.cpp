@@ -10,6 +10,7 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "OhmmsData/Libxml2Doc.h"
 #include "QMCWaveFunctions/BsplineFactory/EinsplineSetBuilder.h"
@@ -32,6 +33,11 @@ static std::string sposetWith(const std::string& coefs_mem)
 
 TEST_CASE("coefs_mem attributes", "[wavefunction]")
 {
+  // Every request is checked against the ranks per node, so what a section may ask for
+  // depends on how many ranks are running it. A value of 1 divides any count, and any
+  // other value is asserted against this.
+  const int ranks_per_node = OHMMS::Controller->NodeComm().size();
+
   SECTION("defaults are one and one")
   {
     Libxml2Document doc;
@@ -39,15 +45,6 @@ TEST_CASE("coefs_mem attributes", "[wavefunction]")
     const auto [distributed_ranks, shared_ranks] = testing::obtainMemoryAttributes(doc.getRoot());
     CHECK(distributed_ranks == 1);
     CHECK(shared_ranks == 1);
-  }
-
-  SECTION("both are read from the node")
-  {
-    Libxml2Document doc;
-    REQUIRE(doc.parseFromString(sposetWith(R"(<coefs_mem distributed_ranks="2" shared_ranks="3"/>)")));
-    const auto [distributed_ranks, shared_ranks] = testing::obtainMemoryAttributes(doc.getRoot());
-    CHECK(distributed_ranks == 2);
-    CHECK(shared_ranks == 3);
   }
 
   SECTION("values below one are raised to one")
@@ -59,27 +56,39 @@ TEST_CASE("coefs_mem attributes", "[wavefunction]")
     CHECK(shared_ranks == 1);
   }
 
-  SECTION("a product the ranks per node do not divide is refused")
+  SECTION("both attributes are read, and both take part in the check")
   {
-    const int node_comm_size = OHMMS::Controller->NodeComm().size();
-
-    // shared_ranks alone has to be able to fail the check. The product is what the
-    // ranks per node must divide, so a request the node cannot honour is refused
-    // whichever of the two attributes carries it.
-    Libxml2Document shared_only;
-    REQUIRE(shared_only.parseFromString(sposetWith(R"(<coefs_mem shared_ranks="7"/>)")));
-    if (node_comm_size % 7 > 0)
-      CHECK_THROWS_AS(testing::obtainMemoryAttributes(shared_only.getRoot()), std::runtime_error);
+    Libxml2Document doc;
+    REQUIRE(doc.parseFromString(sposetWith(R"(<coefs_mem distributed_ranks="2" shared_ranks="3"/>)")));
+    if (ranks_per_node % 6 == 0)
+    {
+      const auto [distributed_ranks, shared_ranks] = testing::obtainMemoryAttributes(doc.getRoot());
+      CHECK(distributed_ranks == 2);
+      CHECK(shared_ranks == 3);
+    }
     else
-      CHECK_NOTHROW(testing::obtainMemoryAttributes(shared_only.getRoot()));
+    {
+      // the message names the product, so it says what both attributes were read as
+      CHECK_THROWS_WITH(testing::obtainMemoryAttributes(doc.getRoot()),
+                        Catch::Matchers::ContainsSubstring("distributed_ranks and shared_ranks (6)"));
+    }
+  }
 
-    // and so does the product of two values each of which divides it
-    Libxml2Document both;
-    REQUIRE(both.parseFromString(sposetWith(R"(<coefs_mem distributed_ranks="1" shared_ranks="5"/>)")));
-    if (node_comm_size % 5 > 0)
-      CHECK_THROWS_AS(testing::obtainMemoryAttributes(both.getRoot()), std::runtime_error);
+  SECTION("shared_ranks alone can fail the check")
+  {
+    // The product is what the ranks per node have to divide, so a request the node
+    // cannot honour is refused whichever attribute carries it. With distributed_ranks
+    // left at its default, an unparenthesised check has nothing to test.
+    Libxml2Document doc;
+    REQUIRE(doc.parseFromString(sposetWith(R"(<coefs_mem shared_ranks="7"/>)")));
+    if (ranks_per_node % 7 == 0)
+    {
+      const auto [distributed_ranks, shared_ranks] = testing::obtainMemoryAttributes(doc.getRoot());
+      CHECK(distributed_ranks == 1);
+      CHECK(shared_ranks == 7);
+    }
     else
-      CHECK_NOTHROW(testing::obtainMemoryAttributes(both.getRoot()));
+      CHECK_THROWS_AS(testing::obtainMemoryAttributes(doc.getRoot()), std::runtime_error);
   }
 }
 } // namespace qmcplusplus
