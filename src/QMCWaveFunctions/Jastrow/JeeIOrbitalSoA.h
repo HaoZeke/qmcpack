@@ -23,6 +23,7 @@
 #include "CPU/SIMD/aligned_allocator.hpp"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "CPU/SIMD/algorithm.hpp"
+#include "Utilities/TimerManager.h"
 #include <map>
 #include <numeric>
 #include <memory>
@@ -335,6 +336,10 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   /// device path for mw_evaluateRatios; off unless the target particle set is offloaded
   bool use_offload_ = false;
   ResourceHandle<JeeIMultiWalkerMem<valT>> mw_mem_handle_;
+  /// what the batched accept spends flattening the membership for the device
+  NewTimer& accept_pack_timer_;
+  /// and what it spends in the kernel that follows
+  NewTimer& accept_kernel_timer_;
 
   /// work buffer size
   size_t Nbuffer;
@@ -410,7 +415,9 @@ public:
       : WaveFunctionComponent(obj_name),
         ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        Ions(ions)
+        Ions(ions),
+        accept_pack_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_pack", timer_level_fine)),
+        accept_kernel_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_kernel", timer_level_fine))
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
@@ -972,13 +979,21 @@ public:
 
     auto& mem = wfc_leader.mw_mem_handle_.getResource();
 
+    /* The accept's three parts, separated because the whole of it costs 48 s of a 267 s
+     * run on a 23 ion, 586 electron slab and which part is not readable from the source.
+     * packMembership's gate compares a membership version per walker, and an accept is
+     * what bumps that version, so the gate serves the ratio path and cannot fire here.
+     */
     // the membership still describes the configuration before any of these moves lands
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
-    mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
-    mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    {
+      ScopedTimer pack(wfc_leader.accept_pack_timer_);
+      mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
+      mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+      mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    }
 
     const int na       = accepted.size();
     const int Nelec_l  = wfc_leader.Nelec;
@@ -1037,6 +1052,7 @@ public:
     constexpr RealType lapfac(OHMMS_DIM - 1);
 
     {
+      ScopedTimer kern(wfc_leader.accept_kernel_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
                       map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
