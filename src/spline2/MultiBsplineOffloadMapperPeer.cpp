@@ -10,9 +10,6 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include "MultiBsplineOffloadMapperPeer.hpp"
-// the allreduce specialisations: Communicate.h declares the template, and the
-// int form that reduces the failure flag is defined here
-#include "Message/CommOperators.h"
 #include "Message/UniformCommunicateError.h"
 #include "config.h"
 
@@ -112,7 +109,10 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
    * left. So the failure is reduced first and every rank raises it.
    */
   int failed = local_error.empty() ? 0 : 1;
-  comm_.allreduce(failed);
+  // raw MPI_Allreduce for the same reason the handle broadcast above is raw: the
+  // Communicate wrappers live in a header that pulls in the PETE containers, and
+  // this target's include set does not carry them
+  MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, comm_.getMPI());
   if (failed)
   {
     // a rank that succeeded has to undo what it did before it throws, or the
