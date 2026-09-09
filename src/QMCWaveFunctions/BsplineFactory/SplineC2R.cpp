@@ -564,38 +564,32 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   // orbital range, so a block boundary must not fall inside either.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
+  const bool single_block =
+      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
 
   {
     ScopedTimer offload(offload_timer_);
 
-    for (size_t ib = 0; ib < num_blocks; ib++)
+    if (single_block)
     {
-      const auto* spline_ptr = &SplineInst->getBlock(ib);
-      /* The coefficient pointer is read here, on the host, and passed in. Reading
-       * spline_ptr->coefs inside the region instead reads the device copy of the
-       * struct, whose coefs member is right only if the runtime attached it to the
-       * mapped buffer, and mapToDevice maps a separate variable rather than the
-       * member. Develop hoists it for the same reason. The spline2 unit tests
-       * never reach the difference, because they call the mapper's own methods,
-       * which pass block_coefs_ and never read the member on the device.
-       */
-      const auto* block_coefs    = spline_ptr->coefs;
-      const size_t block_splines = spline_ptr->num_splines;
-      if (block_splines == 0)
-        continue;
-      const size_t block_offset = block_offsets[ib];
-      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+      const auto* spline_ptr = &SplineInst->getBlock(0);
+      // hoisted for the same reason as in the blocked path below
+      const auto* block_coefs = spline_ptr->coefs;
 
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
-                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
+                  map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
       for (int iat = 0; iat < mw_nVP; iat++)
-        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        for (int team_id = 0; team_id < NumTeams; team_id++)
         {
           const size_t first = ChunkSizePerTeam * team_id;
-          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
           auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-          auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+          auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
+          auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
+          auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
+          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
           int ix, iy, iz;
           ST a[4], b[4], c[4];
@@ -605,41 +599,100 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
           PRAGMA_OFFLOAD("omp parallel for")
           for (int index = 0; index < last - first; index++)
             spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
-                                               offload_scratch_iat_ptr + block_offset + first + index);
+                                               offload_scratch_iat_ptr + first + index);
+
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2R::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
+                          offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, nComplexBands_local, index);
+
+          const size_t first_real = first_cplx + omptarget::min(nComplexBands_local, first_cplx);
+          const size_t last_real =
+              omptarget::min(last_cplx + omptarget::min(nComplexBands_local, last_cplx), requested_orb_size);
+          TT sum(0);
+          PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
+          for (int i = first_real; i < last_real; i++)
+            sum += psi_iat_ptr[i] * psiinv_ptr[i];
+          ratios_private_ptr[iat * NumTeams + team_id] = sum;
         }
     }
+    else
+    {
+      for (size_t ib = 0; ib < num_blocks; ib++)
+      {
+        const auto* spline_ptr = &SplineInst->getBlock(ib);
+        /* The coefficient pointer is read here, on the host, and passed in. Reading
+       * spline_ptr->coefs inside the region instead reads the device copy of the
+       * struct, whose coefs member is right only if the runtime attached it to the
+       * mapped buffer, and mapToDevice maps a separate variable rather than the
+       * member. Develop hoists it for the same reason. The spline2 unit tests
+       * never reach the difference, because they call the mapper's own methods,
+       * which pass block_coefs_ and never read the member on the device.
+       */
+        const auto* block_coefs    = spline_ptr->coefs;
+        const size_t block_splines = spline_ptr->num_splines;
+        if (block_splines == 0)
+          continue;
+        const size_t block_offset = block_offsets[ib];
+        const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+        PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+        for (int iat = 0; iat < mw_nVP; iat++)
+          for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+          {
+            const size_t first = ChunkSizePerTeam * team_id;
+            const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+
+            auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+            auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+
+            int ix, iy, iz;
+            ST a[4], b[4], c[4];
+            spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
+                                                  pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
+
+            PRAGMA_OFFLOAD("omp parallel for")
+            for (int index = 0; index < last - first; index++)
+              spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
+                                                 offload_scratch_iat_ptr + block_offset + first + index);
+          }
+      }
+
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
                 map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
-    for (int iat = 0; iat < mw_nVP; iat++)
-      for (int team_id = 0; team_id < NumTeams; team_id++)
-      {
-        const size_t first = ChunkSizePerTeam * team_id;
-        const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+      for (int iat = 0; iat < mw_nVP; iat++)
+        for (int team_id = 0; team_id < NumTeams; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
-        auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-        auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
-        auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
-        auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
-        auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+          auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
+          auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
+          auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
+          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
-        const size_t first_cplx = first / 2;
-        const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = first_cplx; index < last_cplx; index++)
-          C2R::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
-                        offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, nComplexBands_local, index);
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2R::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
+                          offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, nComplexBands_local, index);
 
-        const size_t first_real = first_cplx + omptarget::min(nComplexBands_local, first_cplx);
-        const size_t last_real =
-            omptarget::min(last_cplx + omptarget::min(nComplexBands_local, last_cplx), requested_orb_size);
-        TT sum(0);
-        PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
-        for (int i = first_real; i < last_real; i++)
-          sum += psi_iat_ptr[i] * psiinv_ptr[i];
-        ratios_private_ptr[iat * NumTeams + team_id] = sum;
-      }
+          const size_t first_real = first_cplx + omptarget::min(nComplexBands_local, first_cplx);
+          const size_t last_real =
+              omptarget::min(last_cplx + omptarget::min(nComplexBands_local, last_cplx), requested_orb_size);
+          TT sum(0);
+          PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
+          for (int i = first_real; i < last_real; i++)
+            sum += psi_iat_ptr[i] * psiinv_ptr[i];
+          ratios_private_ptr[iat * NumTeams + team_id] = sum;
+        }
+    }
   }
 
   // do the reduction manually
