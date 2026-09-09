@@ -115,6 +115,7 @@ if(ENABLE_DEEPQMC_INFERENCE)
 endif()
 
 set(SPOSET_SRC
+    test_coefs_mem_attributes.cpp
     test_spo_collection_input_spline.cpp
     test_spo_collection_input_LCAO_xml.cpp
     test_spo_collection_input_MSD_LCAO_h5.cpp

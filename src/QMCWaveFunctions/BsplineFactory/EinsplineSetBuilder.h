@@ -37,6 +37,14 @@ namespace qmcplusplus
 ///forward declaration of BsplineReader
 class BsplineReader;
 
+class EinsplineSetBuilder;
+
+namespace testing
+{
+/// reads a coefs_mem node the way createSPOSetFromXML does, for a test of that reading
+std::pair<int, int> obtainMemoryAttributes(xmlNodePtr cur);
+} // namespace testing
+
 // Helper needed for TwistMap
 struct Int3less
 {
@@ -264,6 +272,8 @@ protected:
    * @return the distribution size
    */
   static std::pair<int, int> obtainMemoryAttributes(xmlNodePtr cur);
+
+  friend std::pair<int, int> testing::obtainMemoryAttributes(xmlNodePtr cur);
 
   /** analyze twists of orbitals in h5 and determinine twist_num_
    * @param twist_num_inp twistnum XML input
