@@ -18,6 +18,7 @@
 
 #include <vector>
 #include "MultiBsplineOffloadMapper.hpp"
+#include <string>
 #include "Message/Communicate.h"
 
 namespace qmcplusplus
@@ -61,6 +62,16 @@ class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>
   Communicate& comm_;
   /// device allocation per block; block ib lives on the device of rank ib % size
   std::vector<void*> device_ptrs_;
+  /// whether releaseDeviceMappings has already run
+  bool released_ = false;
+
+  /** close every imported handle and free every owned allocation, in that order.
+   *
+   * Collective: an importer's handle refers to the owner's allocation, so the group
+   * has to close before any owner frees. Runs at most once, so a failure that tears
+   * down explicitly cannot have the destructor enter the collective a second time.
+   */
+  void releaseDeviceMappings();
 
 public:
   MultiBsplineOffloadMapperPeer(const HostBspline& host_bsplines, Communicate& comm);
