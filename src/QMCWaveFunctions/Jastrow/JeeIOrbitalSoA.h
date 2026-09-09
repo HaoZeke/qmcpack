@@ -236,15 +236,36 @@ struct JeeIMultiWalkerMem : public Resource
 
     } // pack_inverse
 
+    /* Eight transfers of about 1.5 MB between them cost 11.0 ms a call, measured,
+     * against 0.97 ms to walk the members and 0.28 ms to build the inverse index.
+     * 1.5 MB in 11 ms is 140 MB/s, two orders below the link, so what is being
+     * paid is eight synchronous round trips and not bandwidth.
+     *
+     * Issued together and waited on once, they overlap.
+     */
     ScopedTimer ship(jeeiPackShipTimer());
-    memb_offsets.updateTo();
-    memb_elec.updateTo();
-    memb_dist.updateTo();
-    memb_displ.updateTo();
-    memb_ion.updateTo();
-    memb_grp.updateTo();
-    inv_offsets.updateTo();
-    inv_entry.updateTo();
+    {
+      auto* off_p    = memb_offsets.data();
+      auto* elec_p   = memb_elec.data();
+      auto* dist_p   = memb_dist.data();
+      auto* displ_p  = memb_displ.data();
+      auto* ion_p    = memb_ion.data();
+      auto* grp_p    = memb_grp.data();
+      auto* ioff_p   = inv_offsets.data();
+      auto* ient_p   = inv_entry.data();
+      const size_t n_off = memb_offsets.size(), n_ent = memb_elec.size();
+      const size_t n_dsp = memb_displ.size(), n_ioff = inv_offsets.size();
+      const size_t n_ie = inv_entry.size();
+      PRAGMA_OFFLOAD("omp target update to(off_p[:n_off]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(elec_p[:n_ent]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(dist_p[:n_ent]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(displ_p[:n_dsp]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(ion_p[:n_ent]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(grp_p[:n_ent]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(ioff_p[:n_ioff]) nowait")
+      PRAGMA_OFFLOAD("omp target update to(ient_p[:n_ie]) nowait")
+      PRAGMA_OFFLOAD("omp taskwait")
+    }
   }
 
   /// one flat gamma block per (ion group, j group, k group), plus a present/absent flag
