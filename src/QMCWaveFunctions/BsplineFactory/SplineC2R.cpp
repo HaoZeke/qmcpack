@@ -85,6 +85,10 @@ void SplineC2R<ST>::finalizeConstruction()
   myKcart_offload->updateTo();
   if (offload_mapper_)
     offload_mapper_->updateToDevice();
+
+  const auto& block_offsets = SplineInst->getBlockOffsets();
+  single_block_ =
+      SplineInst->getNumBlocks() == 1 && SplineInst->getBlock(0).num_splines == myV.size() && block_offsets[0] == 0;
 }
 
 template<typename ST>
@@ -183,8 +187,7 @@ void SplineC2R<ST>::evaluateValue(const ParticleSet& P, const int iat, ValueVect
     // offload_scratch, so it cannot run until every block has written its part.
     const size_t num_blocks   = SplineInst->getNumBlocks();
     const auto& block_offsets = SplineInst->getBlockOffsets();
-    const bool single_block =
-        num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+    const bool single_block   = single_block_;
 
     {
       ScopedTimer offload(offload_timer_);
@@ -342,8 +345,7 @@ void SplineC2R<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
   // can run until every block has written its part.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -564,8 +566,7 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   // orbital range, so a block boundary must not fall inside either.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -1034,8 +1035,7 @@ void SplineC2R<ST>::evaluateVGL(const ParticleSet& P,
   // because it pairs a complex spline's two halves.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -1204,8 +1204,7 @@ void SplineC2R<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
   // evaluation per block, then one assignment pass over the whole orbital range
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -1486,8 +1485,7 @@ void SplineC2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
   // range
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
