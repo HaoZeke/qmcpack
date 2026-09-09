@@ -85,6 +85,10 @@ void SplineC2C<ST>::finalizeConstruction()
   myKcart_offload->updateTo();
   if (offload_mapper_)
     offload_mapper_->updateToDevice();
+
+  const auto& block_offsets = SplineInst->getBlockOffsets();
+  single_block_ =
+      SplineInst->getNumBlocks() == 1 && SplineInst->getBlock(0).num_splines == myV.size() && block_offsets[0] == 0;
 }
 
 template<typename ST>
@@ -320,8 +324,7 @@ void SplineC2C<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
   // has written its part. With one block this is the same work in two launches.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -543,8 +546,7 @@ void SplineC2C<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
    * and several blocks take the two, because there the reduction spans blocks that
    * different teams wrote.
    */
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -870,8 +872,7 @@ void SplineC2C<ST>::evaluateVGL(const ParticleSet& P,
   // produced the hessian, because it reads only that block's own output index.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -1046,8 +1047,7 @@ void SplineC2C<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
   // distributed_ranks 1 and the difference is the price of the split alone.
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);
@@ -1334,8 +1334,7 @@ void SplineC2C<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
    */
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
-  const bool single_block =
-      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+  const bool single_block   = single_block_;
 
   {
     ScopedTimer offload(offload_timer_);

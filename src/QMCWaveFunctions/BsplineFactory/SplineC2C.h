@@ -102,6 +102,14 @@ protected:
   const std::shared_ptr<MultiBsplineBase<ST>> SplineInst;
   /// multi bspline set offload mapper
   const std::shared_ptr<MultiBsplineOffloadMapper<ST>> offload_mapper_;
+  /** the coefficients are one block covering the whole padded orbital range
+   *
+   * Which is the default `coefs_mem`, and the condition under which every
+   * offload path here runs the interpolation and the assignment in one kernel
+   * rather than two. The block layout is fixed once the table is built, so this
+   * is answered once in finalizeConstruction rather than per evaluation.
+   */
+  bool single_block_ = false;
   /// intermediate result vectors
   vContainer_type myV;
   vContainer_type myL;
@@ -123,7 +131,9 @@ public:
   virtual bool isOMPoffload() const override { return bool(offload_mapper_); }
 
   void createResource(ResourceCollection& collection) const override
-  { auto resource_index = collection.addResource(std::make_unique<SplineOMPTargetMultiWalkerMem<ST, ComplexT>>()); }
+  {
+    auto resource_index = collection.addResource(std::make_unique<SplineOMPTargetMultiWalkerMem<ST, ComplexT>>());
+  }
 
   void acquireResource(ResourceCollection& collection, const RefVectorWithLeader<SPOSet>& spo_list) const override;
 
