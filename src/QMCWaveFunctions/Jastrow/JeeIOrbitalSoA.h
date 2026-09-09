@@ -96,6 +96,19 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
   Vector<int, OffloadPinnedAllocator<int>> ion_group;
+  /// each electron's spin group, which the accept needs and which never changes
+  Vector<int, OffloadPinnedAllocator<int>> elec_group;
+
+  /// pack it once; a walker's electrons do not change group
+  void packElecGroups(const ParticleSet& P, int nelec)
+  {
+    if (elec_group.size() == static_cast<size_t>(nelec))
+      return;
+    elec_group.resize(nelec);
+    for (int jel = 0; jel < nelec; jel++)
+      elec_group[jel] = P.GroupID[jel];
+    elec_group.updateTo();
+  }
   Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
   Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
   /** what the accept brings back: per walker the change every other electron sees, and
@@ -1047,13 +1060,43 @@ public:
 
     auto& mem = wfc_leader.mw_mem_handle_.getResource();
 
+    /* The accept does not need the packed membership at all.
+     *
+     * It exists to tell the kernel which electrons are inside which ions, and the
+     * electron-ion table is already on the device: the constructor asks for
+     * NEED_FULL_TABLE_ANYTIME. So the kernel reads that table and tests the ion
+     * cutoff itself, which is 33 comparisons an electron on this deck against
+     * walking about eleven packed entries, and costs no transfer at all.
+     *
+     * Measured, the pack it replaces is 59.75 s of a 283 s run: 53.688 s of that
+     * is eight host to device transfers whose cost is neither their count nor
+     * their bytes, since one transfer of the same 1.5 MB costs the same 11 ms.
+     */
+    const RealType* mw_ei_full = nullptr;
+    size_t ei_full_stride = 0;
+    try
+    {
+      mw_ei_full     = dt_ei.getMultiWalkerDataPtr();
+      ei_full_stride = dt_ei.getPerTargetPctlStrideSize();
+    }
+    catch (...)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+    if (mw_ei_full == nullptr || ei_full_stride == 0)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+
     // the membership still describes the configuration before any of these moves lands
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
     {
       ScopedTimer pack(wfc_leader.accept_pack_timer_);
-      mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
+      mem.packElecGroups(p_leader, wfc_leader.Nelec);
     }
     {
       ScopedTimer functors(wfc_leader.accept_functor_timer_);
@@ -1080,6 +1123,9 @@ public:
     mem.acc_reduce.resize(static_cast<size_t>(na) * 10);
     mem.acc_jpart.resize(static_cast<size_t>(na) * nfield * Nelec_l);
 
+    auto* elec_grp    = mem.elec_group.data();
+    const size_t ei_stride    = ei_full_stride;
+    const size_t pad_ei_full  = getAlignedSize<RealType>(wfc_leader.Nion);
     auto* memb_off    = mem.memb_offsets.data();
     auto* memb_elec   = mem.memb_elec.data();
     auto* memb_dist   = mem.memb_dist.data();
@@ -1124,15 +1170,13 @@ public:
       ScopedTimer kern(wfc_leader.accept_kernel_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
-                      map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
-                      map(to: memb_ion[:n_memb], memb_grp[:n_memb]) \
-                      map(to: inv_off[:n_inv_off], inv_ent[:n_inv_ent]) \
+                      map(to: elec_grp[:Nelec_l]) \
                       map(alloc: jpart_ptr[:delta_len]) \
                       map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
                               fn_have[:iGroups * eGroups * eGroups]) \
                       map(to: ion_cut[:Nion], ion_grp[:Nion]) \
                       map(always, from: delta_ptr[:delta_len], reduce_ptr[:na * 10]) \
-                      is_device_ptr(mw_ei, mw_ee)")
+                      is_device_ptr(mw_ei, mw_ee, mw_ei_full)")
       for (int ia = 0; ia < na; ia++)
       {
         const int iw            = walker_ptr[ia];
@@ -1168,17 +1212,23 @@ public:
 
             if (kel != iat)
             {
-              const size_t slot  = static_cast<size_t>(iw) * inv_stride + kel;
-              const size_t begin = inv_off[slot];
-              const size_t end   = inv_off[slot + 1];
-              for (size_t e = begin; e < end; e++)
+              /* Which ions this electron is inside is a comparison, not a lookup.
+               * The electron-ion table is on the device, so the row for (iw, kel)
+               * gives both the distance and the displacement, and the cutoff test
+               * is the same one the host membership applied when it built the
+               * lists. 33 comparisons against walking about eleven packed
+               * entries, and no transfer.
+               */
+              const int kg = elec_grp[kel];
+              const RealType* restrict kI_row =
+                  mw_ei_full + (static_cast<size_t>(iw) * Nelec_l + kel) * ei_stride;
+              for (int iat_ion = 0; iat_ion < Nion; iat_ion++)
               {
-                const int idx     = inv_ent[e];
-                const int iat_ion = memb_ion[idx];
-                const int kg      = memb_grp[idx];
-
                 const RealType r_jI = ei_dist[iat_ion];
                 if (r_jI >= ion_cut[iat_ion])
+                  continue;
+                const RealType r_kI_test = kI_row[iat_ion];
+                if (r_kI_test >= ion_cut[iat_ion])
                   continue;
                 const int fidx = (ion_grp[iat_ion] * eGroups + jg) * eGroups + kg;
                 if (!fn_have[fidx])
@@ -1188,14 +1238,14 @@ public:
                 const RealType jI0   = ei_disp[iat_ion];
                 const RealType jI1   = ei_disp[pad_ei + iat_ion];
                 const RealType jI2   = ei_disp[2 * pad_ei + iat_ion];
-                const RealType r_kI  = memb_dist[idx];
+                const RealType r_kI  = r_kI_test;
                 const RealType r_jk  = ee_dist[kel];
                 const RealType jk0   = ee_disp[kel];
                 const RealType jk1   = ee_disp[pad_ee + kel];
                 const RealType jk2   = ee_disp[2 * pad_ee + kel];
-                const RealType kI0   = memb_displ[idx * 3];
-                const RealType kI1   = memb_displ[idx * 3 + 1];
-                const RealType kI2   = memb_displ[idx * 3 + 2];
+                const RealType kI0   = kI_row[pad_ei_full + iat_ion];
+                const RealType kI1   = kI_row[2 * pad_ei_full + iat_ion];
+                const RealType kI2   = kI_row[3 * pad_ei_full + iat_ion];
 
                 RealType val, g0, g1, g2, h00, h01, h02, h11, h22;
                 FT::evaluateVGH_impl(r_jk, r_jI, r_kI, grow, N_eI_k, N_ee_k, C_k, L_k, val, g0, g1, g2, h00, h01,
