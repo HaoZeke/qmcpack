@@ -52,6 +52,21 @@ inline NewTimer& jeeiPackShipTimer()
   static NewTimer& t = createGlobalTimer("JeeIMem::pack_ship", timer_level_fine);
   return t;
 }
+/** one byte to the device, in the same place, timed on its own
+ *
+ * Eight transfers of 1.5 MB cost 11.0 ms a call. One transfer of the same 1.5 MB
+ * costs 11.3 ms. Neither the count nor the bytes moved the number, which leaves
+ * what is fixed per call, and the thing that is fixed is waiting for the device.
+ *
+ * A single byte cannot be bandwidth and cannot be a count. If it costs the same
+ * as the real transfers then the cost is the synchronisation, and no arrangement
+ * of the data will change it.
+ */
+inline NewTimer& jeeiPackOneByteTimer()
+{
+  static NewTimer& t = createGlobalTimer("JeeIMem::pack_onebyte", timer_level_fine);
+  return t;
+}
 
 /** @ingroup WaveFunctionComponent
  *  @brief Specialization for three-body Jastrow function using multiple functors
@@ -243,6 +258,13 @@ struct JeeIMultiWalkerMem : public Resource
      *
      * Issued together and waited on once, they overlap.
      */
+    {
+      // the control: one byte, same place, same stream
+      ScopedTimer onebyte(jeeiPackOneByteTimer());
+      auto* probe_p = memb_grp.data();
+      PRAGMA_OFFLOAD("omp target update to(probe_p[:1])")
+    }
+
     ScopedTimer ship(jeeiPackShipTimer());
     {
       auto* off_p    = memb_offsets.data();
