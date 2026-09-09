@@ -326,7 +326,7 @@ void SplineC2C<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -335,7 +335,7 @@ void SplineC2C<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -481,37 +481,45 @@ void SplineC2C<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
   const size_t num_blocks   = SplineInst->getNumBlocks();
   const auto& block_offsets = SplineInst->getBlockOffsets();
 
+  /* One block is the common case, and there the interpolation pass and the
+   * assignment-and-reduction pass run over the same (virtual particle, team) grid
+   * with the same chunking. A team's assign_v reads exactly the range that team's
+   * evaluate_v_impl_v2 just wrote, index 2i and 2i+1 for orbital i inside
+   * [first, last), so no cross-team dependency keeps them apart, and consecutive
+   * omp parallel for regions inside one team iteration carry the barrier the
+   * write-then-read needs.
+   *
+   * Splitting them costs 54 per cent of this region: 4.099 s against 6.324 s on
+   * diamond at one crowd, 7 of 7 interleaved pairs. So one block takes one kernel
+   * and several blocks take the two, because there the reduction spans blocks that
+   * different teams wrote.
+   */
+  const bool single_block =
+      num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
+
   {
     ScopedTimer offload(offload_timer_);
 
-    for (size_t ib = 0; ib < num_blocks; ib++)
+    if (single_block)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
-      /* The coefficient pointer is read here, on the host, and passed in. Reading
-       * spline_ptr->coefs inside the region instead reads the device copy of the
-       * struct, whose coefs member is right only if the runtime attached it to the
-       * mapped buffer, and mapToDevice maps a separate variable rather than the
-       * member. Develop hoists it for the same reason. The spline2 unit tests
-       * never reach the difference, because they call the mapper's own methods,
-       * which pass block_coefs_ and never read the member on the device.
-       */
+      const auto* spline_ptr = &SplineInst->getBlock(0);
+      // hoisted for the same reason as in the blocked path below
       const auto* block_coefs = spline_ptr->coefs;
-      const size_t block_splines = spline_ptr->num_splines;
-      if (block_splines == 0)
-        continue;
-      const size_t block_offset = block_offsets[ib];
-      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
-                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
+                  map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
       for (int iat = 0; iat < mw_nVP; iat++)
-        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        for (int team_id = 0; team_id < NumTeams; team_id++)
         {
           const size_t first = ChunkSizePerTeam * team_id;
-          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
           auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-          auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+          auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
+          auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
+          auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
+          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
           int ix, iy, iz;
           ST a[4], b[4], c[4];
@@ -521,38 +529,94 @@ void SplineC2C<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
           PRAGMA_OFFLOAD("omp parallel for")
           for (int index = 0; index < last - first; index++)
             spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
-                                               offload_scratch_iat_ptr + block_offset + first + index);
+                                               offload_scratch_iat_ptr + first + index);
+
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, orb_size);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2C::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
+                          offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, index);
+
+          ComplexT sum(0);
+          PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
+          for (int i = first_cplx; i < last_cplx; i++)
+            sum += psi_iat_ptr[i] * psiinv_ptr[i];
+          ratios_private_ptr[iat * NumTeams + team_id] = sum;
         }
     }
+    else
+    {
+      for (size_t ib = 0; ib < num_blocks; ib++)
+      {
+        const auto* spline_ptr = &SplineInst->getBlock(ib);
+        /* The coefficient pointer is read here, on the host, and passed in. Reading
+       * spline_ptr->coefs inside the region instead reads the device copy of the
+       * struct, whose coefs member is right only if the runtime attached it to the
+       * mapped buffer, and mapToDevice maps a separate variable rather than the
+       * member. Develop hoists it for the same reason. The spline2 unit tests
+       * never reach the difference, because they call the mapper's own methods,
+       * which pass block_coefs_ and never read the member on the device.
+       */
+        const auto* block_coefs    = spline_ptr->coefs;
+        const size_t block_splines = spline_ptr->num_splines;
+        if (block_splines == 0)
+          continue;
+        const size_t block_offset = block_offsets[ib];
+        const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
+        PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*mw_nVP) \
+                  map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()])")
+        for (int iat = 0; iat < mw_nVP; iat++)
+          for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+          {
+            const size_t first = ChunkSizePerTeam * team_id;
+            const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+
+            auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+            auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+
+            int ix, iy, iz;
+            ST a[4], b[4], c[4];
+            spline2::computeLocationAndFractional(spline_ptr, pos_scratch[iat * 6 + 3], pos_scratch[iat * 6 + 4],
+                                                  pos_scratch[iat * 6 + 5], ix, iy, iz, a, b, c);
+
+            PRAGMA_OFFLOAD("omp parallel for")
+            for (int index = 0; index < last - first; index++)
+              spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
+                                                 offload_scratch_iat_ptr + block_offset + first + index);
+          }
+      }
+
+      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*mw_nVP) \
                 map(always, to: buffer_H2D_ptr[0:det_ratios_buffer_H2D.size()]) \
                 map(always, from: ratios_private_ptr[0:NumTeams*mw_nVP])")
-    for (int iat = 0; iat < mw_nVP; iat++)
-      for (int team_id = 0; team_id < NumTeams; team_id++)
-      {
-        const size_t first = ChunkSizePerTeam * team_id;
-        const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+      for (int iat = 0; iat < mw_nVP; iat++)
+        for (int team_id = 0; team_id < NumTeams; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
-        auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-        auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
-        auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
-        auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
-        auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+          auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
+          auto* restrict psi_iat_ptr             = results_scratch_ptr + sposet_padded_size * iat;
+          auto* ref_id_ptr = reinterpret_cast<int*>(buffer_H2D_ptr + nw * sizeof(ValueType*) + mw_nVP * 6 * sizeof(ST));
+          auto* restrict psiinv_ptr  = reinterpret_cast<const ValueType**>(buffer_H2D_ptr)[ref_id_ptr[iat]];
+          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
-        const size_t first_cplx = first / 2;
-        const size_t last_cplx  = omptarget::min(last / 2, orb_size);
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = first_cplx; index < last_cplx; index++)
-          C2C::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
-                        offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, index);
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, orb_size);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2C::assign_v(pos_scratch[iat * 6], pos_scratch[iat * 6 + 1], pos_scratch[iat * 6 + 2], psi_iat_ptr,
+                          offload_scratch_iat_ptr, myKcart_ptr, myKcart_padded_size, index);
 
-        ComplexT sum(0);
-        PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
-        for (int i = first_cplx; i < last_cplx; i++)
-          sum += psi_iat_ptr[i] * psiinv_ptr[i];
-        ratios_private_ptr[iat * NumTeams + team_id] = sum;
-      }
+          ComplexT sum(0);
+          PRAGMA_OFFLOAD("omp parallel for simd reduction(+:sum)")
+          for (int i = first_cplx; i < last_cplx; i++)
+            sum += psi_iat_ptr[i] * psiinv_ptr[i];
+          ratios_private_ptr[iat * NumTeams + team_id] = sum;
+        }
+    }
   }
 
   // do the reduction manually
@@ -763,7 +827,7 @@ void SplineC2C<ST>::evaluateVGL(const ParticleSet& P,
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -772,7 +836,7 @@ void SplineC2C<ST>::evaluateVGL(const ParticleSet& P,
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -797,9 +861,8 @@ void SplineC2C<ST>::evaluateVGL(const ParticleSet& P,
         for (int index = 0; index < last - first; index++)
         {
           const size_t output_index = block_offset + first + index;
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_ptr + output_index,
-                                               spline_padded_size);
+          spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db, dc,
+                                               d2a, d2b, d2c, offload_scratch_ptr + output_index, spline_padded_size);
           offload_scratch_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
               SymTrace(offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
                        offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
@@ -887,7 +950,7 @@ void SplineC2C<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr        = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -896,12 +959,12 @@ void SplineC2C<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
-      const size_t block_splines    = spline_ptr->num_splines;
+      const auto* block_coefs    = spline_ptr->coefs;
+      const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
-      const size_t block_offset     = block_offsets[ib];
-      const int NumTeamsBlock       = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+      const size_t block_offset = block_offsets[ib];
+      const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
       PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeamsBlock*num_pos) \
                       map(always, to: pos_copy_ptr[0:num_pos*6])")
@@ -928,8 +991,8 @@ void SplineC2C<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
           {
             // the coefficient index is local to the block; the output index is global
             const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
+            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db,
+                                                 dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
                                                  spline_padded_size);
             offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
                 SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
@@ -953,9 +1016,8 @@ void SplineC2C<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
         const size_t first = ChunkSizePerTeam * team_id;
         const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
-        auto* restrict offload_scratch_iw_ptr =
-            offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
-        auto* restrict psi_iw_ptr = results_scratch_ptr + sposet_padded_size * iw * 5;
+        auto* restrict offload_scratch_iw_ptr = offload_scratch_ptr + spline_padded_size * iw * SoAFields3D::NUM_FIELDS;
+        auto* restrict psi_iw_ptr             = results_scratch_ptr + sposet_padded_size * iw * 5;
 
         const ST G[9] = {prim_lattice_G_ptr[0], prim_lattice_G_ptr[1], prim_lattice_G_ptr[2],
                          prim_lattice_G_ptr[3], prim_lattice_G_ptr[4], prim_lattice_G_ptr[5],
@@ -1112,7 +1174,7 @@ void SplineC2C<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -1121,7 +1183,7 @@ void SplineC2C<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -1151,7 +1213,8 @@ void SplineC2C<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
           // evaluation per team again without giving up SPMD for the loop that follows.
           ST a[4], b[4], c[4], da[4], db[4], dc[4], d2a[4], d2b[4], d2c[4];
           ST symGGt[6];
-          PRAGMA_OFFLOAD("omp allocate(ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt) allocator(omp_pteam_mem_alloc)")
+          PRAGMA_OFFLOAD(
+              "omp allocate(ix, iy, iz, a, b, c, da, db, dc, d2a, d2b, d2c, symGGt) allocator(omp_pteam_mem_alloc)")
 
           PRAGMA_OFFLOAD("omp parallel")
           {
@@ -1169,20 +1232,20 @@ void SplineC2C<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
             PRAGMA_OFFLOAD("omp barrier")
 
             PRAGMA_OFFLOAD("omp for")
-          for (int index = 0; index < last - first; index++)
-          {
-            // coefficients are indexed within the block, results at the global offset
-            const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
-                                                 spline_padded_size);
-            offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
-                SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
-                         offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
+            for (int index = 0; index < last - first; index++)
+            {
+              // coefficients are indexed within the block, results at the global offset
+              const size_t output_index = block_offset + first + index;
+              spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db,
+                                                   dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
+                                                   spline_padded_size);
+              offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
+                  SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS02 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS11 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS12 + output_index],
+                           offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS22 + output_index], symGGt);
             }
           }
         }
