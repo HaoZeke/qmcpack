@@ -138,8 +138,8 @@ void SPOSetT<T>::mw_evaluateValue(const RefVectorWithLeader<SPOSetT>& spo_list,
 
 template<typename T>
 void SPOSetT<T>::mw_evaluateValueVPs(const RefVectorWithLeader<SPOSetT>& spo_list,
-                                    const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
-                                    OffloadMWVArray& phi_vps) const
+                                     const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                     OffloadMWVArray& phi_vps) const
 {
   assert(this == &spo_list.getLeader());
   size_t nVPs = 0;

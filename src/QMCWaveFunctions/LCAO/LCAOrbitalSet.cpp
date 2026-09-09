@@ -621,8 +621,8 @@ void LCAOrbitalSet::mw_evaluateValue(const RefVectorWithLeader<SPOSet>& spo_list
 }
 
 void LCAOrbitalSet::mw_evaluateValueVPs(const RefVectorWithLeader<SPOSet>& spo_list,
-                                       const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
-                                       OffloadMWVArray& phi_vps) const
+                                        const RefVectorWithLeader<const VirtualParticleSet>& vp_list,
+                                        OffloadMWVArray& phi_vps) const
 {
   assert(this == &spo_list.getLeader());
   if (!useOMPoffload_)
