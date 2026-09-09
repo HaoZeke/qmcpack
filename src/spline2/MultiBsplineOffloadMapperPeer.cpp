@@ -59,6 +59,7 @@ void MultiBsplineOffloadMapperPeer<T>::mapToDevice()
 
     // the descriptor is small and per rank; only the coefficients are worth sharing
     PRAGMA_OFFLOAD("omp target enter data map(to: spline_m[:1])")
+    descriptors_mapped_ = ib + 1;
 
     // an empty block has nothing to export: cudaMalloc of zero bytes yields a pointer
     // that cudaIpcGetMemHandle rejects with an invalid argument
@@ -155,11 +156,15 @@ void MultiBsplineOffloadMapperPeer<T>::releaseDeviceMappings()
 
   device_ptrs_.assign(nblocks, nullptr);
 
-  for (int ib = 0; ib < nblocks; ib++)
+  // only the descriptors that were mapped: a failure part way through the block loop
+  // leaves the rest of them never entered, and deleting one of those is not a no-op
+  // on every runtime
+  for (int ib = 0; ib < descriptors_mapped_; ib++)
   {
     auto* spline_m = &Base::host_bsplines_.getBlock(ib);
     PRAGMA_OFFLOAD("omp target exit data map(delete: spline_m[:1])")
   }
+  descriptors_mapped_ = 0;
 }
 
 template<typename T>

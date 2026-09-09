@@ -64,6 +64,8 @@ class MultiBsplineOffloadMapperPeer : public MultiBsplineOffloadMapper<T>
   std::vector<void*> device_ptrs_;
   /// whether releaseDeviceMappings has already run
   bool released_ = false;
+  /// how many block descriptors reached the device, so teardown deletes only those
+  int descriptors_mapped_ = 0;
 
   /** close every imported handle and free every owned allocation, in that order.
    *
