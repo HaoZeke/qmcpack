@@ -12,6 +12,7 @@
 
 #include "SplineC2R.h"
 #include "spline2/MultiBsplineEval.hpp"
+#include "spline2/MultiBsplineOffloadMapperFactory.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "ApplyPhaseC2R.hpp"
@@ -32,7 +33,7 @@ SplineC2R<ST>::SplineC2R(const std::string& my_name,
       GGt_offload(std::make_shared<OffloadVector<ST>>(9)),
       prim_lattice_G_offload(std::make_shared<OffloadVector<ST>>(9)),
       SplineInst(std::move(multi_spline)),
-      offload_mapper_(use_offload ? std::make_shared<MultiBsplineOffloadMapper<ST>>(*SplineInst) : nullptr)
+      offload_mapper_(use_offload ? makeOffloadMapper<ST>(*SplineInst) : nullptr)
 
 {
   auto GGt(dot(transpose(prim_lattice.G), prim_lattice.G));

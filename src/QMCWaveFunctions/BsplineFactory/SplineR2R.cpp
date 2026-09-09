@@ -18,6 +18,7 @@
 #include "Concurrency/OpenMP.h"
 #include "spline2/MultiBspline.hpp"
 #include "spline2/MultiBsplineOffloadMapper.hpp"
+#include "spline2/MultiBsplineOffloadMapperFactory.hpp"
 #include "spline2/MultiBsplineEval.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
@@ -41,7 +42,7 @@ SplineR2R<ST>::SplineR2R(const std::string& my_name,
       GGt_offload(std::make_shared<OffloadVector<ST>>(9)),
       prim_lattice_G_offload(std::make_shared<OffloadVector<ST>>(9)),
       SplineInst(std::move(multi_spline)),
-      offload_mapper_(use_offload ? std::make_shared<MultiBsplineOffloadMapper<ST>>(*SplineInst) : nullptr)
+      offload_mapper_(use_offload ? makeOffloadMapper<ST>(*SplineInst) : nullptr)
 {
   for (std::uint32_t i = 0; i < 9; i++)
   {

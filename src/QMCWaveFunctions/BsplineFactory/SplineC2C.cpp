@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include "SplineC2C.h"
 #include "spline2/MultiBsplineEval.hpp"
+#include "spline2/MultiBsplineOffloadMapperFactory.hpp"
 #include "spline2/MultiBsplineEval_OMPoffload.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "Platforms/OMPTarget/ompReductionComplex.hpp"
@@ -33,7 +34,7 @@ SplineC2C<ST>::SplineC2C(const std::string& my_name,
       GGt_offload(std::make_shared<OffloadVector<ST>>(9)),
       prim_lattice_G_offload(std::make_shared<OffloadVector<ST>>(9)),
       SplineInst(std::move(multi_spline)),
-      offload_mapper_(use_offload ? std::make_shared<MultiBsplineOffloadMapper<ST>>(*SplineInst) : nullptr)
+      offload_mapper_(use_offload ? makeOffloadMapper<ST>(*SplineInst) : nullptr)
 {
   auto GGt(dot(transpose(prim_lattice.G), prim_lattice.G));
   for (std::uint32_t i = 0; i < 9; i++)

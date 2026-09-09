@@ -15,7 +15,6 @@
 #include "spline2/MultiBsplineMPIShared.hpp"
 #include "spline2/MultiBsplineOffloadMapper.hpp"
 #include "spline2/MultiBsplineOffloadMapperPeer.hpp"
-#include "spline2/MultiBsplineMPISharedOffload.hpp"
 #include "spline2/MultiBsplineEval.hpp"
 #include "QMCWaveFunctions/BsplineFactory/contraction_helper.hpp"
 #include "config/stdlib/Constants.h"
@@ -313,9 +312,9 @@ struct test_splines<T, 5> : public test_splines_base<T, 5>
 
 /** Coefficients in a shared window, evaluated through a device mapping.
  *
- * Covers the path MultiBsplineMPISharedOffload puts into production: the coefficients
- * are allocated once per group of ranks in an MPI-3 shared window, mapped onto the
- * device, and read back by the mapper's multi-walker evaluation. The values are
+ * Covers the path a shared deck puts into production: the coefficients are allocated
+ * once per group of ranks in an MPI-3 shared window, mapped onto the device by
+ * MultiBsplineOffloadMapper, and read back by the mapper's multi-walker evaluation. The values are
  * compared against the host evaluation of the same object, so the check is on the
  * mapping rather than on any hard-coded number.
  *
@@ -344,7 +343,7 @@ struct test_shared_offload : public test_splines_base<T, 5>
     auto& comm(*comm_shared);
     REQUIRE(comm.size() == static_cast<int>(group));
 
-    MultiBsplineMPISharedOffload<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
+    MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_shared), distributed_ranks);
     REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
     const size_t npad = getAlignedSize<T>(num_splines);
@@ -357,7 +356,7 @@ struct test_shared_offload : public test_splines_base<T, 5>
     comm.barrier();
     destroy_Bspline(aspline);
 
-    // pushes the shared coefficients to the device and repairs the device coefs pointer
+    // what production calls once the host coefficients are complete
     bs.finalize();
 
     const TinyVector<T, 3> pos = {0.1, 0.2, 0.3};
@@ -385,10 +384,10 @@ struct test_shared_offload : public test_splines_base<T, 5>
  * would let a multi-device node stop holding an identical copy of the coefficients on
  * every device. MultiBsplineOffloadMapper::mw_evaluate_v already walks the blocks,
  * taking each block's own spline pointer and coefficients and writing its results at
- * that block's offset. SplineC2C indexes by block on every one of its evaluation
- * paths, so a complex offload build reaches this from a deck; SplineC2R still takes
- * the coefficients through getSplinePtr(), which throws with more than one block, so a
- * real-valued build does not.
+ * that block's offset. SplineC2C and SplineC2R index by block on every one of their
+ * evaluation paths, so a deck reaches this on either build. Orbital rotation is the
+ * exception: it mixes every orbital with every other, so those two paths still take
+ * getSplinePtr() and throw when the table is divided.
  *
  * The device result is compared against the host evaluation of the same object, which
  * walks the blocks too, so what is under test is that the blocked device path agrees
@@ -415,7 +414,7 @@ struct test_distributed_offload : public test_splines_base<T, 5>
     MultiBsplineMPIShared<T> bs(grid, bc, num_splines, std::move(comm_distributed), distributed_ranks);
     REQUIRE(bs.getNumBlocks() == distributed_ranks);
 
-    const size_t npad = getAlignedSize<T>(num_splines);
+    const size_t npad      = getAlignedSize<T>(num_splines);
     UBspline_3d_d* aspline = create_UBspline_3d_d(grid[0], grid[1], grid[2], bc[0], bc[1], bc[2], data.data());
     auto offsets           = FairDivideAligned<std::vector<size_t>>(num_splines, getAlignment<T>(), comm.size());
     for (int i = offsets[comm.rank()]; i < offsets[comm.rank() + 1]; i++)
@@ -521,7 +520,7 @@ TEST_CASE("MultiBsplineMPIShared distributed offload float", "[spline2]")
   test_distributed_offload<float>().test(11, 4);
 }
 
-TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
+TEST_CASE("MultiBsplineMPIShared offload periodic double", "[spline2]")
 {
   test_shared_offload<double>().test(13, 1);
   test_shared_offload<double>().test(13, 2);
@@ -530,7 +529,7 @@ TEST_CASE("MultiBsplineMPISharedOffload periodic double", "[spline2]")
   test_shared_offload<double>().test(13, 1, 2);
 }
 
-TEST_CASE("MultiBsplineMPISharedOffload periodic float", "[spline2]")
+TEST_CASE("MultiBsplineMPIShared offload periodic float", "[spline2]")
 {
   test_shared_offload<float>().test(11, 1);
   test_shared_offload<float>().test(11, 2);

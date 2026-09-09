@@ -29,7 +29,6 @@
 #include "spline2/MultiBspline.hpp"
 #if defined(HAVE_MPI)
 #include "spline2/MultiBsplineMPIShared.hpp"
-#include "spline2/MultiBsplineMPISharedOffload.hpp"
 #endif
 
 
@@ -46,30 +45,22 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
                                                                const std::pair<int, int>& distributed_and_shared_ranks,
                                                                const BandInfoGroup& bandgroup)
 {
-  const int N = bandgroup.getNumDistinctOrbitals();
+  if (use_offload)
+    app_summary() << "    Running OpenMP offload code path." << std::endl;
+  else
+    app_summary() << "    Running on CPU." << std::endl;
 
   auto [distributed_ranks, shared_ranks] = distributed_and_shared_ranks;
 
-  if (use_offload)
-  {
-    // Both are supported on an offload build now. Sharing puts the coefficients in
-    // one MPI-3 shared window per group of ranks, each rank mapping that window onto
-    // its own device. Distributing divides the orbitals across the group, which needs
-    // every evaluation path to index by block: SplineC2C and SplineC2R do that
-    // directly, and SplineR2R's two multi-walker paths go through
-    // MultiBsplineOffloadMapper, which walks the blocks itself.
-    //
-    // Orbital rotation is the exception and says so where it happens: it mixes every
-    // orbital with every other, so a divided table would need a cross-block gemm
-    // rather than a change of indexing, and the three SPO classes throw for it.
-#if !defined(HAVE_MPI)
-    if (shared_ranks > 1)
-      app_warning() << "Sharing the memory of spline coefficients requires an MPI build. "
-                       "Overriding shared_ranks to 1."
-                    << std::endl;
-    shared_ranks = 1;
-#endif
-  }
+  // An offload build supports both now. Sharing puts the coefficients in one MPI-3
+  // window per group of ranks; distributing divides the orbitals across the group,
+  // which needs every evaluation path to index by block. SplineC2C and SplineC2R do
+  // that directly and SplineR2R's multi-walker paths go through the device mapper,
+  // which walks the blocks itself.
+  //
+  // Orbital rotation is the exception and says so where it happens: it mixes every
+  // orbital with every other, so a divided table needs a cross-block gemm rather than
+  // a change of indexing, and the three SPO classes throw for it.
 
   auto dist_comm_ptr = std::make_unique<Communicate>(*myComm, myComm->size() / (distributed_ranks * shared_ranks));
 
@@ -88,18 +79,14 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
   typename bspline_traits<ST, 3>::BCType xyz_bc[3];
   set_grid(mybuilder->MeshSize, half_g, xyz_grid, xyz_bc);
 
+  const int N              = bandgroup.getNumDistinctOrbitals();
   const size_t num_splines = getAlignedSize<ST>(use_duplex_splines_ ? N * 2 : N);
   std::unique_ptr<MultiBsplineBase<ST>> multi_splines_ptr;
-  // The offload form is only needed when the coefficients are shared or divided:
-  // an offload build that keeps its own single copy uses the plain spline and
-  // SplineC2C maps it through MultiBsplineOffloadMapper, which is what upstream
-  // does. There is no MultiBsplineOffload class to construct.
+  // One table class for host and offload builds alike: the SPO class asks
+  // makeOffloadMapper for the device mapper the table wants, so nothing here has to
+  // know whether the coefficients will be shared on the device as well as the host.
 #if defined(HAVE_MPI)
-  if (use_offload && (shared_ranks > 1 || distributed_ranks > 1))
-    multi_splines_ptr = std::make_unique<MultiBsplineMPISharedOffload<ST>>(xyz_grid, xyz_bc, num_splines,
-                                                                           std::move(dist_comm_ptr),
-                                                                           distributed_ranks);
-  else if (distributed_ranks * shared_ranks > 1)
+  if (distributed_ranks * shared_ranks > 1)
     multi_splines_ptr = std::make_unique<MultiBsplineMPIShared<ST>>(xyz_grid, xyz_bc, num_splines,
                                                                     std::move(dist_comm_ptr), distributed_ranks);
   else
@@ -112,13 +99,9 @@ std::unique_ptr<SPOSet> SplineSetReader<ST>::create_spline_set(const std::string
 
   std::unique_ptr<BsplineSet> bspline;
 #if defined(QMC_COMPLEX)
-  // one class for both, taking use_offload: upstream folded SplineC2COMPTarget in
   bspline = std::make_unique<SplineC2C<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
                                             std::move(multi_splines_ptr), use_offload);
 #else
-  // SplineC2ROMPTarget was folded into SplineC2R the same way, and the real
-  // build's distribution stays restricted because SplineC2R still reaches the
-  // coefficients through getSplinePtr()
   if (use_duplex_splines_)
     bspline = std::make_unique<SplineC2R<ST>>(my_name, bandgroup.getNumSPOs(), mybuilder->PrimCell,
                                               std::move(multi_splines_ptr), use_offload);
