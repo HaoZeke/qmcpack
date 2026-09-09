@@ -69,6 +69,24 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<size_t, OffloadPinnedAllocator<size_t>> inv_offsets;
   Vector<int, OffloadPinnedAllocator<int>> inv_entry;
   size_t inv_walker_stride = 0;
+  /** the members' distances and displacements, in the order the inverse index
+   *  walks them rather than the order the pack lays them down
+   *
+   * The kernel already iterates a given electron's entries as a contiguous run of
+   * the inverse index, so ordering the values that way costs it nothing and buys
+   * the accept everything: one electron's values become one contiguous slice,
+   * which is what makes them patchable without rebuilding the structure.
+   */
+  /** where a packed entry's value sits in the inverse order
+   *
+   * The ratio kernel walks entries by ion and the accept kernel walks them by
+   * electron, so one of the two needs a permutation to reach the same values.
+   * Paying it there keeps a single copy of the distances on the device, and the
+   * permutation changes only when the membership does.
+   */
+  Vector<int, OffloadPinnedAllocator<int>> memb_to_inv;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> inv_dist;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> inv_displ;
   Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
@@ -113,13 +131,13 @@ struct JeeIMultiWalkerMem : public Resource
      */
     bool packed_current = (packed_versions.size() == nw);
     for (size_t iw = 0; packed_current && iw < nw; iw++)
-      packed_current = (packed_versions[iw] == wfcs[iw]->getMembershipVersion());
+      packed_current = (packed_versions[iw] == wfcs[iw]->getMembershipStructureVersion());
     if (packed_current)
       return;
 
     packed_versions.resize(nw);
     for (size_t iw = 0; iw < nw; iw++)
-      packed_versions[iw] = wfcs[iw]->getMembershipVersion();
+      packed_versions[iw] = wfcs[iw]->getMembershipStructureVersion();
 
     memb_walker_stride = static_cast<size_t>(eGroups) * Nion;
     memb_offsets.resize(nw * memb_walker_stride + 1);
@@ -195,14 +213,81 @@ struct JeeIMultiWalkerMem : public Resource
         inv_entry[cursor[iw * inv_walker_stride + memb_elec[idx]]++] = static_cast<int>(idx);
     }
 
+    // the same values again in the inverse index's order, which is the order the
+    // kernel reads them in and the order that makes one electron's run contiguous
+    inv_dist.resize(inv_entry.size());
+    inv_displ.resize(inv_entry.size() * 3);
+    memb_to_inv.resize(memb_elec.size());
+    for (size_t e = 0; e < inv_entry.size(); e++)
+    {
+      const size_t idx = static_cast<size_t>(inv_entry[e]);
+      memb_to_inv[idx] = static_cast<int>(e);
+      inv_dist[e]      = memb_dist[idx];
+      for (int idim = 0; idim < 3; idim++)
+        inv_displ[e * 3 + idim] = memb_displ[idx * 3 + idim];
+    }
+
     memb_offsets.updateTo();
     memb_elec.updateTo();
-    memb_dist.updateTo();
-    memb_displ.updateTo();
     memb_ion.updateTo();
     memb_grp.updateTo();
     inv_offsets.updateTo();
     inv_entry.updateTo();
+    inv_dist.updateTo();
+    inv_displ.updateTo();
+    memb_to_inv.updateTo();
+  }
+
+  /** bring one electron's packed values up to date, for the walkers that accepted
+   *
+   * An accept moves electron iat, so its distance and displacement to every ion it
+   * is inside change and nothing else does. Those entries are one contiguous run
+   * of the inverse index per walker, so this is a handful of values and one device
+   * update each, against a rebuild of every walker's whole structure.
+   *
+   * Call it after the host lists have taken the move, because what it copies is
+   * the state the next pack would otherwise have to flatten again.
+   */
+  template<typename WFCPTRS>
+  void refreshMovedValues(const WFCPTRS& wfcs, const std::vector<int>& accepted, int iat, int eGroups, int Nion)
+  {
+    if (inv_offsets.empty() || inv_entry.empty())
+      return;
+    // named for the update clause below, which is the only reader on an offload
+    // build and expands to nothing on a host one
+    [[maybe_unused]] auto* dist_ptr  = inv_dist.data();
+    [[maybe_unused]] auto* displ_ptr = inv_displ.data();
+    for (int ia = 0; ia < static_cast<int>(accepted.size()); ia++)
+    {
+      const size_t iw    = static_cast<size_t>(accepted[ia]);
+      const size_t slot  = iw * inv_walker_stride + static_cast<size_t>(iat);
+      const size_t begin = inv_offsets[slot];
+      const size_t end   = inv_offsets[slot + 1];
+      if (end <= begin)
+        continue;
+      const auto& wfc = *wfcs[iw];
+      for (size_t e = begin; e < end; e++)
+      {
+        const size_t idx = static_cast<size_t>(inv_entry[e]);
+        const int ion    = memb_ion[idx];
+        const int grp    = memb_grp[idx];
+        // the electron's place in that ion's list, which the accept may have moved
+        const auto& els = wfc.getElecsInside(grp, ion);
+        size_t n        = 0;
+        while (n < els.size() && els[n] != iat)
+          n++;
+        if (n == els.size())
+          continue; // it left this ion, so the structure changed and the next pack rebuilds
+        inv_dist[e] = wfc.getElecsInsideDist(grp, ion)[n];
+        const auto& d = wfc.getElecsInsideDispl(grp, ion)[n];
+        for (int idim = 0; idim < 3; idim++)
+          inv_displ[e * 3 + idim] = d[idim];
+      }
+      const size_t len = end - begin;
+      const size_t d0  = begin * 3;
+      const size_t dn  = len * 3;
+      PRAGMA_OFFLOAD("omp target update to(dist_ptr[begin:len], displ_ptr[d0:dn])")
+    }
   }
 
   /// one flat gamma block per (ion group, j group, k group), plus a present/absent flag
@@ -322,9 +407,24 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
    * already handed out.
    */
   size_t membership_version_ = 0;
+  /** stamped only when which electrons are inside which ions changes
+   *
+   * An accept moves one electron, so its distances to the ions all change while
+   * the membership itself changes only if it crossed a cutoff. Those are very
+   * different costs to the device copy: the first is a handful of values, the
+   * second is the whole flattened structure. The version above cannot tell them
+   * apart, which is why the pack's gate could never fire on the accept path.
+   */
+  size_t membership_structure_version_ = 0;
   static inline std::atomic<size_t> membership_stamp_source_{0};
   /// record that elecs_inside no longer matches any copy taken of it
   void touchMembership() { membership_version_ = ++membership_stamp_source_; }
+  /// a change of which electrons are inside which ions, which is also a change of values
+  void touchMembershipStructure()
+  {
+    membership_structure_version_ = ++membership_stamp_source_;
+    membership_version_           = membership_structure_version_;
+  }
 
   /// the electrons around ions within the cutoff radius, grouped by species
   Array<std::vector<int>, 2> elecs_inside;
@@ -661,7 +761,7 @@ public:
             elecs_inside_dist(jg, iat).push_back(eI_dists[jel][iat]);
             elecs_inside_displ(jg, iat).push_back(eI_displs[jel][iat]);
           }
-    touchMembership();
+    touchMembershipStructure();
   }
 
   LogValue evaluateLog(const ParticleSet& P,
@@ -771,7 +871,8 @@ public:
 
     auto* memb_off   = mem.memb_offsets.data();
     auto* memb_elec  = mem.memb_elec.data();
-    auto* memb_dist  = mem.memb_dist.data();
+    auto* inv_dist_r = mem.inv_dist.data();
+    auto* to_inv     = mem.memb_to_inv.data();
     auto* gamma_flat = mem.gamma_flat.data();
     auto* fn_have    = mem.fn_have.data();
     auto* ion_cut    = mem.ion_cutoff.data();
@@ -792,7 +893,8 @@ public:
 
     PRAGMA_OFFLOAD("omp target teams distribute \
                     map(to: refp[:nVPs], walker_of[:nVPs], jg_of[:nVPs]) \
-                    map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb]) \
+                    map(to: memb_off[:n_off], memb_elec[:n_memb]) \
+                    map(to: inv_dist_r[:n_memb], to_inv[:n_memb]) \
                     map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
                             fn_have[:iGroups * eGroups * eGroups]) \
                     map(to: ion_cut[:Nion], ion_grp[:Nion]) \
@@ -828,7 +930,8 @@ public:
             const int kel = memb_elec[idx];
             if (kel == jel)
               continue;
-            sum += FT::evaluateV_impl(ee_row[kel], r_jI, memb_dist[idx], grow, N_eI_k, N_ee_k, C_k, L_k);
+            sum += FT::evaluateV_impl(ee_row[kel], r_jI, inv_dist_r[to_inv[idx]], grow, N_eI_k, N_ee_k, C_k,
+                                      L_k);
           }
         }
       }
@@ -847,6 +950,7 @@ public:
 
   const std::vector<int>& getElecsInside(int kg, int iat) const { return elecs_inside(kg, iat); }
   size_t getMembershipVersion() const { return membership_version_; }
+  size_t getMembershipStructureVersion() const { return membership_structure_version_; }
   const std::vector<valT>& getElecsInsideDist(int kg, int iat) const { return elecs_inside_dist(kg, iat); }
   const std::vector<posT>& getElecsInsideDispl(int kg, int iat) const { return elecs_inside_displ(kg, iat); }
 
@@ -1013,8 +1117,8 @@ public:
 
     auto* memb_off    = mem.memb_offsets.data();
     auto* memb_elec   = mem.memb_elec.data();
-    auto* memb_dist   = mem.memb_dist.data();
-    auto* memb_displ  = mem.memb_displ.data();
+    auto* inv_dist_p  = mem.inv_dist.data();
+    auto* inv_displ_p = mem.inv_displ.data();
     auto* gamma_flat  = mem.gamma_flat.data();
     auto* fn_have     = mem.fn_have.data();
     auto* ion_cut     = mem.ion_cutoff.data();
@@ -1055,9 +1159,10 @@ public:
       ScopedTimer kern(wfc_leader.accept_kernel_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
-                      map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
+                      map(to: memb_off[:n_off], memb_elec[:n_memb]) \
                       map(to: memb_ion[:n_memb], memb_grp[:n_memb]) \
                       map(to: inv_off[:n_inv_off], inv_ent[:n_inv_ent]) \
+                      map(to: inv_dist_p[:n_inv_ent], inv_displ_p[:n_inv_ent * 3]) \
                       map(alloc: jpart_ptr[:delta_len]) \
                       map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
                               fn_have[:iGroups * eGroups * eGroups]) \
@@ -1119,14 +1224,14 @@ public:
                 const RealType jI0   = ei_disp[iat_ion];
                 const RealType jI1   = ei_disp[pad_ei + iat_ion];
                 const RealType jI2   = ei_disp[2 * pad_ei + iat_ion];
-                const RealType r_kI  = memb_dist[idx];
+                const RealType r_kI  = inv_dist_p[e];
                 const RealType r_jk  = ee_dist[kel];
                 const RealType jk0   = ee_disp[kel];
                 const RealType jk1   = ee_disp[pad_ee + kel];
                 const RealType jk2   = ee_disp[2 * pad_ee + kel];
-                const RealType kI0   = memb_displ[idx * 3];
-                const RealType kI1   = memb_displ[idx * 3 + 1];
-                const RealType kI2   = memb_displ[idx * 3 + 2];
+                const RealType kI0   = inv_displ_p[e * 3];
+                const RealType kI1   = inv_displ_p[e * 3 + 1];
+                const RealType kI2   = inv_displ_p[e * 3 + 2];
 
                 RealType val, g0, g1, g2, h00, h01, h02, h11, h22;
                 FT::evaluateVGH_impl(r_jk, r_jI, r_kI, grow, N_eI_k, N_ee_k, C_k, L_k, val, g0, g1, g2, h00, h01,
@@ -1212,6 +1317,13 @@ public:
       // the membership update stays here: it is a handful of host side list edits
       wfc.updateMembershipAfterAccept(p_list[accepted[ia]], iat);
     }
+
+    /* The device copy is now one electron out of date in each accepted walker, and
+     * bringing it up to date here is what lets the next accept's pack do nothing.
+     * A walker whose electron crossed an ion cutoff stamped its structure instead,
+     * and the next pack rebuilds that one properly.
+     */
+    mem.refreshMovedValues(wfcs, accepted, iat, eGroups, Nion);
   }
 
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override
@@ -1273,6 +1385,7 @@ public:
     const int ig = P.GroupID[iat];
     // update compact list elecs_inside
     touchMembership();
+    // and, below, the structure stamp only where an entry actually appears or goes
     // if the old position exists in elecs_inside
     for (int iind = 0; iind < ions_nearby_old.size(); iind++)
     {
@@ -1315,6 +1428,8 @@ public:
         elecs_inside_dist(ig, jat).pop_back();
         *iter_displ = elecs_inside_displ(ig, jat).back();
         elecs_inside_displ(ig, jat).pop_back();
+        // it left this ion, and the swap with the back moved another entry too
+        touchMembershipStructure();
       }
     }
 
@@ -1327,6 +1442,7 @@ public:
         elecs_inside(ig, jat).push_back(iat);
         elecs_inside_dist(ig, jat).push_back(eI_table.getTempDists()[jat]);
         elecs_inside_displ(ig, jat).push_back(eI_table.getTempDispls()[jat]);
+        touchMembershipStructure();
       }
     }
   }
