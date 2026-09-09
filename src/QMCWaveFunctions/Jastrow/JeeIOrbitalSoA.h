@@ -30,6 +30,29 @@
 
 namespace qmcplusplus
 {
+/** the phases of one membership rebuild, so a fix aims at the expensive one
+ *
+ * A rebuild costs 12.7 ms on the accept path, measured. Estimating the entry
+ * count from that time and then the time from the entry count is circular, and
+ * that circle is how this campaign twice reached a confident wrong answer about
+ * the same timer.
+ */
+inline NewTimer& jeeiPackFillTimer()
+{
+  static NewTimer& t = createGlobalTimer("JeeIMem::pack_fill", timer_level_fine);
+  return t;
+}
+inline NewTimer& jeeiPackInverseTimer()
+{
+  static NewTimer& t = createGlobalTimer("JeeIMem::pack_inverse", timer_level_fine);
+  return t;
+}
+inline NewTimer& jeeiPackShipTimer()
+{
+  static NewTimer& t = createGlobalTimer("JeeIMem::pack_ship", timer_level_fine);
+  return t;
+}
+
 /** @ingroup WaveFunctionComponent
  *  @brief Specialization for three-body Jastrow function using multiple functors
  *
@@ -122,9 +145,11 @@ struct JeeIMultiWalkerMem : public Resource
       packed_versions[iw] = wfcs[iw]->getMembershipVersion();
 
     memb_walker_stride = static_cast<size_t>(eGroups) * Nion;
+    size_t total = 0;
+    {
+    ScopedTimer fill(jeeiPackFillTimer());
     memb_offsets.resize(nw * memb_walker_stride + 1);
 
-    size_t total = 0;
     for (size_t iw = 0; iw < nw; iw++)
     {
       const auto& wfc = *wfcs[iw];
@@ -163,10 +188,24 @@ struct JeeIMultiWalkerMem : public Resource
           }
         }
     }
+    /* how many entries a rebuild moves, said once rather than inferred from how
+     * long one takes
+     */
+    static bool reported = false;
+    if (!reported)
+    {
+      reported = true;
+      app_log() << "  JeeI membership pack: " << nw << " walkers, " << eGroups << " groups, " << Nion
+                << " ions, " << nelec << " electrons, holds " << total << " entries" << std::endl;
+    }
+    } // pack_fill
+
     /* The same entries again, grouped by the electron they land on. Counting first and
      * filling second keeps each electron's list in increasing entry order, so the sum a
      * thread forms over it does not depend on how the threads were scheduled.
      */
+    {
+    ScopedTimer inverse(jeeiPackInverseTimer());
     const int nelec_l = nelec;
     inv_walker_stride = static_cast<size_t>(nelec_l);
     inv_offsets.resize(nw * inv_walker_stride + 1);
@@ -195,6 +234,9 @@ struct JeeIMultiWalkerMem : public Resource
         inv_entry[cursor[iw * inv_walker_stride + memb_elec[idx]]++] = static_cast<int>(idx);
     }
 
+    } // pack_inverse
+
+    ScopedTimer ship(jeeiPackShipTimer());
     memb_offsets.updateTo();
     memb_elec.updateTo();
     memb_dist.updateTo();
