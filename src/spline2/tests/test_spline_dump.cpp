@@ -129,7 +129,7 @@ TEST_CASE("spline dump names one dataset per block", "[spline2]")
       no_extra_dataset = !h5f.is_dataset(blockDatasetName(written->getNumBlocks()));
 
       int num_blocks = 0;
-      count_ok = h5f.readEntry(num_blocks, splineDumpNumBlocksName()) &&
+      count_ok       = h5f.readEntry(num_blocks, splineDumpNumBlocksName()) &&
           static_cast<size_t>(num_blocks) == written->getNumBlocks();
 
       read_ok = SplineUtils<double>::read(*restored, h5f);
