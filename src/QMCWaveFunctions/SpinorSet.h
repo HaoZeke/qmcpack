@@ -37,7 +37,9 @@ public:
    * the other predicates here take a disjunction.
    */
   bool supportsMultiRefDetRatios() const override
-  { return spo_up->supportsMultiRefDetRatios() && spo_dn->supportsMultiRefDetRatios(); }
+  {
+    return spo_up->supportsMultiRefDetRatios() && spo_dn->supportsMultiRefDetRatios();
+  }
   bool hasIonDerivs() const override { return spo_up->hasIonDerivs() || spo_dn->hasIonDerivs(); }
   bool isRotationSupported() const override { return spo_up->isRotationSupported() && spo_dn->isRotationSupported(); }
 

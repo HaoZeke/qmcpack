@@ -117,8 +117,8 @@ bool ECPotentialBuilder::put(xmlNodePtr cur)
   if (hasNonLocalPot)
   {
     std::unique_ptr<NonLocalECPotential> apot =
-        std::make_unique<NonLocalECPotential>(IonConfig, targetPtcl, use_DLA == "yes",
-                                              NLPP_algo == "batched", batch_electrons == "yes");
+        std::make_unique<NonLocalECPotential>(IonConfig, targetPtcl, use_DLA == "yes", NLPP_algo == "batched",
+                                              batch_electrons == "yes");
 
     int nknot_max = 0;
     // These are actually NonLocalECPComponents

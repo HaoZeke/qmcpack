@@ -194,10 +194,10 @@ void VirtualParticleSet::setSingleReference(int electron_id, int ion_id)
 }
 
 void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<VirtualParticleSet>& vp_list,
-                                                const RefVectorWithLeader<ParticleSet>& refp_list,
-                                                const std::vector<std::vector<std::vector<PosType>>>& deltaV_lists,
-                                                const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
-                                                bool sphere)
+                                                 const RefVectorWithLeader<ParticleSet>& refp_list,
+                                                 const std::vector<std::vector<std::vector<PosType>>>& deltaV_lists,
+                                                 const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                                 bool sphere)
 {
   auto& vp_leader    = vp_list.getLeader();
   vp_leader.onSphere = sphere;
@@ -230,14 +230,14 @@ void VirtualParticleSet::mw_makeMovesMultiSource(const RefVectorWithLeader<Virtu
     // varies and is kept per virtual particle
     vp.refPtcl       = jobs.empty() ? 0 : jobs[0].electron_id;
     vp.refSourcePtcl = jobs.empty() ? 0 : jobs[0].ion_id;
-    size_t vp_count = 0;
+    size_t vp_count  = 0;
     for (const auto& dv : deltaVs)
       vp_count += dv.size();
     vp.job_per_vp.resize(vp_count);
     vp.resize(vp_count);
     vp.source_ptcl_per_vp.resize(vp.R.size());
 
-    size_t k = 0;
+    size_t k      = 0;
     vp.multi_ref_ = false;
     vp.job_electron.resize(jobs.size());
     for (size_t j = 0; j < jobs.size(); j++)

@@ -331,7 +331,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
    * how one deck is measured both ways without editing it, and 0 declines whatever the
    * deck said.
    */
-  const char* collapse_env = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
+  const char* collapse_env      = std::getenv("QMCPACK_NLPP_COLLAPSE_ELECTRONS");
   const bool collapse_requested = !(collapse_env && *collapse_env == '0') &&
       (O_leader.batch_electron_groups || (collapse_env && *collapse_env == '1'));
 
@@ -346,7 +346,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
    * serialised per walker and reads one reference electron per set whatever the
    * components can otherwise do.
    */
-  const bool multi_ref_ok = !pset_leader.isSpinor() && wf_list.getLeader().supportsMultiRefRatios();
+  const bool multi_ref_ok           = !pset_leader.isSpinor() && wf_list.getLeader().supportsMultiRefRatios();
   const bool collapse_electron_loop = collapse_requested && multi_ref_ok;
 
   if (collapse_requested && !multi_ref_ok)
@@ -453,12 +453,12 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         {
           const int iw = job_walker[jj];
           std::vector<NonLocalData> txy_dummy;
-          const Real ref = ecp_component_list[jj].evaluateOne(pset_list[iw], std::nullopt, job_ion[jj], psi_list[iw],
-                                                             job_elec[jj], job_dist[jj], job_displ[jj],
-                                                             compute_txy_all
-                                                                 ? makeOptionalRef<std::vector<NonLocalData>>(txy_dummy)
+          const Real ref =
+              ecp_component_list[jj].evaluateOne(pset_list[iw], std::nullopt, job_ion[jj], psi_list[iw], job_elec[jj],
+                                                 job_dist[jj], job_displ[jj],
+                                                 compute_txy_all ? makeOptionalRef<std::vector<NonLocalData>>(txy_dummy)
                                                                  : std::nullopt,
-                                                             O_leader.use_DLA);
+                                                 O_leader.use_DLA);
           worst = std::max(worst, std::abs(static_cast<double>(ref - pairpots[jj])));
         }
         std::cerr << "NLPPCOLLAPSE jobs=" << njobs << " worst |collapsed - reference| = " << worst << std::endl;
@@ -887,8 +887,8 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
           NonLocalECPComponent::mw_evaluateOne(ecp_component_list, pset_list, {*O_leader.vp_, std::move(vp_list)},
                                                psi_list, batch_list, pairpots, tmove_xy_batch_list,
                                                O_leader.mw_res_handle_.getResource().collection,
-                                             O_leader.mw_res_handle_.getResource().nlpp_batch_scratch,
-                                             O_leader.use_DLA);
+                                               O_leader.mw_res_handle_.getResource().nlpp_batch_scratch,
+                                               O_leader.use_DLA);
         else
           for (size_t j = 0; j < ecp_component_list.size(); j++)
             ecp_component_list[j].evaluateOne(pset_list[j], std::nullopt, batch_list[j].get().ion_id, psi_list[j],

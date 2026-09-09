@@ -241,25 +241,24 @@ void NonLocalECPComponent::mw_evaluateOne(const RefVectorWithLeader<NonLocalECPC
   {
     NonLocalECPComponent& component(ecp_component_list[i]);
     const NLPPJob<RealType>& job(joblist[i]);
-    pairpots[i] = component.calculatePotential(scratch.knot_pots[i], scratch.psiratio[i], scratch.psiratio_det[i],
-                                               use_TMDLA);
+    pairpots[i] =
+        component.calculatePotential(scratch.knot_pots[i], scratch.psiratio[i], scratch.psiratio_det[i], use_TMDLA);
     if (!tmove_xy_all_list.empty())
       component.contributeTxy(job.electron_id, scratch.knot_pots[i], scratch.deltaV[i], tmove_xy_all_list[i]);
   }
 }
 
-void NonLocalECPComponent::mw_evaluateOneMultiJob(
-    const RefVectorWithLeader<NonLocalECPComponent>& ecp_component_list,
-    const RefVectorWithLeader<ParticleSet>& p_list,
-    const RefVectorWithLeader<VirtualParticleSet>& vp_list,
-    const RefVectorWithLeader<TrialWaveFunction>& psi_list,
-    const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
-    const std::vector<int>& job_walker,
-    std::vector<RealType>& pairpots,
-    const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
-    ResourceCollection& collection,
-    NLPPBatchScratch& scratch,
-    bool use_DLA)
+void NonLocalECPComponent::mw_evaluateOneMultiJob(const RefVectorWithLeader<NonLocalECPComponent>& ecp_component_list,
+                                                  const RefVectorWithLeader<ParticleSet>& p_list,
+                                                  const RefVectorWithLeader<VirtualParticleSet>& vp_list,
+                                                  const RefVectorWithLeader<TrialWaveFunction>& psi_list,
+                                                  const std::vector<std::vector<NLPPJob<RealType>>>& joblists,
+                                                  const std::vector<int>& job_walker,
+                                                  std::vector<RealType>& pairpots,
+                                                  const RefVector<std::vector<NonLocalData>>& tmove_xy_all_list,
+                                                  ResourceCollection& collection,
+                                                  NLPPBatchScratch& scratch,
+                                                  bool use_DLA)
 {
   const bool use_TMDLA = (!tmove_xy_all_list.empty()) && use_DLA;
   const size_t nw      = p_list.size();
@@ -282,8 +281,8 @@ void NonLocalECPComponent::mw_evaluateOneMultiJob(
     const NLPPJob<RealType>& job    = joblists[iw][j];
 
     scratch.resizeEntry(jj, component.getNknot());
-    component.buildQuadraturePointDeltaPosAndPartialPotential(job.ion_elec_dist, job.ion_elec_displ,
-                                                              scratch.deltaV[jj], scratch.knot_pots[jj]);
+    component.buildQuadraturePointDeltaPosAndPartialPotential(job.ion_elec_dist, job.ion_elec_displ, scratch.deltaV[jj],
+                                                              scratch.knot_pots[jj]);
     scratch.walker_deltaV[iw][j] = scratch.deltaV[jj];
   }
 
@@ -342,8 +341,8 @@ void NonLocalECPComponent::mw_evaluateOneMultiJob(
       scratch.psiratio_det[jj][k] = scratch.walker_ratios_det[iw][off + k];
     }
 
-    pairpots[jj] = component.calculatePotential(scratch.knot_pots[jj], scratch.psiratio[jj], scratch.psiratio_det[jj],
-                                                use_TMDLA);
+    pairpots[jj] =
+        component.calculatePotential(scratch.knot_pots[jj], scratch.psiratio[jj], scratch.psiratio_det[jj], use_TMDLA);
     if (!tmove_xy_all_list.empty())
       component.contributeTxy(job.electron_id, scratch.knot_pots[jj], scratch.deltaV[jj], tmove_xy_all_list[jj]);
   }

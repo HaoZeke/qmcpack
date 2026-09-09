@@ -839,7 +839,8 @@ void DiracDeterminantBatched<PL, VT, FPVT>::mw_evaluateRatios(
        */
       if (vp.isMultiRef() && !phi_.supportsMultiRefDetRatios())
         throw std::runtime_error("DiracDeterminantBatched::mw_evaluateRatios was handed a virtual particle set "
-                                 "spanning several electrons, but " + phi_.getClassName() +
+                                 "spanning several electrons, but " +
+                                 phi_.getClassName() +
                                  " indexes inverse rows per walker. It would read the wrong row without failing.");
       const size_t njobs = vp.isMultiRef() ? vp.getNumJobs() : 1;
       for (size_t j = 0; j < njobs; j++)
