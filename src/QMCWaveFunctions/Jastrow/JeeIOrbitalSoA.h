@@ -1315,7 +1315,7 @@ public:
       wfc.d2Uat[iat] = reduce[4];
 
       // the membership update stays here: it is a handful of host side list edits
-      wfc.updateMembershipAfterAccept(p_list[accepted[ia]], iat);
+      wfc.updateMembershipAfterAccept(p_list[accepted[ia]], iat, true);
     }
 
     /* The device copy is now one electron out of date in each accepted walker, and
@@ -1368,9 +1368,19 @@ public:
    * Extracted so the batched accept can reuse it. computeU3 leaves the two ion lists
    * behind as a side effect of walking the triplets; a form that does the walking on
    * the device has to rebuild them, and the test is the one computeU3 applies.
+   *
+   * @param values_tracked the caller will bring the packed copy's values up to
+   *        date itself, so a distance written in place here need not stamp the
+   *        structure. Only the batched device accept does that, and it is the
+   *        one that gains from the stamp staying put. Everyone else, the single
+   *        walker accept and the host fallbacks inside the batched one, leaves
+   *        the packed copy behind, so the default stamps and the next pack
+   *        rebuilds.
    */
-  void updateMembershipAfterAccept(const ParticleSet& P, int iat)
+  void updateMembershipAfterAccept(const ParticleSet& P, int iat, bool values_tracked = false)
   {
+    if (!values_tracked)
+      touchMembershipStructure();
     const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
     ions_nearby_old.clear();
     ions_nearby_new.clear();
