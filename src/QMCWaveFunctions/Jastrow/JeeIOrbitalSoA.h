@@ -479,9 +479,28 @@ public:
    * here without them.
    */
   JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false)
+      /* NEED_VP_FULL_TABLE_ON_HOST is asked for only by the host ratio path.
+       *
+       * VirtualParticleSet withholds MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST from a
+       * VP table whenever any component asked for the host copy, and one component
+       * asking makes every quadrature evaluation copy the whole multi-walker
+       * distance and displacement array back. On CO2/Cu(110) that array is about
+       * 11 MB and DTABOMPTarget::offload_e_virtual is 32 to 35 per cent of the run.
+       *
+       * The device ratio path does not read it. Its only fallbacks are structural:
+       * the deck turning the path off, which is decided here, and a table type
+       * that provides no device pointer, which is refused rather than silently
+       * served from a host copy nobody maintained.
+       */
       : WaveFunctionComponent(obj_name),
-        ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
+        ee_Table_ID_(elecs.addTable(elecs,
+                                    DTModes::NEED_TEMP_DATA_ON_HOST |
+                                        (wantsOffload(elecs, use_offload) ? DTModes::ALL_OFF
+                                                                          : DTModes::NEED_VP_FULL_TABLE_ON_HOST))),
+        ei_Table_ID_(elecs.addTable(ions,
+                                    DTModes::NEED_FULL_TABLE_ANYTIME |
+                                        (wantsOffload(elecs, use_offload) ? DTModes::ALL_OFF
+                                                                          : DTModes::NEED_VP_FULL_TABLE_ON_HOST))),
         Ions(ions),
         accept_pack_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_pack", timer_level_fine)),
         accept_functor_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_functors", timer_level_fine)),
@@ -495,6 +514,14 @@ public:
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
     use_offload_ = use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
     init(elecs);
+  }
+
+  /** whether this object will take the device path, decided the same way as
+   *  use_offload_ but usable from the initializer list
+   */
+  static bool wantsOffload(const ParticleSet& elecs, bool use_offload)
+  {
+    return use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
@@ -792,6 +819,14 @@ public:
 
     const auto& dt_ei = vp_leader.getDistTableAB(wfc_leader.ei_Table_ID_);
     const auto& dt_ee = vp_leader.getDistTableAB(wfc_leader.ee_Table_ID_);
+    /* Refused rather than served from the host.
+     *
+     * With the device path configured this object does not ask its tables for
+     * NEED_VP_FULL_TABLE_ON_HOST, so the host copy of the virtual-particle table
+     * is not maintained and the per-walker fallback would read whatever was last
+     * there. A missing device pointer is a configuration that cannot be honoured,
+     * and saying so is the only safe answer.
+     */
     const RealType* mw_ei = nullptr;
     const RealType* mw_ee = nullptr;
     try
@@ -799,15 +834,19 @@ public:
       mw_ei = dt_ei.getMultiWalkerDataPtr();
       mw_ee = dt_ee.getMultiWalkerDataPtr();
     }
-    catch (...)
+    catch (const std::exception& e)
     {
-      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
-      return;
+      throw std::runtime_error(std::string("JeeIOrbitalSoA: the device ratio path is on and a "
+                                           "virtual-particle table has no device data: ") +
+                               e.what() +
+                               ". Set gpu=\"no\" on this jastrow to take the host path, which asks "
+                               "its tables for the host copy.");
     }
     if (mw_ei == nullptr || mw_ee == nullptr)
     {
-      WaveFunctionComponent::mw_evaluateRatios(wfc_list, vp_list, ratios);
-      return;
+      throw std::runtime_error("JeeIOrbitalSoA: the device ratio path is on and a virtual-particle "
+                               "table returned no device data. Set gpu=\"no\" on this jastrow to "
+                               "take the host path, which asks its tables for the host copy.");
     }
 
     const size_t stride_ei = dt_ei.getPerTargetPctlStrideSize();
