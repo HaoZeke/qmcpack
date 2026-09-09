@@ -123,7 +123,9 @@ public:
       : DTD_BConds<T, D, SC>(source.getLattice()),
         DistanceTableAB(source, target_name, DTModes::ALL_OFF),
         offload_timer_(createGlobalTimer("DTABOMPTarget::offload_" + name_, timer_level_fine)),
-        evaluate_timer_(createGlobalTimer("DTABOMPTarget::evaluate_" + name_, timer_level_fine))
+        evaluate_timer_(createGlobalTimer("DTABOMPTarget::evaluate_" + name_, timer_level_fine)),
+        result_transfer_timer_(
+            createGlobalTimer("DTABOMPTarget::result_to_host_" + name_, timer_level_fine))
 
   {
     auto* coordinates_soa = dynamic_cast<const RealSpacePositionsOMPTarget*>(&source.getCoordinates());
@@ -365,14 +367,23 @@ public:
                                                         num_padded, iel);
         }
 
-      if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
       {
-        PRAGMA_OFFLOAD(
-            "omp target update from(r_dr_ptr[:mw_r_dr.size()]) depend(inout:r_dr_ptr[:mw_r_dr.size()]) nowait")
+        /* The taskwait is inside this scope because the update is issued nowait:
+         * timing the issue alone would measure nothing, and the wait is where the
+         * cost of both the kernel and the transfer actually lands. What this
+         * separates is a run that transfers from a run that does not, which is
+         * what the mode decides.
+         */
+        ScopedTimer result_to_host(dt_leader.result_transfer_timer_);
+        if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
+        {
+          PRAGMA_OFFLOAD(
+              "omp target update from(r_dr_ptr[:mw_r_dr.size()]) depend(inout:r_dr_ptr[:mw_r_dr.size()]) nowait")
+        }
+        // wait for computing and (optional) transferring back to host.
+        // It can potentially be moved to ParticleSet to fuse multiple similar taskwait
+        PRAGMA_OFFLOAD("omp taskwait")
       }
-      // wait for computing and (optional) transferring back to host.
-      // It can potentially be moved to ParticleSet to fuse multiple similar taskwait
-      PRAGMA_OFFLOAD("omp taskwait")
     }
   }
 
@@ -536,6 +547,17 @@ private:
 
   /// timer for offload portion
   NewTimer& offload_timer_;
+  /** what pulling the whole multi-walker result back to the host costs
+   *
+   * VirtualParticleSet withholds MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST whenever
+   * any component asked for NEED_VP_FULL_TABLE_ON_HOST, and one component asking
+   * makes every quadrature evaluation copy the whole array. On CO2/Cu(110) the
+   * electron-virtual table is 32 per cent of the run and the array is about 11 MB,
+   * which is a second of bandwidth over the run rather than the ninety this timer
+   * sits inside. So the transfer is one candidate for that time and the kernel is
+   * the other, and separating them is cheaper than arguing.
+   */
+  NewTimer& result_transfer_timer_;
   /** a device side consumer reads the temporary distances of a batch
    *
    * Set by the consumer rather than by configuration, so a run whose components all read
