@@ -14,6 +14,7 @@
 #define QMCPLUSPLUS_COMPUTE_MATRIX_UPDATE_OMPTARGET_H
 
 #include <QueueAliases.hpp>
+#include "Platforms/OMPTarget/ompReductionComplex.hpp"
 
 namespace qmcplusplus
 {

@@ -16,6 +16,7 @@
 #include "OMPTarget/ompBLAS.hpp"
 #include <ResourceCollection.h>
 #include <AccelBLAS.hpp>
+#include "OMPTarget/ompReductionComplex.hpp"
 
 namespace qmcplusplus
 {
