@@ -183,33 +183,24 @@ void SplineC2R<ST>::evaluateValue(const ParticleSet& P, const int iat, ValueVect
     // offload_scratch, so it cannot run until every block has written its part.
     const size_t num_blocks   = SplineInst->getNumBlocks();
     const auto& block_offsets = SplineInst->getBlockOffsets();
+    const bool single_block =
+        num_blocks == 1 && SplineInst->getBlock(0).num_splines == spline_padded_size && block_offsets[0] == 0;
 
     {
       ScopedTimer offload(offload_timer_);
 
-      for (size_t ib = 0; ib < num_blocks; ib++)
+      if (single_block)
       {
-        const auto* spline_ptr = &SplineInst->getBlock(ib);
-        /* The coefficient pointer is read here, on the host, and passed in. Reading
-       * spline_ptr->coefs inside the region instead reads the device copy of the
-       * struct, whose coefs member is right only if the runtime attached it to the
-       * mapped buffer, and mapToDevice maps a separate variable rather than the
-       * member. Develop hoists it for the same reason. The spline2 unit tests
-       * never reach the difference, because they call the mapper's own methods,
-       * which pass block_coefs_ and never read the member on the device.
-       */
-        const auto* block_coefs    = spline_ptr->coefs;
-        const size_t block_splines = spline_ptr->num_splines;
-        if (block_splines == 0)
-          continue;
-        const size_t block_offset = block_offsets[ib];
-        const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
+        const auto* spline_ptr = &SplineInst->getBlock(0);
+        // hoisted for the same reason as in the blocked path below
+        const auto* block_coefs = spline_ptr->coefs;
 
-        PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeamsBlock)")
-        for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+        PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams) \
+                        map(always, from: results_scratch_ptr[0:sposet_padded_size])")
+        for (int team_id = 0; team_id < NumTeams; team_id++)
         {
           const size_t first = ChunkSizePerTeam * team_id;
-          const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
 
           int ix, iy, iz;
           ST a[4], b[4], c[4];
@@ -218,23 +209,67 @@ void SplineC2R<ST>::evaluateValue(const ParticleSet& P, const int iat, ValueVect
           PRAGMA_OFFLOAD("omp parallel for")
           for (int index = 0; index < last - first; index++)
             spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
-                                               offload_scratch_ptr + block_offset + first + index);
+                                               offload_scratch_ptr + first + index);
+
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2R::assign_v(x, y, z, results_scratch_ptr, offload_scratch_ptr, myKcart_ptr, myKcart_padded_size,
+                          nComplexBands_local, index);
         }
       }
-
-      PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams) \
-                      map(always, from: results_scratch_ptr[0:sposet_padded_size])")
-      for (int team_id = 0; team_id < NumTeams; team_id++)
+      else
       {
-        const size_t first = ChunkSizePerTeam * team_id;
-        const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+        for (size_t ib = 0; ib < num_blocks; ib++)
+        {
+          const auto* spline_ptr = &SplineInst->getBlock(ib);
+          /* The coefficient pointer is read here, on the host, and passed in. Reading
+       * spline_ptr->coefs inside the region instead reads the device copy of the
+       * struct, whose coefs member is right only if the runtime attached it to the
+       * mapped buffer, and mapToDevice maps a separate variable rather than the
+       * member. Develop hoists it for the same reason. The spline2 unit tests
+       * never reach the difference, because they call the mapper's own methods,
+       * which pass block_coefs_ and never read the member on the device.
+       */
+          const auto* block_coefs    = spline_ptr->coefs;
+          const size_t block_splines = spline_ptr->num_splines;
+          if (block_splines == 0)
+            continue;
+          const size_t block_offset = block_offsets[ib];
+          const int NumTeamsBlock   = (block_splines + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
 
-        const size_t first_cplx = first / 2;
-        const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
-        PRAGMA_OFFLOAD("omp parallel for")
-        for (int index = first_cplx; index < last_cplx; index++)
-          C2R::assign_v(x, y, z, results_scratch_ptr, offload_scratch_ptr, myKcart_ptr, myKcart_padded_size,
-                        nComplexBands_local, index);
+          PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeamsBlock)")
+          for (int team_id = 0; team_id < NumTeamsBlock; team_id++)
+          {
+            const size_t first = ChunkSizePerTeam * team_id;
+            const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
+
+            int ix, iy, iz;
+            ST a[4], b[4], c[4];
+            spline2::computeLocationAndFractional(spline_ptr, rux, ruy, ruz, ix, iy, iz, a, b, c);
+
+            PRAGMA_OFFLOAD("omp parallel for")
+            for (int index = 0; index < last - first; index++)
+              spline2offload::evaluate_v_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c,
+                                                 offload_scratch_ptr + block_offset + first + index);
+          }
+        }
+
+        PRAGMA_OFFLOAD("omp target teams distribute num_teams(NumTeams) \
+                      map(always, from: results_scratch_ptr[0:sposet_padded_size])")
+        for (int team_id = 0; team_id < NumTeams; team_id++)
+        {
+          const size_t first = ChunkSizePerTeam * team_id;
+          const size_t last  = omptarget::min(first + ChunkSizePerTeam, spline_padded_size);
+
+          const size_t first_cplx = first / 2;
+          const size_t last_cplx  = omptarget::min(last / 2, num_complex_splines);
+          PRAGMA_OFFLOAD("omp parallel for")
+          for (int index = first_cplx; index < last_cplx; index++)
+            C2R::assign_v(x, y, z, results_scratch_ptr, offload_scratch_ptr, myKcart_ptr, myKcart_padded_size,
+                          nComplexBands_local, index);
+        }
       }
 
       for (size_t i = 0; i < requested_orb_size; i++)
