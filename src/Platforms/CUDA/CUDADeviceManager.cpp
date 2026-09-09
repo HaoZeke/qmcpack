@@ -39,7 +39,7 @@ CUDADeviceManager::CUDADeviceManager(int& default_device_num, int& num_devices, 
       default_device_num = cuda_default_device_num;
     else if (default_device_num != cuda_default_device_num)
       throw std::runtime_error(deviceAssignmentMismatchMessage("CUDA", default_device_num, cuda_default_device_num,
-                                                             cuda_device_count, local_rank, local_size));
+                                                               cuda_device_count, local_rank, local_size));
 
 #pragma omp parallel
     {
