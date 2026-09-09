@@ -251,7 +251,7 @@ struct JeeIMultiWalkerMem : public Resource
   template<typename WFCPTRS>
   void refreshMovedValues(const WFCPTRS& wfcs, const std::vector<int>& accepted, int iat, int eGroups, int Nion)
   {
-    if (inv_offsets.empty() || inv_entry.empty())
+    if (inv_offsets.size() == 0 || inv_entry.size() == 0)
       return;
     // named for the update clause below, which is the only reader on an offload
     // build and expands to nothing on a host one
