@@ -23,6 +23,7 @@
 #include "CPU/SIMD/aligned_allocator.hpp"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "CPU/SIMD/algorithm.hpp"
+#include "Utilities/TimerManager.h"
 #include <map>
 #include <numeric>
 #include <memory>
@@ -335,6 +336,22 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
   /// device path for mw_evaluateRatios; off unless the target particle set is offloaded
   bool use_offload_ = false;
   ResourceHandle<JeeIMultiWalkerMem<valT>> mw_mem_handle_;
+  /** the three packs and the kernel, on each of the two paths that run them
+   *
+   * The accept is 65 s of a 293 s run on a 23 ion, 586 electron slab. One scope
+   * over the three packs cannot say which of them that is, and reading the code
+   * to decide gave the wrong answer once already: it named the membership, and
+   * gating the membership left the same scope reporting the same time.
+   *
+   * Both paths pack, so both are timed. packFunctors has no gate on either.
+   */
+  NewTimer& accept_pack_timer_;
+  NewTimer& accept_functor_timer_;
+  NewTimer& accept_ions_timer_;
+  NewTimer& accept_kernel_timer_;
+  NewTimer& ratio_pack_timer_;
+  NewTimer& ratio_functor_timer_;
+  NewTimer& ratio_ions_timer_;
 
   /// work buffer size
   size_t Nbuffer;
@@ -410,7 +427,14 @@ public:
       : WaveFunctionComponent(obj_name),
         ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        Ions(ions)
+        Ions(ions),
+        accept_pack_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_pack", timer_level_fine)),
+        accept_functor_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_functors", timer_level_fine)),
+        accept_ions_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_ions", timer_level_fine)),
+        accept_kernel_timer_(createGlobalTimer("JeeIOrbitalSoA::accept_kernel", timer_level_fine)),
+        ratio_pack_timer_(createGlobalTimer("JeeIOrbitalSoA::ratio_pack", timer_level_fine)),
+        ratio_functor_timer_(createGlobalTimer("JeeIOrbitalSoA::ratio_functors", timer_level_fine)),
+        ratio_ions_timer_(createGlobalTimer("JeeIOrbitalSoA::ratio_ions", timer_level_fine))
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
@@ -740,9 +764,18 @@ public:
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
-    mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
-    mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    {
+      ScopedTimer pack(wfc_leader.ratio_pack_timer_);
+      mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
+    }
+    {
+      ScopedTimer functors(wfc_leader.ratio_functor_timer_);
+      mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+    }
+    {
+      ScopedTimer ions(wfc_leader.ratio_ions_timer_);
+      mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    }
     mem.vp_walker.resize(nVPs);
     {
       size_t ivp = 0;
@@ -976,9 +1009,18 @@ public:
     std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
     for (int iw = 0; iw < nw; iw++)
       wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
-    mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
-    mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
-    mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    {
+      ScopedTimer pack(wfc_leader.accept_pack_timer_);
+      mem.packMembership(wfcs, wfc_leader.eGroups, wfc_leader.Nion, wfc_leader.Nelec);
+    }
+    {
+      ScopedTimer functors(wfc_leader.accept_functor_timer_);
+      mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+    }
+    {
+      ScopedTimer ions(wfc_leader.accept_ions_timer_);
+      mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+    }
 
     const int na       = accepted.size();
     const int Nelec_l  = wfc_leader.Nelec;
@@ -1037,6 +1079,7 @@ public:
     constexpr RealType lapfac(OHMMS_DIM - 1);
 
     {
+      ScopedTimer kern(wfc_leader.accept_kernel_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
                       map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
