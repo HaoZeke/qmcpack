@@ -24,6 +24,7 @@
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "CPU/SIMD/algorithm.hpp"
 #include "Utilities/TimerManager.h"
+#include <cstring>
 #include <map>
 #include <numeric>
 #include <memory>
@@ -92,6 +93,36 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<size_t, OffloadPinnedAllocator<size_t>> inv_offsets;
   Vector<int, OffloadPinnedAllocator<int>> inv_entry;
   size_t inv_walker_stride = 0;
+  /** the eight packed arrays end to end, so the device sees one transfer
+   *
+   * Eight separate updates of about 1.5 MB between them cost 11.0 ms a call,
+   * measured, which is 140 MB/s. Issuing them with nowait and one taskwait
+   * recovered 13.1 s of 53.7 and left 40.6, so they do not overlap: what costs
+   * is the number of round trips. One buffer is one round trip.
+   *
+   * The copy into it is host memory bandwidth, against a fill phase that
+   * measures 5.0 s over the same 4863 calls, so it is cheap next to what it
+   * replaces.
+   */
+  Vector<char, OffloadPinnedAllocator<char>> blob;
+  size_t blob_off_offsets = 0, blob_off_elec = 0, blob_off_dist = 0, blob_off_displ = 0;
+  size_t blob_off_ion = 0, blob_off_grp = 0, blob_off_ioff = 0, blob_off_ient = 0;
+
+  template<typename T>
+  T* blobAs(size_t byte_offset)
+  {
+    return reinterpret_cast<T*>(blob.data() + byte_offset);
+  }
+  /// device-side views, which is what the kernels index
+  const size_t* devMembOffsets() { return blobAs<size_t>(blob_off_offsets); }
+  const int* devMembElec() { return blobAs<int>(blob_off_elec); }
+  const VALT* devMembDist() { return blobAs<VALT>(blob_off_dist); }
+  const VALT* devMembDispl() { return blobAs<VALT>(blob_off_displ); }
+  const int* devMembIon() { return blobAs<int>(blob_off_ion); }
+  const int* devMembGrp() { return blobAs<int>(blob_off_grp); }
+  const size_t* devInvOffsets() { return blobAs<size_t>(blob_off_ioff); }
+  const int* devInvEntry() { return blobAs<int>(blob_off_ient); }
+
   Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
@@ -239,32 +270,49 @@ struct JeeIMultiWalkerMem : public Resource
     /* Eight transfers of about 1.5 MB between them cost 11.0 ms a call, measured,
      * against 0.97 ms to walk the members and 0.28 ms to build the inverse index.
      * 1.5 MB in 11 ms is 140 MB/s, two orders below the link, so what is being
-     * paid is eight synchronous round trips and not bandwidth.
+     * paid is round trips and not bandwidth.
      *
-     * Issued together and waited on once, they overlap.
+     * Issuing them together with nowait and one taskwait recovered 13.1 s of the
+     * 53.7, measured, and left 40.6. So they do not overlap much, and what has to
+     * go is the count rather than the ordering: the eight are copied into one
+     * buffer and that buffer is shipped once.
+     *
+     * The blob is laid out with each array aligned to its own type, and the
+     * kernels read typed pointers into it, so nothing downstream changes shape.
      */
     ScopedTimer ship(jeeiPackShipTimer());
     {
-      auto* off_p    = memb_offsets.data();
-      auto* elec_p   = memb_elec.data();
-      auto* dist_p   = memb_dist.data();
-      auto* displ_p  = memb_displ.data();
-      auto* ion_p    = memb_ion.data();
-      auto* grp_p    = memb_grp.data();
-      auto* ioff_p   = inv_offsets.data();
-      auto* ient_p   = inv_entry.data();
-      const size_t n_off = memb_offsets.size(), n_ent = memb_elec.size();
-      const size_t n_dsp = memb_displ.size(), n_ioff = inv_offsets.size();
-      const size_t n_ie = inv_entry.size();
-      PRAGMA_OFFLOAD("omp target update to(off_p[:n_off]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(elec_p[:n_ent]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(dist_p[:n_ent]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(displ_p[:n_dsp]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(ion_p[:n_ent]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(grp_p[:n_ent]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(ioff_p[:n_ioff]) nowait")
-      PRAGMA_OFFLOAD("omp target update to(ient_p[:n_ie]) nowait")
-      PRAGMA_OFFLOAD("omp taskwait")
+      auto pad = [](size_t n, size_t a) { return (n + a - 1) / a * a; };
+      const size_t a_sz = alignof(size_t), a_int = alignof(int), a_val = alignof(VALT);
+      size_t at = 0;
+      blob_off_offsets = at = pad(at, a_sz);
+      at += memb_offsets.size() * sizeof(size_t);
+      blob_off_elec = at = pad(at, a_int);
+      at += memb_elec.size() * sizeof(int);
+      blob_off_dist = at = pad(at, a_val);
+      at += memb_dist.size() * sizeof(VALT);
+      blob_off_displ = at = pad(at, a_val);
+      at += memb_displ.size() * sizeof(VALT);
+      blob_off_ion = at = pad(at, a_int);
+      at += memb_ion.size() * sizeof(int);
+      blob_off_grp = at = pad(at, a_int);
+      at += memb_grp.size() * sizeof(int);
+      blob_off_ioff = at = pad(at, a_sz);
+      at += inv_offsets.size() * sizeof(size_t);
+      blob_off_ient = at = pad(at, a_int);
+      at += inv_entry.size() * sizeof(int);
+      blob.resize(at);
+
+      std::memcpy(blob.data() + blob_off_offsets, memb_offsets.data(), memb_offsets.size() * sizeof(size_t));
+      std::memcpy(blob.data() + blob_off_elec, memb_elec.data(), memb_elec.size() * sizeof(int));
+      std::memcpy(blob.data() + blob_off_dist, memb_dist.data(), memb_dist.size() * sizeof(VALT));
+      std::memcpy(blob.data() + blob_off_displ, memb_displ.data(), memb_displ.size() * sizeof(VALT));
+      std::memcpy(blob.data() + blob_off_ion, memb_ion.data(), memb_ion.size() * sizeof(int));
+      std::memcpy(blob.data() + blob_off_grp, memb_grp.data(), memb_grp.size() * sizeof(int));
+      std::memcpy(blob.data() + blob_off_ioff, inv_offsets.data(), inv_offsets.size() * sizeof(size_t));
+      std::memcpy(blob.data() + blob_off_ient, inv_entry.data(), inv_entry.size() * sizeof(int));
+
+      blob.updateTo();
     }
   }
 
@@ -858,9 +906,15 @@ public:
       mem.vp_jg[ivp] = refPS.getGroupID(mw_refPctls[ivp]);
     mem.vp_jg.updateTo();
 
-    auto* memb_off   = mem.memb_offsets.data();
-    auto* memb_elec  = mem.memb_elec.data();
-    auto* memb_dist  = mem.memb_dist.data();
+    /* One mapped buffer holds all of these, so the region names it and the typed
+     * pointers below are offsets into it. Naming the subranges instead asks the
+     * runtime to map parts of an allocation it already holds.
+     */
+    auto* blob_ptr   = mem.blob.data();
+    const size_t n_blob = mem.blob.size();
+    auto* memb_off   = mem.devMembOffsets();
+    auto* memb_elec  = mem.devMembElec();
+    auto* memb_dist  = mem.devMembDist();
     auto* gamma_flat = mem.gamma_flat.data();
     auto* fn_have    = mem.fn_have.data();
     auto* ion_cut    = mem.ion_cutoff.data();
@@ -881,7 +935,7 @@ public:
 
     PRAGMA_OFFLOAD("omp target teams distribute \
                     map(to: refp[:nVPs], walker_of[:nVPs], jg_of[:nVPs]) \
-                    map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb]) \
+                    map(to: blob_ptr[:n_blob]) \
                     map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
                             fn_have[:iGroups * eGroups * eGroups]) \
                     map(to: ion_cut[:Nion], ion_grp[:Nion]) \
@@ -1101,10 +1155,12 @@ public:
     mem.acc_reduce.resize(static_cast<size_t>(na) * 10);
     mem.acc_jpart.resize(static_cast<size_t>(na) * nfield * Nelec_l);
 
-    auto* memb_off    = mem.memb_offsets.data();
-    auto* memb_elec   = mem.memb_elec.data();
-    auto* memb_dist   = mem.memb_dist.data();
-    auto* memb_displ  = mem.memb_displ.data();
+    auto* blob_ptr    = mem.blob.data();
+    const size_t n_blob = mem.blob.size();
+    auto* memb_off    = mem.devMembOffsets();
+    auto* memb_elec   = mem.devMembElec();
+    auto* memb_dist   = mem.devMembDist();
+    auto* memb_displ  = mem.devMembDispl();
     auto* gamma_flat  = mem.gamma_flat.data();
     auto* fn_have     = mem.fn_have.data();
     auto* ion_cut     = mem.ion_cutoff.data();
@@ -1113,10 +1169,10 @@ public:
     auto* reduce_ptr  = mem.acc_reduce.data();
     auto* walker_ptr  = mem.acc_walker.data();
     auto* jpart_ptr   = mem.acc_jpart.data();
-    auto* memb_ion    = mem.memb_ion.data();
-    auto* memb_grp    = mem.memb_grp.data();
-    auto* inv_off     = mem.inv_offsets.data();
-    auto* inv_ent     = mem.inv_entry.data();
+    auto* memb_ion    = mem.devMembIon();
+    auto* memb_grp    = mem.devMembGrp();
+    auto* inv_off     = mem.devInvOffsets();
+    auto* inv_ent     = mem.devInvEntry();
 
     const size_t memb_stride = mem.memb_walker_stride;
     const size_t gsize       = mem.gamma_size;
@@ -1145,9 +1201,7 @@ public:
       ScopedTimer kern(wfc_leader.accept_kernel_timer_);
       PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
                       map(to: walker_ptr[:na]) \
-                      map(to: memb_off[:n_off], memb_elec[:n_memb], memb_dist[:n_memb], memb_displ[:n_memb * 3]) \
-                      map(to: memb_ion[:n_memb], memb_grp[:n_memb]) \
-                      map(to: inv_off[:n_inv_off], inv_ent[:n_inv_ent]) \
+                      map(to: blob_ptr[:n_blob]) \
                       map(alloc: jpart_ptr[:delta_len]) \
                       map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
                               fn_have[:iGroups * eGroups * eGroups]) \
