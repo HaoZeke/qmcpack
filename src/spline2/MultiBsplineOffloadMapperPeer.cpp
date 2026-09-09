@@ -10,6 +10,9 @@
 //////////////////////////////////////////////////////////////////////////////////////
 
 #include "MultiBsplineOffloadMapperPeer.hpp"
+// the allreduce specialisations: Communicate.h declares the template, and the
+// int form that reduces the failure flag is defined here
+#include "Message/CommOperators.h"
 #include "Message/UniformCommunicateError.h"
 #include "config.h"
 
