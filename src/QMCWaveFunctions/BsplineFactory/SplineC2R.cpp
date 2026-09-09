@@ -189,8 +189,8 @@ void SplineC2R<ST>::evaluateValue(const ParticleSet& P, const int iat, ValueVect
 
       for (size_t ib = 0; ib < num_blocks; ib++)
       {
-        const auto* spline_ptr     = &SplineInst->getBlock(ib);
-      /* The coefficient pointer is read here, on the host, and passed in. Reading
+        const auto* spline_ptr = &SplineInst->getBlock(ib);
+        /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
        * mapped buffer, and mapToDevice maps a separate variable rather than the
@@ -198,7 +198,7 @@ void SplineC2R<ST>::evaluateValue(const ParticleSet& P, const int iat, ValueVect
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+        const auto* block_coefs    = spline_ptr->coefs;
         const size_t block_splines = spline_ptr->num_splines;
         if (block_splines == 0)
           continue;
@@ -313,7 +313,7 @@ void SplineC2R<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -322,7 +322,7 @@ void SplineC2R<ST>::evaluateDetRatios(const VirtualParticleSet& VP,
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -482,7 +482,7 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -491,7 +491,7 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -507,7 +507,7 @@ void SplineC2R<ST>::mw_evaluateDetRatios(const RefVectorWithLeader<SPOSet>& spo_
           const size_t last  = omptarget::min(first + ChunkSizePerTeam, block_splines);
 
           auto* restrict offload_scratch_iat_ptr = offload_scratch_ptr + spline_padded_size * iat;
-          auto* restrict pos_scratch = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
+          auto* restrict pos_scratch             = reinterpret_cast<ST*>(buffer_H2D_ptr + nw * sizeof(ValueType*));
 
           int ix, iy, iz;
           ST a[4], b[4], c[4];
@@ -899,7 +899,7 @@ void SplineC2R<ST>::evaluateVGL(const ParticleSet& P,
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -908,7 +908,7 @@ void SplineC2R<ST>::evaluateVGL(const ParticleSet& P,
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -933,9 +933,8 @@ void SplineC2R<ST>::evaluateVGL(const ParticleSet& P,
         for (int index = 0; index < last - first; index++)
         {
           const size_t output_index = block_offset + first + index;
-          spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                               db, dc, d2a, d2b, d2c, offload_scratch_ptr + output_index,
-                                               spline_padded_size);
+          spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db, dc,
+                                               d2a, d2b, d2c, offload_scratch_ptr + output_index, spline_padded_size);
           offload_scratch_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
               SymTrace(offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
                        offload_scratch_ptr[spline_padded_size * SoAFields3D::HESS01 + output_index],
@@ -1017,7 +1016,7 @@ void SplineC2R<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -1026,7 +1025,7 @@ void SplineC2R<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -1057,8 +1056,8 @@ void SplineC2R<ST>::evaluateVGLMultiPos(const Vector<ST, OffloadPinnedAllocator<
           for (int index = 0; index < last - first; index++)
           {
             const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
+            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db,
+                                                 dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
                                                  spline_padded_size);
             offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
                 SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
@@ -1237,7 +1236,7 @@ void SplineC2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
 
     for (size_t ib = 0; ib < num_blocks; ib++)
     {
-      const auto* spline_ptr     = &SplineInst->getBlock(ib);
+      const auto* spline_ptr = &SplineInst->getBlock(ib);
       /* The coefficient pointer is read here, on the host, and passed in. Reading
        * spline_ptr->coefs inside the region instead reads the device copy of the
        * struct, whose coefs member is right only if the runtime attached it to the
@@ -1246,7 +1245,7 @@ void SplineC2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
        * never reach the difference, because they call the mapper's own methods,
        * which pass block_coefs_ and never read the member on the device.
        */
-      const auto* block_coefs = spline_ptr->coefs;
+      const auto* block_coefs    = spline_ptr->coefs;
       const size_t block_splines = spline_ptr->num_splines;
       if (block_splines == 0)
         continue;
@@ -1277,8 +1276,8 @@ void SplineC2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
           for (int index = 0; index < last - first; index++)
           {
             const size_t output_index = block_offset + first + index;
-            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da,
-                                                 db, dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
+            spline2offload::evaluate_vgh_impl_v2(spline_ptr, block_coefs, ix, iy, iz, first + index, a, b, c, da, db,
+                                                 dc, d2a, d2b, d2c, offload_scratch_iw_ptr + output_index,
                                                  spline_padded_size);
             offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::LAPL + output_index] =
                 SymTrace(offload_scratch_iw_ptr[spline_padded_size * SoAFields3D::HESS00 + output_index],
