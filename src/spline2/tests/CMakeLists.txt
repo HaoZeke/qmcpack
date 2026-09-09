@@ -28,3 +28,12 @@ if(USE_OBJECT_TARGET)
 endif()
 
 add_unit_test(${UTEST_NAME} 1 1 $<TARGET_FILE:${UTEST_EXE}>)
+
+if(HAVE_MPI)
+  # The shared and divided cases need a group of ranks: at one rank a sharing group
+  # shares with itself and every one of them returns early, so the same executable
+  # also runs on two and on four. The assertion counts differ between them, which is
+  # the point of registering more than one.
+  add_unit_test(${UTEST_NAME}-r2 2 1 $<TARGET_FILE:${UTEST_EXE}>)
+  add_unit_test(${UTEST_NAME}-r4 4 1 $<TARGET_FILE:${UTEST_EXE}>)
+endif()
