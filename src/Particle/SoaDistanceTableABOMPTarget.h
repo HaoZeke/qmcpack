@@ -158,7 +158,9 @@ public:
   bool hasMultiWalkerTempData() const override { return true; }
 
   const RealType* getMultiWalkerTempDataPtr() const override
-  { return mw_mem_handle_.getResource().mw_new_old_dist_displ.data(); }
+  {
+    return mw_mem_handle_.getResource().mw_new_old_dist_displ.data();
+  }
 
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
@@ -401,7 +403,9 @@ public:
 
     {
       ScopedTimer offload(offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2)                         map(always, to: input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
+      PRAGMA_OFFLOAD(
+          "omp target teams distribute parallel for collapse(2)                         map(always, to: "
+          "input_ptr[:move_input.size()])                         depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
       for (int iw = 0; iw < nw_local; ++iw)
         for (int jat = 0; jat < num_sources_local; ++jat)
         {
