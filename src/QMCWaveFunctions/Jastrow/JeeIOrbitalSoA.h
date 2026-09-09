@@ -1073,7 +1073,7 @@ public:
      * their bytes, since one transfer of the same 1.5 MB costs the same 11 ms.
      */
     const RealType* mw_ei_full = nullptr;
-    size_t ei_full_stride = 0;
+    size_t ei_full_stride      = 0;
     try
     {
       mw_ei_full     = dt_ei.getMultiWalkerDataPtr();
@@ -1123,9 +1123,9 @@ public:
     mem.acc_reduce.resize(static_cast<size_t>(na) * 10);
     mem.acc_jpart.resize(static_cast<size_t>(na) * nfield * Nelec_l);
 
-    auto* elec_grp    = mem.elec_group.data();
-    const size_t ei_stride    = ei_full_stride;
-    const size_t pad_ei_full  = getAlignedSize<RealType>(wfc_leader.Nion);
+    auto* elec_grp           = mem.elec_group.data();
+    const size_t ei_stride   = ei_full_stride;
+    const size_t pad_ei_full = getAlignedSize<RealType>(wfc_leader.Nion);
     auto* memb_off    = mem.memb_offsets.data();
     auto* memb_elec   = mem.memb_elec.data();
     auto* memb_dist   = mem.memb_dist.data();
@@ -1219,9 +1219,8 @@ public:
                * lists. 33 comparisons against walking about eleven packed
                * entries, and no transfer.
                */
-              const int kg = elec_grp[kel];
-              const RealType* restrict kI_row =
-                  mw_ei_full + (static_cast<size_t>(iw) * Nelec_l + kel) * ei_stride;
+              const int kg                    = elec_grp[kel];
+              const RealType* restrict kI_row = mw_ei_full + (static_cast<size_t>(iw) * Nelec_l + kel) * ei_stride;
               for (int iat_ion = 0; iat_ion < Nion; iat_ion++)
               {
                 const RealType r_jI = ei_dist[iat_ion];
