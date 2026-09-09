@@ -343,6 +343,12 @@ attribute:
 +-----------------------+------------+---------------+---------+----------------------------------------------------------+
 
 The product of ``shared_ranks`` and ``distributed_ranks`` may not exceed the total number of MPI ranks within a compute node.
+
+``shared_ranks`` lowers host memory: one copy of the coefficients per group of ranks, each rank mapping it onto its own
+device on an offload build. ``distributed_ranks`` divides the orbitals into that many blocks, which lowers device memory
+as well, since each rank then maps only its own block. Orbital rotation is the exception and requires an undivided table:
+it mixes every orbital with every other, so a rotated spline orbital set throws when ``distributed_ranks`` is larger
+than 1.
 Sharing and/or distributing memory only affect the memory allocation on the host. Distributing memory cannot be enabled when
 using GPUs. Sharing memory can be used with GPUs enabled to reduce host memory footprint within the compute node. When evaluations
 of B-spline orbitals happen on the host, sharing and/or distributing memory across NUMA domains may cause performance penalty.
