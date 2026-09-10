@@ -504,9 +504,158 @@ void test_J3_polynomial3D(const DynamicCoordinateKind kind_selected)
   }
 }
 
+/** the batched accept has to leave the same state the single walker accept does.
+ *
+ * JeeIOrbitalSoA keeps Uat, dUat and d2Uat across moves and an accept updates them
+ * incrementally, so log_value_ after an accept is a running total. Recomputing the
+ * term from the accepted configuration has to give the same number. If it does not,
+ * every evaluation after the accept is made against a wavefunction that has drifted,
+ * which is what a shift in the pseudopotential energy looks like from the outside.
+ *
+ * No reference numbers here on purpose. The incremental state is checked against a
+ * recompute of the same configuration, so the test cannot pass by agreeing with a
+ * figure that was itself wrong.
+ */
+void test_J3_batched_accept(const DynamicCoordinateKind kind_selected)
+{
+  const SimulationCell simulation_cell;
+  ParticleSet ions_(simulation_cell, kind_selected);
+  ions_.setName("ion");
+  ions_.create({2});
+  ions_.R[0] = {2.0, 0.0, 0.0};
+  ions_.R[1] = {-2.0, 0.0, 0.0};
+  SpeciesSet& source_species(ions_.getSpeciesSet());
+  source_species.addSpecies("C");
+  ions_.update();
+
+  // two walkers, so the batched accept has more than one move to place on the device
+  const int nw = 2;
+  std::vector<ParticleSet> elecs(nw, ParticleSet(simulation_cell, kind_selected));
+  for (int iw = 0; iw < nw; iw++)
+  {
+    auto& e = elecs[iw];
+    e.setName("elec");
+    e.create({2, 2});
+    e.R[0] = {1.00, 0.0, 0.0};
+    e.R[1] = {0.0, 0.0, 0.0};
+    e.R[2] = {-1.00, 0.0, 0.0};
+    e.R[3] = {0.0, 0.0, 2.0};
+    // the two walkers are not the same configuration, or a per walker indexing
+    // fault would cancel
+    e.R[1][1] += 0.1 * (iw + 1);
+    e.R[3][2] -= 0.05 * (iw + 1);
+    SpeciesSet& target_species(e.getSpeciesSet());
+    const int upIdx                    = target_species.addSpecies("u");
+    const int downIdx                  = target_species.addSpecies("d");
+    const int chargeIdx                = target_species.addAttribute("charge");
+    target_species(chargeIdx, upIdx)   = -1;
+    target_species(chargeIdx, downIdx) = -1;
+  }
+
+  const char* particles = R"(<tmp>
+  <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
+     <correlation ispecies="C" especies1="u" especies2="u" isize="3" esize="3" rcut="10">
+       <coefficients id="uuC" type="Array" optimize="yes"> 8.227710241e-06 2.480817653e-06 -5.354068112e-06 -1.112644787e-05 -2.208006078e-06 5.213121933e-06 -1.537865869e-05 8.899030233e-06 6.257255036e-06 3.214580988e-06 -7.716743051e-06 -5.275682993e-06 -1.778457637e-06 7.926492166e-06 1.767718682e-06 5.451693643e-06 5.099229044e-06 -7.259144046e-06 -3.331387256e-06 -1.917186297e-06 -1.352371308e-06 3.395795298e-06 -7.207717903e-06 -8.417589123e-06</coefficients>
+     </correlation>
+     <correlation ispecies="C" especies1="u" especies2="d" isize="3" esize="3" rcut="10">
+       <coefficients id="udC" type="Array" optimize="yes"> -6.939530224e-06 2.634169299e-05 4.046256499e-06 6.397449517e-06 2.116502065e-06 -1.482828074e-05 -2.017346198e-06 -1.834722340e-06 -2.128333939e-06 6.677160687e-06 7.484349260e-06 -1.180825291e-06 -1.617132404e-06 -2.607480350e-06 -1.365385358e-06 -3.006045849e-06 -6.454295212e-06 -1.293972790e-06 -1.397631976e-06 -1.482828074e-06 -1.834722340e-06 -2.017346198e-06 -2.128333939e-06 6.677160687e-06</coefficients>
+     </correlation>
+  </jastrow>
+</tmp>)";
+  Libxml2Document doc;
+  REQUIRE(doc.parseFromString(particles));
+  xmlNodePtr jas_eeI = xmlFirstElementChild(doc.getRoot());
+
+  Communicate* c = OHMMS::Controller;
+  using J3Type   = JeeIOrbitalSoA<PolynomialFunctor3D>;
+  std::vector<std::unique_ptr<WaveFunctionComponent>> j3s;
+  for (int iw = 0; iw < nw; iw++)
+  {
+    eeI_JastrowBuilder jastrow(c, elecs[iw], ions_);
+    j3s.push_back(jastrow.buildComponent(jas_eeI));
+    REQUIRE(dynamic_cast<J3Type*>(j3s[iw].get()) != nullptr);
+    elecs[iw].update();
+  }
+
+  RefVector<ParticleSet> p_refs;
+  RefVector<WaveFunctionComponent> j_refs;
+  for (int iw = 0; iw < nw; iw++)
+  {
+    p_refs.push_back(elecs[iw]);
+    j_refs.push_back(*j3s[iw]);
+  }
+  RefVectorWithLeader<ParticleSet> p_list(elecs[0], p_refs);
+  RefVectorWithLeader<WaveFunctionComponent> j_list(*j3s[0], j_refs);
+
+  ResourceCollection pset_res("test_pset");
+  ResourceCollection wfc_res("test_wfc");
+  elecs[0].createResource(pset_res);
+  j3s[0]->createResource(wfc_res);
+  ResourceCollectionTeamLock<ParticleSet> mw_pset_lock(pset_res, p_list);
+  ResourceCollectionTeamLock<WaveFunctionComponent> mw_wfc_lock(wfc_res, j_list);
+
+  std::vector<ParticleSet::ParticleGradient> G(nw, ParticleSet::ParticleGradient(4));
+  std::vector<ParticleSet::ParticleLaplacian> L(nw, ParticleSet::ParticleLaplacian(4));
+  for (int iw = 0; iw < nw; iw++)
+    j3s[iw]->evaluateLog(elecs[iw], G[iw], L[iw]);
+
+  /* Two accepted moves, not one. The device path asks the electron-ion table for
+   * its temporary distances through requireTempDataOnDevice, and a table only
+   * starts producing them on the move after the request, so the first accept takes
+   * the fallback whatever the deck says. One move would test the fallback twice.
+   */
+  const int moved_elec_id = 1;
+  for (int step = 0; step < 2; step++)
+  {
+    std::vector<ParticleSet::SingleParticlePos> displs(nw);
+    for (int iw = 0; iw < nw; iw++)
+      displs[iw] = {0.1 + 0.01 * iw, -0.05, 0.02 * (step + 1)};
+
+    ParticleSet::mw_makeMove(p_list, moved_elec_id, displs);
+    std::vector<PsiValue> ratios(nw);
+    j3s[0]->mw_calcRatio(j_list, p_list, moved_elec_id, ratios);
+
+    std::vector<bool> isAccepted(nw, true);
+    j3s[0]->mw_accept_rejectMove(j_list, p_list, moved_elec_id, isAccepted, false);
+    ParticleSet::mw_accept_rejectMove(p_list, moved_elec_id, isAccepted, true);
+  }
+
+  // what the accepts left behind, against a recompute of the configuration they left
+  for (int iw = 0; iw < nw; iw++)
+  {
+    /* evaluateGL forms the gradient and the laplacian from the stored Uat, dUat and
+     * d2Uat, so it reports what the accepts maintained. evaluateLog rebuilds those
+     * from the configuration. The two have to agree, and the order matters: the
+     * recompute overwrites the state, so the incremental figures are taken first.
+     */
+    ParticleSet::ParticleGradient G_inc(4);
+    ParticleSet::ParticleLaplacian L_inc(4);
+    const LogValue incremental = j3s[iw]->evaluateGL(elecs[iw], G_inc, L_inc, false);
+
+    ParticleSet::ParticleGradient G_fresh(4);
+    ParticleSet::ParticleLaplacian L_fresh(4);
+    elecs[iw].update();
+    const LogValue recomputed = j3s[iw]->evaluateLog(elecs[iw], G_fresh, L_fresh);
+
+    CHECK(std::real(incremental) == Approx(std::real(recomputed)));
+    for (int iel = 0; iel < 4; iel++)
+    {
+      CHECK(std::real(L_inc[iel]) == Approx(std::real(L_fresh[iel])));
+      for (int idim = 0; idim < OHMMS_DIM; idim++)
+        CHECK(std::real(G_inc[iel][idim]) == Approx(std::real(G_fresh[iel][idim])));
+    }
+  }
+}
+
 TEST_CASE("PolynomialFunctor3D Jastrow", "[wavefunction]")
 {
   test_J3_polynomial3D(DynamicCoordinateKind::DC_POS);
   test_J3_polynomial3D(DynamicCoordinateKind::DC_POS_OFFLOAD);
+}
+
+TEST_CASE("eeI Jastrow batched accept against a recompute", "[wavefunction]")
+{
+  test_J3_batched_accept(DynamicCoordinateKind::DC_POS);
+  test_J3_batched_accept(DynamicCoordinateKind::DC_POS_OFFLOAD);
 }
 } // namespace qmcplusplus
