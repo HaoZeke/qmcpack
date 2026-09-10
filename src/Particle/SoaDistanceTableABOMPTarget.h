@@ -184,6 +184,12 @@ public:
    */
   const RealType* getMultiWalkerTempDeviceDataPtr() const override
   {
+    /* Null unless the device side holds this move's distances, both halves. The flag
+     * and the address are one decision: a consumer that has to check them separately
+     * is a consumer that can forget to.
+     */
+    if (!temp_data_filled_on_device_)
+      return nullptr;
     return mw_mem_handle_.getResource().mw_new_old_dist_displ.device_data();
   }
 
@@ -509,10 +515,20 @@ public:
     for (size_t iw = 0; iw < nw; iw++)
       dt_list[iw].move(p_list[iw], rnew_list[iw], iat, prepare_old);
 
-    /* Last, because the single walker form above clears this: after it, the device side holds
-     * this move's distances exactly when the offload above ran.
+    /* Last, because the single walker form above clears this.
+     *
+     * prepare_old is part of the condition and not only whether the offload ran. The
+     * kernel above writes the new half always and the old half only under
+     * prepare_old, so a move that does not ask for the old positions leaves that half
+     * holding whatever the previous move that did ask put there. A consumer reducing
+     * over the batch reads both halves, and telling it the data is present when half
+     * of it is a previous move's is a wrong answer rather than a slow one.
+     *
+     * The AA form keeps old_prepared_elec_id_ for the same reason, set to iat under
+     * prepare_old and to -1 otherwise, and asserts on it where it reads the old row.
+     * That is the same statement about the same half.
      */
-    dt_leader.temp_data_filled_on_device_ = temp_data_on_device_;
+    dt_leader.temp_data_filled_on_device_ = temp_data_on_device_ && prepare_old;
   }
 
   ///update the stripe for jat-th particle
