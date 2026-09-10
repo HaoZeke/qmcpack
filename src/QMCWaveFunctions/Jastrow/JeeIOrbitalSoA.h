@@ -423,7 +423,10 @@ public:
    */
   JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false)
       : WaveFunctionComponent(obj_name),
-        ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
+        ee_Table_ID_(elecs.addTable(elecs,
+                                    DTModes::NEED_TEMP_DATA_ON_HOST |
+                                        (wantsOffload(elecs, use_offload) ? DTModes::ALL_OFF
+                                                                          : DTModes::NEED_VP_FULL_TABLE_ON_HOST))),
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         Ions(ions)
   {
@@ -431,6 +434,15 @@ public:
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
     use_offload_ = use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
     init(elecs);
+  }
+
+  /** the offload decision, in a form the initializer list can use
+   *
+   * use_offload_ is set in the body, and the table requests are made before it.
+   */
+  static bool wantsOffload(const ParticleSet& elecs, bool use_offload)
+  {
+    return use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
