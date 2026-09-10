@@ -308,6 +308,15 @@ public:
     throw std::runtime_error(name_ + " multi walker data pointer for temp not supported");
   }
 
+  /** the device address of the batch's temporary distances, or null
+   *
+   * The host address this table publishes is pinned, so a kernel given it through
+   * is_device_ptr dereferences host memory across the interconnect and reads
+   * whatever the last transfer back put there. A consumer that wants the device
+   * copy has to name it.
+   */
+  virtual const RealType* getMultiWalkerTempDeviceDataPtr() const { return nullptr; }
+
   virtual const RealType* mw_evalDistsInRange(const RefVectorWithLeader<DistanceTable>& dt_list,
                                               const RefVectorWithLeader<ParticleSet>& p_list,
                                               size_t range_begin,
@@ -449,6 +458,16 @@ public:
   {
     throw std::runtime_error(name_ + " multi walker data pointer not supported");
   }
+
+  /** the device address of the multi-walker full table, or null
+   *
+   * Same reason as the temporary form above: the host address is pinned and a
+   * kernel can dereference it, so a consumer that names it is correct only while
+   * something keeps the host side current. That something is the transfer this
+   * table makes at the end of every batched evaluation, which on a production
+   * deck is a third of the run.
+   */
+  virtual const RealType* getMultiWalkerDeviceDataPtr() const { return nullptr; }
 
   /// return stride of per target pctl data. full table data = stride * num of target particles
   [[noreturn]] virtual size_t getPerTargetPctlStrideSize() const

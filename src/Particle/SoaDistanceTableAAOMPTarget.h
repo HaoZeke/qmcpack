@@ -93,6 +93,11 @@ struct SoaDistanceTableAAOMPTarget : public DTD_BConds<T, D, SC>, public Distanc
     return mw_mem_handle_.getResource().mw_new_old_dist_displ.data();
   }
 
+  const RealType* getMultiWalkerTempDeviceDataPtr() const override
+  {
+    return mw_mem_handle_.getResource().mw_new_old_dist_displ.device_data();
+  }
+
   void createResource(ResourceCollection& collection) const override
   {
     auto resource_index = collection.addResource(std::make_unique<DTAAMultiWalkerMem>());

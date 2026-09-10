@@ -170,6 +170,11 @@ public:
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
 
+  const RealType* getMultiWalkerDeviceDataPtr() const override
+  {
+    return mw_mem_handle_.getResource().mw_r_dr.device_data();
+  }
+
   const RealType* getMultiWalkerTempDataPtr() const override
   {
     return mw_mem_handle_.getResource().mw_new_old_dist_displ.data();
