@@ -914,6 +914,334 @@ public:
 
   inline void restore(int iat) override {}
 
+  /** the accept for a batch, with the triplet sums and the scatter done on the device
+   *
+   * The single walker accept runs computeU3 twice, once for the position left and once
+   * for the one taken, and each walks the triplets the moved electron makes with the ions
+   * near it and the electrons near those ions. Both produce a sum for the moved electron
+   * and a scatter into every other electron of a triplet, and the scatter is why this
+   * could not follow the one body path: a reduction alone leaves the accept recomputing
+   * what it needs, which at a high acceptance is most of the work.
+   *
+   * The two passes accumulate one difference rather than two sets, since the accept only
+   * ever applies new minus old. What comes back is that difference plus the moved
+   * electron's own value, gradient and laplacian on both sides, and the host applies it.
+   */
+  void mw_accept_rejectMove(const RefVectorWithLeader<WaveFunctionComponent>& wfc_list,
+                            const RefVectorWithLeader<ParticleSet>& p_list,
+                            int iat,
+                            const std::vector<bool>& isAccepted,
+                            bool safe_to_delay = false) const override
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    const int nw     = wfc_list.size();
+
+    std::vector<int> accepted;
+    accepted.reserve(nw);
+    for (int iw = 0; iw < nw; iw++)
+      if (isAccepted[iw])
+        accepted.push_back(iw);
+
+    auto& p_leader        = p_list.getLeader();
+    const auto& dt_ei     = p_leader.getDistTableAB(wfc_leader.ei_Table_ID_);
+    const auto& dt_ee     = p_leader.getDistTableAA(wfc_leader.ee_Table_ID_);
+    const bool worthwhile = use_offload_ && accepted.size() > 1;
+
+    /* The electron ion table forms its temporary distances on the device for a consumer
+     * that has asked, and it forms them on the next move rather than this one. Announcing
+     * the need and then asking whether it is met reads back the flag just set and walks
+     * into a buffer nothing has written, so the batch that announces takes the host path.
+     */
+    bool device_ready = false;
+    if (worthwhile)
+    {
+      device_ready = dt_ei.hasTempDataOnDevice();
+      if (!device_ready)
+        dt_ei.requireTempDataOnDevice();
+    }
+
+    if (!device_ready)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+
+    const RealType* mw_ei = nullptr;
+    const RealType* mw_ee = nullptr;
+    try
+    {
+      // this table writes only the device side of its temporary buffer, so name that
+      mw_ei = dt_ei.getMultiWalkerTempDeviceDataPtr();
+      mw_ee = dt_ee.getMultiWalkerTempDataPtr();
+    }
+    catch (...)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+    if (mw_ei == nullptr || mw_ee == nullptr)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+
+    auto& mem = wfc_leader.mw_mem_handle_.getResource();
+
+    /* The accept does not need the packed membership at all.
+     *
+     * It exists to tell the kernel which electrons are inside which ions, and the
+     * electron-ion table is already on the device: the constructor asks for
+     * NEED_FULL_TABLE_ANYTIME. So the kernel reads that table and tests the ion
+     * cutoff itself, which is one comparison per ion against walking a packed list
+     * that a host to device transfer has to deliver first.
+     */
+    const RealType* mw_ei_full = nullptr;
+    size_t ei_full_stride      = 0;
+    try
+    {
+      mw_ei_full     = dt_ei.getMultiWalkerDataPtr();
+      ei_full_stride = dt_ei.getPerTargetPctlStrideSize();
+    }
+    catch (...)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+    if (mw_ei_full == nullptr || ei_full_stride == 0)
+    {
+      WaveFunctionComponent::mw_accept_rejectMove(wfc_list, p_list, iat, isAccepted, safe_to_delay);
+      return;
+    }
+
+    // the membership still describes the configuration before any of these moves lands
+    std::vector<const JeeIOrbitalSoA<FT>*> wfcs(nw);
+    for (int iw = 0; iw < nw; iw++)
+      wfcs[iw] = &wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(iw);
+    mem.packElecGroups(p_leader, wfc_leader.Nelec);
+    mem.packFunctors(wfc_leader.F, wfc_leader.eGroups, wfc_leader.iGroups);
+    mem.packIons(wfc_leader.Ion_cutoff, wfc_leader.Ions.GroupID, wfc_leader.Nion);
+
+    const int na        = accepted.size();
+    const int Nelec_l   = wfc_leader.Nelec;
+    const int Nion      = wfc_leader.Nion;
+    const int eGroups   = wfc_leader.eGroups;
+    const int iGroups   = wfc_leader.iGroups;
+    const int jg        = p_leader.GroupID[iat];
+    const size_t nfield = 5;
+
+    mem.acc_walker.resize(na);
+    for (int ia = 0; ia < na; ia++)
+      mem.acc_walker[ia] = accepted[ia];
+    mem.acc_walker.updateTo();
+    mem.acc_delta.resize(static_cast<size_t>(na) * nfield * Nelec_l);
+    mem.acc_reduce.resize(static_cast<size_t>(na) * 10);
+    mem.acc_jpart.resize(static_cast<size_t>(na) * nfield * Nelec_l);
+
+    auto* elec_grp           = mem.elec_group.data();
+    const size_t ei_stride   = ei_full_stride;
+    const size_t pad_ei_full = getAlignedSize<RealType>(wfc_leader.Nion);
+    auto* memb_off           = mem.memb_offsets.data();
+    auto* memb_elec          = mem.memb_elec.data();
+    auto* memb_dist          = mem.memb_dist.data();
+    auto* memb_displ         = mem.memb_displ.data();
+    auto* gamma_flat         = mem.gamma_flat.data();
+    auto* fn_have            = mem.fn_have.data();
+    auto* ion_cut            = mem.ion_cutoff.data();
+    auto* ion_grp            = mem.ion_group.data();
+    auto* delta_ptr          = mem.acc_delta.data();
+    auto* reduce_ptr         = mem.acc_reduce.data();
+    auto* walker_ptr         = mem.acc_walker.data();
+    auto* jpart_ptr          = mem.acc_jpart.data();
+    auto* memb_ion           = mem.memb_ion.data();
+    auto* memb_grp           = mem.memb_grp.data();
+    auto* inv_off            = mem.inv_offsets.data();
+    auto* inv_ent            = mem.inv_entry.data();
+
+    const size_t memb_stride = mem.memb_walker_stride;
+    const size_t gsize       = mem.gamma_size;
+    const int N_eI_k         = mem.N_eI;
+    const int N_ee_k         = mem.N_ee;
+    const int C_k            = mem.C;
+    const RealType L_k       = mem.L;
+    const size_t n_memb      = mem.memb_elec.size();
+    const size_t n_off       = mem.memb_offsets.size();
+    /* Both tables lay a walker's temporary distances out as the padded count followed by
+     * the displacement components, the position taken first and the one left after every
+     * walker's. The electron electron table does not publish the stride, so it is formed
+     * the same way here for both.
+     */
+    const size_t pad_ei     = getAlignedSize<RealType>(Nion);
+    const size_t pad_ee     = getAlignedSize<RealType>(Nelec_l);
+    const size_t stride_ei  = pad_ei * (OHMMS_DIM + 1);
+    const size_t stride_ee  = pad_ee * (OHMMS_DIM + 1);
+    const size_t delta_len  = mem.acc_delta.size();
+    const size_t inv_stride = mem.inv_walker_stride;
+    const size_t n_inv_off  = mem.inv_offsets.size();
+    const size_t n_inv_ent  = mem.inv_entry.size();
+    constexpr RealType lapfac(OHMMS_DIM - 1);
+
+    PRAGMA_OFFLOAD("omp target teams distribute num_teams(na) \
+                      map(to: walker_ptr[:na]) \
+                      map(to: elec_grp[:Nelec_l]) \
+                      map(alloc: jpart_ptr[:delta_len]) \
+                      map(to: gamma_flat[:gsize * iGroups * eGroups * eGroups], \
+                              fn_have[:iGroups * eGroups * eGroups]) \
+                      map(to: ion_cut[:Nion], ion_grp[:Nion]) \
+                      map(always, from: delta_ptr[:delta_len], reduce_ptr[:na * 10]) \
+                      is_device_ptr(mw_ei, mw_ee, mw_ei_full)")
+    for (int ia = 0; ia < na; ia++)
+    {
+      const int iw            = walker_ptr[ia];
+      auto* restrict delta_iw = delta_ptr + static_cast<size_t>(ia) * nfield * Nelec_l;
+      auto* restrict jpart_iw = jpart_ptr + static_cast<size_t>(ia) * nfield * Nelec_l;
+
+      PRAGMA_OFFLOAD("omp parallel for")
+      for (int k = 0; k < static_cast<int>(nfield) * Nelec_l; k++)
+        delta_iw[k] = RealType(0);
+
+      for (int pass = 0; pass < 2; pass++)
+      {
+        // pass 0 is the position taken, pass 1 the one left; the accept applies the
+        // difference, so the second enters with the opposite sign
+        const RealType sign     = pass == 0 ? RealType(1) : RealType(-1);
+        const size_t ei_base    = (pass == 0 ? iw : iw + nw) * stride_ei;
+        const size_t ee_base    = (pass == 0 ? iw : iw + nw) * stride_ee;
+        const RealType* ei_dist = mw_ei + ei_base;
+        const RealType* ei_disp = ei_dist + pad_ei;
+        const RealType* ee_dist = mw_ee + ee_base;
+        const RealType* ee_disp = ee_dist + pad_ee;
+
+        /* One thread per electron, each summing the entries that land on it in the
+           * order the pack laid them down. The moved electron's own sum is gathered the
+           * same way, as a partial per electron, and added up afterwards in electron
+           * order. Nothing here depends on how the threads were scheduled.
+           */
+        PRAGMA_OFFLOAD("omp parallel for")
+        for (int kel = 0; kel < Nelec_l; kel++)
+        {
+          RealType jU = 0, jG0 = 0, jG1 = 0, jG2 = 0, jL = 0;
+          RealType kU = 0, kG0 = 0, kG1 = 0, kG2 = 0, kL = 0;
+
+          if (kel != iat)
+          {
+            /* Which ions this electron is inside is a comparison, not a lookup.
+             * The electron-ion table is on the device, so the row for (iw, kel)
+             * gives both the distance and the displacement, and the cutoff test is
+             * the same one the host membership applied when it built the lists: one
+             * comparison per ion, and no transfer.
+             */
+            const int kg                    = elec_grp[kel];
+            const RealType* restrict kI_row = mw_ei_full + (static_cast<size_t>(iw) * Nelec_l + kel) * ei_stride;
+            for (int iat_ion = 0; iat_ion < Nion; iat_ion++)
+            {
+              const RealType r_jI = ei_dist[iat_ion];
+              if (r_jI >= ion_cut[iat_ion])
+                continue;
+              const RealType r_kI_test = kI_row[iat_ion];
+              if (r_kI_test >= ion_cut[iat_ion])
+                continue;
+              const int fidx = (ion_grp[iat_ion] * eGroups + jg) * eGroups + kg;
+              if (!fn_have[fidx])
+                continue;
+
+              const RealType* grow = gamma_flat + static_cast<size_t>(fidx) * gsize;
+              const RealType jI0   = ei_disp[iat_ion];
+              const RealType jI1   = ei_disp[pad_ei + iat_ion];
+              const RealType jI2   = ei_disp[2 * pad_ei + iat_ion];
+              const RealType r_kI  = r_kI_test;
+              const RealType r_jk  = ee_dist[kel];
+              const RealType jk0   = ee_disp[kel];
+              const RealType jk1   = ee_disp[pad_ee + kel];
+              const RealType jk2   = ee_disp[2 * pad_ee + kel];
+              const RealType kI0   = kI_row[pad_ei_full + iat_ion];
+              const RealType kI1   = kI_row[2 * pad_ei_full + iat_ion];
+              const RealType kI2   = kI_row[3 * pad_ei_full + iat_ion];
+
+              RealType val, g0, g1, g2, h00, h01, h02, h11, h22;
+              FT::evaluateVGH_impl(r_jk, r_jI, r_kI, grow, N_eI_k, N_ee_k, C_k, L_k, val, g0, g1, g2, h00, h01, h02,
+                                   h11, h22);
+
+              const RealType dot_jk_jI = jk0 * jI0 + jk1 * jI1 + jk2 * jI2;
+              const RealType dot_kI_jk = kI0 * jk0 + kI1 * jk1 + kI2 * jk2;
+
+              jU += val;
+              jG0 += g1 * jI0 + g0 * jk0;
+              jG1 += g1 * jI1 + g0 * jk1;
+              jG2 += g1 * jI2 + g0 * jk2;
+              jL -= h00 + h11 + lapfac * (g0 + g1) + RealType(2) * h01 * dot_jk_jI;
+
+              kU += val;
+              kG0 += g2 * kI0 - g0 * jk0;
+              kG1 += g2 * kI1 - g0 * jk1;
+              kG2 += g2 * kI2 - g0 * jk2;
+              kL -= h00 + h22 + lapfac * (g0 + g2) - RealType(2) * h02 * dot_kI_jk;
+            }
+          }
+
+          delta_iw[kel] += sign * kU;
+          delta_iw[Nelec_l + kel] += sign * kG0;
+          delta_iw[2 * Nelec_l + kel] += sign * kG1;
+          delta_iw[3 * Nelec_l + kel] += sign * kG2;
+          delta_iw[4 * Nelec_l + kel] += sign * kL;
+
+          jpart_iw[kel]               = jU;
+          jpart_iw[Nelec_l + kel]     = jG0;
+          jpart_iw[2 * Nelec_l + kel] = jG1;
+          jpart_iw[3 * Nelec_l + kel] = jG2;
+          jpart_iw[4 * Nelec_l + kel] = jL;
+        }
+
+        // and the moved electron's own sum, added in electron order
+        RealType Uj = 0, dUj0 = 0, dUj1 = 0, dUj2 = 0, d2Uj = 0;
+        for (int kel = 0; kel < Nelec_l; kel++)
+        {
+          Uj += jpart_iw[kel];
+          dUj0 += jpart_iw[Nelec_l + kel];
+          dUj1 += jpart_iw[2 * Nelec_l + kel];
+          dUj2 += jpart_iw[3 * Nelec_l + kel];
+          d2Uj += jpart_iw[4 * Nelec_l + kel];
+        }
+
+        const int off       = ia * 10 + pass * 5;
+        reduce_ptr[off]     = Uj;
+        reduce_ptr[off + 1] = dUj0;
+        reduce_ptr[off + 2] = dUj1;
+        reduce_ptr[off + 3] = dUj2;
+        reduce_ptr[off + 4] = d2Uj;
+      }
+    }
+
+    // apply what came back, then let the per walker accept finish the bookkeeping
+    for (int ia = 0; ia < na; ia++)
+    {
+      auto& wfc              = wfc_list.getCastedElement<JeeIOrbitalSoA<FT>>(accepted[ia]);
+      const RealType* delta  = mem.acc_delta.data() + static_cast<size_t>(ia) * nfield * Nelec_l;
+      const RealType* reduce = mem.acc_reduce.data() + ia * 10;
+
+      for (int jel = 0; jel < Nelec_l; jel++)
+      {
+        wfc.Uat[jel] += delta[jel];
+        wfc.d2Uat[jel] += delta[4 * Nelec_l + jel];
+      }
+      for (int idim = 0; idim < OHMMS_DIM; idim++)
+      {
+        valT* restrict save_g = wfc.dUat.data(idim);
+        for (int jel = 0; jel < Nelec_l; jel++)
+          save_g[jel] += delta[(1 + idim) * Nelec_l + jel];
+      }
+
+      const RealType new_Uj = reduce[0];
+      const RealType old_Uj = reduce[5];
+      wfc.log_value_ += old_Uj - new_Uj;
+      wfc.Uat[iat]   = new_Uj;
+      wfc.dUat(iat)  = posT(reduce[1], reduce[2], reduce[3]);
+      wfc.d2Uat[iat] = reduce[4];
+
+      // the membership update stays here: it is a handful of host side list edits
+      wfc.updateMembershipAfterAccept(p_list[accepted[ia]], iat);
+    }
+  }
+
   void acceptMove(ParticleSet& P, int iat, bool safe_to_delay = false) override
   {
     const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
