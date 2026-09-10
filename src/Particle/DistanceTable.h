@@ -78,6 +78,21 @@ public:
   ///get modes
   inline DTModes getModes() const { return modes_; }
 
+  /** throw when a host consumer reads a table whose host copy is never refreshed
+   *
+   * A table carrying MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST has its result left on
+   * the device, so its host arrays hold whatever the last transfer or the last
+   * allocation put there. A read of them returns a number rather than an error,
+   * which is what makes the mode's cost hard to remove: dropping the transfer runs
+   * faster and answers wrong with nothing said. This names the reader.
+   */
+  void assertHostCopyMaintained(const char* what) const
+  {
+    if (modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST)
+      throw std::runtime_error(std::string("DistanceTable '") + name_ + "': " + what +
+                               " read on a table whose host copy is never transferred back.");
+  }
+
   ///set modes
   inline void setModes(DTModes modes) { modes_ = modes; }
 
@@ -270,35 +285,67 @@ public:
 
   /** return full table distances
    */
-  const std::vector<DistRow>& getDistances() const { return distances_; }
+  const std::vector<DistRow>& getDistances() const
+  {
+    assertHostCopyMaintained("getDistances");
+    return distances_;
+  }
 
   /** return full table displacements
    */
-  const std::vector<DisplRow>& getDisplacements() const { return displacements_; }
+  const std::vector<DisplRow>& getDisplacements() const
+  {
+    assertHostCopyMaintained("getDisplacements");
+    return displacements_;
+  }
 
   /** return a row of distances for a given target particle
    */
-  const DistRow& getDistRow(int iel) const { return distances_[iel]; }
+  const DistRow& getDistRow(int iel) const
+  {
+    assertHostCopyMaintained("getDistRow");
+    return distances_[iel];
+  }
 
   /** return a row of displacements for a given target particle
    */
-  const DisplRow& getDisplRow(int iel) const { return displacements_[iel]; }
+  const DisplRow& getDisplRow(int iel) const
+  {
+    assertHostCopyMaintained("getDisplRow");
+    return displacements_[iel];
+  }
 
   /** return the temporary distances when a move is proposed
    */
-  const DistRow& getTempDists() const { return temp_r_; }
+  const DistRow& getTempDists() const
+  {
+    assertHostCopyMaintained("getTempDists");
+    return temp_r_;
+  }
 
   /** return the temporary displacements when a move is proposed
    */
-  const DisplRow& getTempDispls() const { return temp_dr_; }
+  const DisplRow& getTempDispls() const
+  {
+    assertHostCopyMaintained("getTempDispls");
+    return temp_dr_;
+  }
 
   /** return old distances set up by move() for optimized distance table consumers
    */
-  const DistRow& getOldDists() const { return old_r_; }
+  const DistRow& getOldDists() const
+  {
+    assertHostCopyMaintained("getOldDists");
+    return old_r_;
+  }
 
   /** return old displacements set up by move() for optimized distance table consumers
    */
-  const DisplRow& getOldDispls() const { return old_dr_; }
+  const DisplRow& getOldDispls() const
+  {
+    assertHostCopyMaintained("getOldDispls");
+    return old_dr_;
+  }
 
   virtual size_t get_num_particls_stored() const { return 0; }
 
@@ -386,27 +433,51 @@ public:
 
   /** return full table distances
    */
-  const std::vector<DistRow>& getDistances() const { return distances_; }
+  const std::vector<DistRow>& getDistances() const
+  {
+    assertHostCopyMaintained("getDistances");
+    return distances_;
+  }
 
   /** return full table displacements
    */
-  const std::vector<DisplRow>& getDisplacements() const { return displacements_; }
+  const std::vector<DisplRow>& getDisplacements() const
+  {
+    assertHostCopyMaintained("getDisplacements");
+    return displacements_;
+  }
 
   /** return a row of distances for a given target particle
    */
-  const DistRow& getDistRow(int iel) const { return distances_[iel]; }
+  const DistRow& getDistRow(int iel) const
+  {
+    assertHostCopyMaintained("getDistRow");
+    return distances_[iel];
+  }
 
   /** return a row of displacements for a given target particle
    */
-  const DisplRow& getDisplRow(int iel) const { return displacements_[iel]; }
+  const DisplRow& getDisplRow(int iel) const
+  {
+    assertHostCopyMaintained("getDisplRow");
+    return displacements_[iel];
+  }
 
   /** return the temporary distances when a move is proposed
    */
-  const DistRow& getTempDists() const { return temp_r_; }
+  const DistRow& getTempDists() const
+  {
+    assertHostCopyMaintained("getTempDists");
+    return temp_r_;
+  }
 
   /** return the temporary displacements when a move is proposed
    */
-  const DisplRow& getTempDispls() const { return temp_dr_; }
+  const DisplRow& getTempDispls() const
+  {
+    assertHostCopyMaintained("getTempDispls");
+    return temp_dr_;
+  }
 
   int get_first_neighbor(IndexType iat, RealType& r, PosType& dr, bool newpos) const final
   {
