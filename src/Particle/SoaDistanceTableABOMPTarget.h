@@ -369,10 +369,29 @@ public:
                                                         num_padded, iel);
         }
 
+      /* One element instead of the whole array, to separate the data from the
+       * ordering.
+       *
+       * Withdrawing this transfer gives a wrong answer on either of the two tables
+       * a three-body Jastrow asks for: NaN out of NonLocalECP on the electron-ion
+       * one, and an energy 17.7 per cent out with NonLocalECP doubled on the
+       * electron-electron one. A throw on all fourteen host-facing accessors fires
+       * in neither case, so nothing reads the stale host arrays through the
+       * interface, and what the transfer provides is not obviously its bytes.
+       *
+       * The task and its dependency survive here and the 11 MB does not. Correct
+       * and fast means the dependency was ordering and the bytes can go; wrong
+       * means a host consumer reads the array by a route the accessors do not
+       * cover. Diagnostic, not for merge.
+       */
       if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
       {
         PRAGMA_OFFLOAD(
             "omp target update from(r_dr_ptr[:mw_r_dr.size()]) depend(inout:r_dr_ptr[:mw_r_dr.size()]) nowait")
+      }
+      else
+      {
+        PRAGMA_OFFLOAD("omp target update from(r_dr_ptr[:1]) depend(inout:r_dr_ptr[:mw_r_dr.size()]) nowait")
       }
       // wait for computing and (optional) transferring back to host.
       // It can potentially be moved to ParticleSet to fuse multiple similar taskwait
