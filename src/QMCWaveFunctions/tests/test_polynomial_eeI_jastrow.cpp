@@ -9,6 +9,7 @@
 // File created by: Ye Luo, yeluo@anl.gov, Argonne National Laboratory
 //////////////////////////////////////////////////////////////////////////////////////
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
 #include "Utilities/for_testing/Catch2Approx.h"
 
 #include "OhmmsData/Libxml2Doc.h"
@@ -528,29 +529,19 @@ void test_J3_batched_accept(const DynamicCoordinateKind kind_selected)
   source_species.addSpecies("C");
   ions_.update();
 
-  // two walkers, so the batched accept has more than one move to place on the device
-  const int nw = 2;
-  std::vector<ParticleSet> elecs(nw, ParticleSet(simulation_cell, kind_selected));
-  for (int iw = 0; iw < nw; iw++)
-  {
-    auto& e = elecs[iw];
-    e.setName("elec");
-    e.create({2, 2});
-    e.R[0] = {1.00, 0.0, 0.0};
-    e.R[1] = {0.0, 0.0, 0.0};
-    e.R[2] = {-1.00, 0.0, 0.0};
-    e.R[3] = {0.0, 0.0, 2.0};
-    // the two walkers are not the same configuration, or a per walker indexing
-    // fault would cancel
-    e.R[1][1] += 0.1 * (iw + 1);
-    e.R[3][2] -= 0.05 * (iw + 1);
-    SpeciesSet& target_species(e.getSpeciesSet());
-    const int upIdx                    = target_species.addSpecies("u");
-    const int downIdx                  = target_species.addSpecies("d");
-    const int chargeIdx                = target_species.addAttribute("charge");
-    target_species(chargeIdx, upIdx)   = -1;
-    target_species(chargeIdx, downIdx) = -1;
-  }
+  ParticleSet elec_(simulation_cell, kind_selected);
+  elec_.setName("elec");
+  elec_.create({2, 2});
+  elec_.R[0] = {1.00, 0.0, 0.0};
+  elec_.R[1] = {0.0, 0.0, 0.0};
+  elec_.R[2] = {-1.00, 0.0, 0.0};
+  elec_.R[3] = {0.0, 0.0, 2.0};
+  SpeciesSet& target_species(elec_.getSpeciesSet());
+  const int upIdx                    = target_species.addSpecies("u");
+  const int downIdx                  = target_species.addSpecies("d");
+  const int chargeIdx                = target_species.addAttribute("charge");
+  target_species(chargeIdx, upIdx)   = -1;
+  target_species(chargeIdx, downIdx) = -1;
 
   const char* particles = R"(<tmp>
   <jastrow name="J3" type="eeI" function="polynomial" source="ion" print="yes">
@@ -568,75 +559,110 @@ void test_J3_batched_accept(const DynamicCoordinateKind kind_selected)
 
   Communicate* c = OHMMS::Controller;
   using J3Type   = JeeIOrbitalSoA<PolynomialFunctor3D>;
-  std::vector<std::unique_ptr<WaveFunctionComponent>> j3s;
-  for (int iw = 0; iw < nw; iw++)
-  {
-    eeI_JastrowBuilder jastrow(c, elecs[iw], ions_);
-    j3s.push_back(jastrow.buildComponent(jas_eeI));
-    REQUIRE(dynamic_cast<J3Type*>(j3s[iw].get()) != nullptr);
-    elecs[iw].update();
-  }
-
-  RefVector<ParticleSet> p_refs;
-  RefVector<WaveFunctionComponent> j_refs;
-  for (int iw = 0; iw < nw; iw++)
-  {
-    p_refs.push_back(elecs[iw]);
-    j_refs.push_back(*j3s[iw]);
-  }
-  RefVectorWithLeader<ParticleSet> p_list(elecs[0], p_refs);
-  RefVectorWithLeader<WaveFunctionComponent> j_list(*j3s[0], j_refs);
+  eeI_JastrowBuilder jastrow(c, elec_, ions_);
+  auto j3_uptr = jastrow.buildComponent(jas_eeI);
+  REQUIRE(dynamic_cast<J3Type*>(j3_uptr.get()) != nullptr);
+  elec_.update();
 
   ResourceCollection pset_res("test_pset");
   ResourceCollection wfc_res("test_wfc");
-  elecs[0].createResource(pset_res);
-  j3s[0]->createResource(wfc_res);
+  elec_.createResource(pset_res);
+  j3_uptr->createResource(wfc_res);
+
+  /* A clone, as the file's other batched section does and as a crowd does. The
+   * second walker is then displaced, because two walkers in the same configuration
+   * let a per-walker indexing fault cancel.
+   */
+  ParticleSet elec_clone(elec_);
+  elec_clone.R[1][1] += 0.13;
+  elec_clone.R[3][2] -= 0.07;
+  elec_clone.update();
+  auto j3_clone = j3_uptr->makeClone(elec_clone);
+
+  const int nw = 2;
+  RefVectorWithLeader<ParticleSet> p_list(elec_, {elec_, elec_clone});
+  RefVectorWithLeader<WaveFunctionComponent> j_list(*j3_uptr, {*j3_uptr, *j3_clone});
   ResourceCollectionTeamLock<ParticleSet> mw_pset_lock(pset_res, p_list);
   ResourceCollectionTeamLock<WaveFunctionComponent> mw_wfc_lock(wfc_res, j_list);
 
-  std::vector<ParticleSet::ParticleGradient> G(nw, ParticleSet::ParticleGradient(4));
-  std::vector<ParticleSet::ParticleLaplacian> L(nw, ParticleSet::ParticleLaplacian(4));
+  std::vector<WaveFunctionComponent*> j3s{j3_uptr.get(), j3_clone.get()};
+  std::vector<ParticleSet*> elecs{&elec_, &elec_clone};
   for (int iw = 0; iw < nw; iw++)
-    j3s[iw]->evaluateLog(elecs[iw], G[iw], L[iw]);
-
-  /* Two accepted moves, not one. The device path asks the electron-ion table for
-   * its temporary distances through requireTempDataOnDevice, and a table only
-   * starts producing them on the move after the request, so the first accept takes
-   * the fallback whatever the deck says. One move would test the fallback twice.
-   */
-  const int moved_elec_id = 1;
-  for (int step = 0; step < 2; step++)
   {
-    std::vector<ParticleSet::SingleParticlePos> displs(nw);
-    for (int iw = 0; iw < nw; iw++)
-      displs[iw] = {0.1 + 0.01 * iw, -0.05, 0.02 * (step + 1)};
-
-    ParticleSet::mw_makeMove(p_list, moved_elec_id, displs);
-    std::vector<PsiValue> ratios(nw);
-    j3s[0]->mw_calcRatio(j_list, p_list, moved_elec_id, ratios);
-
-    std::vector<bool> isAccepted(nw, true);
-    j3s[0]->mw_accept_rejectMove(j_list, p_list, moved_elec_id, isAccepted, false);
-    ParticleSet::mw_accept_rejectMove(p_list, moved_elec_id, isAccepted, true);
+    ParticleSet::ParticleGradient G(4);
+    ParticleSet::ParticleLaplacian L(4);
+    j3s[iw]->evaluateLog(*elecs[iw], G, L);
   }
 
-  // what the accepts left behind, against a recompute of the configuration they left
+  /* The steps interleave on purpose, and each of them is a different path.
+   *
+   * More than one accepted move, because the device path asks the electron-ion
+   * table for its temporary distances through requireTempDataOnDevice and a table
+   * only starts producing them on the move after the request, so the first accept
+   * takes the fallback whatever the deck says.
+   *
+   * And not every step accepts in both walkers. The device accept engages only
+   * when more than one walker accepts, so a step with one acceptance runs the host
+   * path for everything, and a real run alternates between the two all the way
+   * through. If they leave state that differs, the alternation is where it shows,
+   * and a test that always accepts in both would never look there.
+   *
+   * The moved electron changes as well, because membership is maintained per
+   * electron and a fault in that maintenance need not touch the one electron a
+   * fixed-target test would move.
+   */
+  struct Step
+  {
+    int moved_elec;
+    bool accept_first;
+    bool accept_second;
+    const char* what;
+  };
+  const std::vector<Step> steps{
+      {1, true, true, "both accept, the first one, which falls back and asks for the device data"},
+      {1, true, true, "both accept, the device path"},
+      {1, true, false, "one accepts, so the host path runs for the batch"},
+      {2, true, true, "both accept a different electron, the device path again"},
+      {2, false, true, "the other one accepts, the host path again"},
+      {0, true, true, "both accept, after the two paths have alternated"},
+  };
+
+  for (size_t step = 0; step < steps.size(); step++)
+  {
+    const Step& st = steps[step];
+    std::vector<ParticleSet::SingleParticlePos> displs(nw);
+    for (int iw = 0; iw < nw; iw++)
+      displs[iw] = {0.07 + 0.01 * iw, -0.03, 0.02 * (static_cast<int>(step) + 1)};
+
+    ParticleSet::mw_makeMove(p_list, st.moved_elec, displs);
+    std::vector<PsiValue> ratios(nw);
+    j3s[0]->mw_calcRatio(j_list, p_list, st.moved_elec, ratios);
+
+    std::vector<bool> isAccepted{st.accept_first, st.accept_second};
+    j3s[0]->mw_accept_rejectMove(j_list, p_list, st.moved_elec, isAccepted, false);
+    ParticleSet::mw_accept_rejectMove(p_list, st.moved_elec, isAccepted, true);
+  }
+
+  /* Checked once, after the whole sequence, and not after each step.
+   *
+   * The recompute overwrites the state the accepts maintained, so checking inside
+   * the loop would reset what the next step consumes and destroy the thing the
+   * alternation is here to test: state left by one path and read by the other.
+   * Checking at the end keeps the accumulation and the mixing intact. If it fails,
+   * shortening the step table bisects it.
+   */
   for (int iw = 0; iw < nw; iw++)
   {
-    /* evaluateGL forms the gradient and the laplacian from the stored Uat, dUat and
-     * d2Uat, so it reports what the accepts maintained. evaluateLog rebuilds those
-     * from the configuration. The two have to agree, and the order matters: the
-     * recompute overwrites the state, so the incremental figures are taken first.
-     */
     ParticleSet::ParticleGradient G_inc(4);
     ParticleSet::ParticleLaplacian L_inc(4);
-    const LogValue incremental = j3s[iw]->evaluateGL(elecs[iw], G_inc, L_inc, false);
+    const LogValue incremental = j3s[iw]->evaluateGL(*elecs[iw], G_inc, L_inc, false);
 
     ParticleSet::ParticleGradient G_fresh(4);
     ParticleSet::ParticleLaplacian L_fresh(4);
-    elecs[iw].update();
-    const LogValue recomputed = j3s[iw]->evaluateLog(elecs[iw], G_fresh, L_fresh);
+    elecs[iw]->update();
+    const LogValue recomputed = j3s[iw]->evaluateLog(*elecs[iw], G_fresh, L_fresh);
 
+    INFO("walker " << iw << " after " << steps.size() << " steps alternating the two accept paths");
     CHECK(std::real(incremental) == Approx(std::real(recomputed)));
     for (int iel = 0; iel < 4; iel++)
     {
@@ -645,6 +671,12 @@ void test_J3_batched_accept(const DynamicCoordinateKind kind_selected)
         CHECK(std::real(G_inc[iel][idim]) == Approx(std::real(G_fresh[iel][idim])));
     }
   }
+
+  /* evaluateGL forms the gradient and the laplacian from the stored Uat, dUat and
+   * d2Uat, so it reports what the accepts maintained; evaluateLog rebuilds them from
+   * the configuration. The order above matters: the recompute overwrites the state,
+   * so the incremental figures are taken first.
+   */
 }
 
 TEST_CASE("PolynomialFunctor3D Jastrow", "[wavefunction]")
