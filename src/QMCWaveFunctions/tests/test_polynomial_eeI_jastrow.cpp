@@ -42,6 +42,51 @@ TEST_CASE("PolynomialFunctor3D functor zero", "[wavefunction]")
   REQUIRE(u == 0.0);
 }
 
+TEST_CASE("PolynomialFunctor3D device value gradient and hessian", "[wavefunction]")
+{
+  using real_type = PolynomialFunctor3D::real_type;
+
+  PolynomialFunctor3D functor("test_functor");
+  functor.cutoff_radius = 2.5;
+  functor.resize(3, 3);
+  for (size_t i = 0; i < functor.Parameters.size(); i++)
+    functor.Parameters[i] = 0.017 * static_cast<real_type>((i % 5) + 1) - 0.023 * static_cast<real_type>((i % 3) + 1);
+  functor.reset_gamma();
+
+  std::vector<real_type> gamma_flat(functor.gammaFlatSize());
+  functor.copyGammaFlat(gamma_flat.data());
+  const real_type L = 0.5 * functor.cutoff_radius;
+
+  /* The device form carries no screening, because the compression that feeds it keeps
+   * only triplets inside the ion cutoff. Sampling outside would compare against the zero
+   * the host returns there.
+   */
+  const real_type rs[] = {0.2, 0.6, 1.0};
+  for (real_type r_12 : rs)
+    for (real_type r_1I : rs)
+      for (real_type r_2I : rs)
+      {
+        TinyVector<real_type, 3> grad;
+        Tensor<real_type, 3> hess;
+        const real_type val_host = functor.evaluate(r_12, r_1I, r_2I, grad, hess);
+
+        real_type v, g0, g1, g2, h00, h01, h02, h11, h22;
+        PolynomialFunctor3D::evaluateVGH_impl(r_12, r_1I, r_2I, gamma_flat.data(), functor.N_eI, functor.N_ee,
+                                              functor.C, L, v, g0, g1, g2, h00, h01, h02, h11, h22);
+
+        CHECK(v == Approx(val_host));
+        // the device form leaves each derivative divided by its distances
+        CHECK(g0 * r_12 == Approx(grad[0]));
+        CHECK(g1 * r_1I == Approx(grad[1]));
+        CHECK(g2 * r_2I == Approx(grad[2]));
+        CHECK(h00 == Approx(hess(0, 0)));
+        CHECK(h11 == Approx(hess(1, 1)));
+        CHECK(h22 == Approx(hess(2, 2)));
+        CHECK(h01 * (r_12 * r_1I) == Approx(hess(0, 1)));
+        CHECK(h02 * (r_12 * r_2I) == Approx(hess(0, 2)));
+      }
+}
+
 void create_J3_ion_reference_values(TinyVector<ParticleSet::ParticleGradient, 3>& igr_egrad,
                                     TinyVector<ParticleSet::ParticleLaplacian, 3>& igr_lapl,
                                     int ionid)
