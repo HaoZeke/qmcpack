@@ -15,7 +15,6 @@
 #define QMCPLUSPLUS_DTDIMPL_AB_OMPTARGET_H
 
 #include <algorithm>
-
 #include "Lattice/ParticleBConds3DSoa.h"
 #include "DistanceTable.h"
 #include "OMPTarget/OffloadAlignedAllocators.hpp"
@@ -47,6 +46,17 @@ private:
     OffloadPinnedVector<T> mw_r_dr;
     ///accelerator input buffer for multiple data set
     OffloadPinnedVector<char> offload_input;
+    /** temporary distances and displacements of one moved target against every source,
+     *  for a whole batch: [new: nw][old: nw], each [1+D][num_sources padded]
+     *
+     *  A one-body Jastrow reduces over the sources of a single target, which is the same
+     *  shape the two-body one reduces over electrons, and that one is handed the batch at
+     *  once because the electron-electron table keeps this on the device. This is the
+     *  matching storage for the electron-ion table.
+     */
+    OffloadPinnedVector<T> mw_new_old_dist_displ;
+    ///device pointers of the moved target's position per walker
+    OffloadPinnedVector<char> move_input;
 
     DTABMultiWalkerMem() : Resource("DTABMultiWalkerMem") {}
 
@@ -159,6 +169,35 @@ public:
   }
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
+
+  const RealType* getMultiWalkerTempDataPtr() const override
+  {
+    return mw_mem_handle_.getResource().mw_new_old_dist_displ.data();
+  }
+
+  /** the device address of the same buffer
+   *
+   * The electron electron table attaches each walker's temporary arrays into its multi
+   * walker buffer, so the host side of that buffer is filled by the per walker move and a
+   * consumer naming the host address reads valid data. This table keeps them separate:
+   * only the device side is written, so a consumer has to name the device address.
+   */
+  const RealType* getMultiWalkerTempDeviceDataPtr() const override
+  {
+    return mw_mem_handle_.getResource().mw_new_old_dist_displ.device_data();
+  }
+
+  void requireTempDataOnDevice() const override { temp_data_on_device_ = true; }
+
+  /** whether the device side holds the temp distances for the move in hand
+   *
+   * Asking for them does not produce them: the batched move fills the device side only when
+   * the request was already standing when it ran, and the move for the current particle has
+   * happened by the time a consumer asks. Reporting the request here would tell that consumer
+   * the buffer is good on the one move between the request and the first fill, where it holds
+   * whatever it held before, and a zero distance there divides.
+   */
+  bool hasTempDataOnDevice() const override { return temp_data_filled_on_device_; }
 
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
@@ -285,21 +324,37 @@ public:
       }
     }
 
-    // To maximize thread usage, the loop over electrons is chunked. Each chunk is sent to an OpenMP offload thread team.
-    const int ChunkSizePerTeam = 512;
-    const size_t num_teams     = (num_sources_ + ChunkSizePerTeam - 1) / ChunkSizePerTeam;
-
+    /* One team per target, looping its threads over the sources, leaves almost every
+     * thread idle whenever a cell has few ions: a team is hundreds of threads wide and a
+     * virtual particle set against a two atom cell gives it two distances to compute. The
+     * target and source axes are independent, one output element each, so flattening them
+     * into a single iteration space fills the teams from the product instead of from the
+     * source count alone. Consecutive work items keep the same target and walk the
+     * sources, which is the order the distance and displacement rows are written in.
+     * Stating the collapse rather than computing a flat index keeps a division and a
+     * modulo out of every iteration, which matters for cells with more sources than a
+     * team is wide, the ones that already filled their teams under the chunking.
+     */
     auto* r_dr_ptr              = mw_r_dr.data();
     auto* input_ptr             = offload_input.data();
     const int num_sources_local = num_sources_;
 
+    /* Collapsing fills the teams but leaves the count to the runtime, which packs a
+     * moderate collapsed space into too few of them: against the chunking it runs
+     * at 0.92 and 0.97 of its speed at 512 targets by 128 and by 512 sources while winning
+     * the other ten cells of the sweep. Naming a count derived from the work keeps the grid
+     * wide there too.
+     */
+    const long total_work = static_cast<long>(total_targets) * num_sources_local;
+    const int num_teams   = static_cast<int>(std::min<long>(std::max<long>(total_work / 64, 1), 65535));
+
     {
       ScopedTimer offload(dt_leader.offload_timer_);
-      PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(total_targets*num_teams) \
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) num_teams(num_teams) \
                           map(always, to: input_ptr[:offload_input.size()]) \
                           depend(out:r_dr_ptr[:mw_r_dr.size()])")
       for (int iat = 0; iat < total_targets; ++iat)
-        for (int team_id = 0; team_id < num_teams; team_id++)
+        for (int iel = 0; iel < num_sources_local; ++iel)
         {
           auto* target_pos_ptr = reinterpret_cast<RealType*>(input_ptr + ptr_size * nw);
           const int walker_id =
@@ -308,17 +363,12 @@ public:
           auto* r_iat_ptr      = r_dr_ptr + iat * num_padded * (D + 1);
           auto* dr_iat_ptr     = r_dr_ptr + iat * num_padded * (D + 1) + num_padded;
 
-          const int first = ChunkSizePerTeam * team_id;
-          const int last  = omptarget::min(first + ChunkSizePerTeam, num_sources_local);
-
           T pos[D];
           for (int idim = 0; idim < D; idim++)
             pos[idim] = target_pos_ptr[iat * D + idim];
 
-          PRAGMA_OFFLOAD("omp parallel for")
-          for (int iel = first; iel < last; iel++)
-            DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
-                                                          num_padded, iel);
+          DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_iat_ptr, dr_iat_ptr,
+                                                        num_padded, iel);
         }
 
       if (!(modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST))
@@ -339,38 +389,133 @@ public:
     DistanceTable::mw_evaluate(dt_list, p_list);
   }
 
-  /** evaluate the temporary pair relations for one target, on the host.
-   *
-   * The batched driver moves one particle at a time through
-   * ParticleSet::computeNewPosDistTables, which calls this on every table it
-   * holds. On an all-electron cell at 256 walkers that is a million and a half
-   * calls per run against a couple of hundred batched evaluations, so a table
-   * that cannot serve it cannot be selected at all.
-   *
-   * Computed on the host, the same way the non-offload form and the AA offload
-   * form both do. The device table is what mw_evaluate fills and is not touched
-   * here: a single-particle move has no batch to place on the device, and
-   * bringing one row back to compute it would be a transfer per move.
-   */
+  ///evaluate the temporary pair relations
   inline void move(const ParticleSet& P, const PosType& rnew, const IndexType iat, bool prepare_old) override
   {
     ScopedTimer local_timer(move_timer_);
-
+    // this form does not touch the device side, so what is there no longer describes the move
+    temp_data_filled_on_device_ = false;
+    // Single particle against all sources is cheap and is computed on the host, as
+    // SoaDistanceTableAAOMPTarget::move does. The device side is not written here: the
+    // full table is recomputed by mw_evaluate, so anything stored into distances_ or
+    // displacements_ (which alias the device-mapped mw_r_dr) is for host consumers
+    // only and must not be relied on inside a target region.
     DTD_BConds<T, D, SC>::computeDistances(rnew, origin_.getCoordinates().getAllParticlePos(), temp_r_.data(), temp_dr_,
                                            0, num_sources_);
-    // If the full table is not ready all the time, overwrite the current value.
-    // Without this a rejected move leaves the row undefined.
     if (!(modes_ & DTModes::NEED_FULL_TABLE_ANYTIME) && prepare_old)
       DTD_BConds<T, D, SC>::computeDistances(P.R[iat], origin_.getCoordinates().getAllParticlePos(),
                                              distances_[iat].data(), displacements_[iat], 0, num_sources_);
   }
 
-  /** accept the temporary relations into the jat-th row, on the host.
+  /** the moved target of every walker against every source, computed on the device
    *
-   * The rows are references into the multi-walker device buffer while a batched
-   * section holds the resource, and plain host allocations otherwise, so this
-   * writes wherever the row currently lives, which is what the caller expects.
+   * The base form loops the single walker move, which leaves the result on the host only,
+   * so a component reducing over sources for the batch has nothing on the device to read
+   * and falls back to a walker at a time. The electron-electron table already keeps this;
+   * this is the same for the electron-ion one.
+   *
+   * Host data follows only when DTModes::NEED_TEMP_DATA_ON_HOST is set, as in the
+   * electron-electron table, so a consumer reading getTempDists() keeps working.
    */
+  void mw_move(const RefVectorWithLeader<DistanceTable>& dt_list,
+               const RefVectorWithLeader<ParticleSet>& p_list,
+               const std::vector<PosType>& rnew_list,
+               const IndexType iat,
+               bool prepare_old = true) const override
+  {
+    assert(this == &dt_list.getLeader());
+    auto& dt_leader             = dt_list.getCastedLeader<SoaDistanceTableABOMPTarget>();
+    auto& mw_mem                = dt_leader.mw_mem_handle_.getResource();
+    auto& mw_new_old_dist_displ = mw_mem.mw_new_old_dist_displ;
+    auto& move_input            = mw_mem.move_input;
+    const size_t nw             = dt_list.size();
+
+    const size_t num_padded  = getAlignedSize<T>(num_sources_);
+    const size_t stride_size = num_padded * (D + 1);
+    mw_new_old_dist_displ.resize(2 * nw * stride_size);
+
+    /* One pointer to the walker's sources and one new position per walker, packed so the
+     * kernel takes a single mapped buffer rather than one clause per array.
+     */
+    const size_t ptr_size      = sizeof(RealType*);
+    const size_t realtype_size = sizeof(RealType);
+    move_input.resize(nw * ptr_size + nw * D * realtype_size * 2);
+    auto source_ptrs = reinterpret_cast<RealType**>(move_input.data());
+    auto new_pos     = reinterpret_cast<RealType*>(move_input.data() + nw * ptr_size);
+    auto old_pos     = new_pos + nw * D;
+
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      auto& dt             = dt_list.getCastedElement<SoaDistanceTableABOMPTarget>(iw);
+      auto& RSoA_OMPTarget = dynamic_cast<const RealSpacePositionsOMPTarget&>(dt.origin_.getCoordinates());
+      source_ptrs[iw]      = const_cast<RealType*>(RSoA_OMPTarget.getDevicePtr());
+      for (size_t idim = 0; idim < D; idim++)
+      {
+        new_pos[iw * D + idim] = rnew_list[iw][idim];
+        old_pos[iw * D + idim] = p_list[iw].R[iat][idim];
+      }
+    }
+
+    auto* r_dr_ptr              = mw_new_old_dist_displ.data();
+    auto* input_ptr             = move_input.data();
+    const int num_sources_local = num_sources_;
+    const int nw_local          = nw;
+
+    // nothing on the device reads these unless a consumer has asked for them
+    if (temp_data_on_device_)
+    {
+      ScopedTimer offload(offload_timer_);
+      /* Synchronous, as the AA table's move is and for the reason given there:
+       * nowait costs 2.13x over 4 crowds by routing their kernels through the hidden
+       * helper thread instead of leaving them on separate streams, and gains nothing once
+       * that thread is disabled. The depend clause orders nothing without nowait and is
+       * kept to describe the dependency.
+       */
+      PRAGMA_OFFLOAD("omp target teams distribute parallel for collapse(2) \
+                      map(always, to: input_ptr[:move_input.size()]) \
+                      depend(out: r_dr_ptr[:mw_new_old_dist_displ.size()])")
+      for (int iw = 0; iw < nw_local; ++iw)
+        for (int jat = 0; jat < num_sources_local; ++jat)
+        {
+          auto* source_pos_ptr = reinterpret_cast<RealType**>(input_ptr)[iw];
+          auto* new_pos_ptr    = reinterpret_cast<RealType*>(input_ptr + nw_local * sizeof(RealType*));
+          auto* old_pos_ptr    = new_pos_ptr + nw_local * D;
+
+          T pos[D];
+          for (int idim = 0; idim < D; idim++)
+            pos[idim] = new_pos_ptr[iw * D + idim];
+          DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded, r_dr_ptr + iw * stride_size,
+                                                        r_dr_ptr + iw * stride_size + num_padded, num_padded, jat);
+
+          if (prepare_old)
+          {
+            for (int idim = 0; idim < D; idim++)
+              pos[idim] = old_pos_ptr[iw * D + idim];
+            DTD_BConds<T, D, SC>::computeDistancesOffload(pos, source_pos_ptr, num_padded,
+                                                          r_dr_ptr + (iw + nw_local) * stride_size,
+                                                          r_dr_ptr + (iw + nw_local) * stride_size + num_padded,
+                                                          num_padded, jat);
+          }
+        }
+    }
+
+
+    /* Host data comes from computing it on the host rather than from bringing the device
+     * result back. A single target against all sources is cheap there, which is why the
+     * single walker form does it that way, and a copy back would be a blocking transfer
+     * on every move whose cost does not fall as walkers per crowd fall. Consumers reading
+     * getTempDists() keep exactly what they had; the device copy is an addition.
+     */
+    for (size_t iw = 0; iw < nw; iw++)
+      dt_list[iw].move(p_list[iw], rnew_list[iw], iat, prepare_old);
+
+    /* Last, because the single walker form above clears this: after it, the device side holds
+     * this move's distances exactly when the offload above ran.
+     */
+    dt_leader.temp_data_filled_on_device_ = temp_data_on_device_;
+  }
+
+  ///update the stripe for jat-th particle
   inline void update(IndexType iat) override
   {
     ScopedTimer local_timer(update_timer_);
@@ -401,6 +546,14 @@ private:
 
   /// timer for offload portion
   NewTimer& offload_timer_;
+  /** a device side consumer reads the temporary distances of a batch
+   *
+   * Set by the consumer rather than by configuration, so a run whose components all read
+   * the distances on the host leaves the device out of a move entirely.
+   */
+  mutable bool temp_data_on_device_ = false;
+  /// whether the device side of the temp distances describes the move in hand
+  mutable bool temp_data_filled_on_device_ = false;
   /// timer for evaluate()
   NewTimer& evaluate_timer_;
   /// timer for the per-particle move, which the batched driver calls per step
