@@ -455,6 +455,37 @@ public:
   {
     throw std::runtime_error(name_ + " getPerTargetPctlStrideSize not supported");
   }
+
+  /** return the multi walker temporary distance table data pointer
+   *
+   * The AA form declares its own; a consumer reducing over sources for a moved target
+   * needs the same from the AB form, and a table without a device side path says so
+   * rather than returning something stale.
+   */
+  [[noreturn]] virtual const RealType* getMultiWalkerTempDataPtr() const
+  {
+    throw std::runtime_error(name_ + " multi walker data pointer for temp not supported");
+  }
+
+  /** announce that a device side consumer reads the temporary distances of a batch
+   *
+   * Producing them costs a kernel whose work grows with the number of sources, and it
+   * buys nothing unless something on the device reads the result. A table produces them
+   * for a consumer that has asked and otherwise leaves the device out of a move.
+   */
+  virtual void requireTempDataOnDevice() const {}
+
+  /// the temporary distances of a batch are being produced on the device
+  virtual bool hasTempDataOnDevice() const { return false; }
+
+  /** the device address of the batch's temporary distances, or null
+   *
+   * A table that attaches each walker's temporary arrays into its multi walker buffer
+   * fills that buffer's host side as a side effect of the per walker move, so a consumer
+   * naming the host address reads valid data. A table that keeps them separate writes
+   * only the device side, and a consumer has to name the device address.
+   */
+  virtual const RealType* getMultiWalkerTempDeviceDataPtr() const { return nullptr; }
 };
 } // namespace qmcplusplus
 #endif
