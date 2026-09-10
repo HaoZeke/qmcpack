@@ -17,6 +17,7 @@
 #define QMCPLUSPLUS_DISTANCETABLEDATAIMPL_H
 
 #include "Particle/ParticleSet.h"
+#include <stdexcept>
 #include <limits>
 #include "OhmmsPETE/OhmmsVector.h"
 #include "OhmmsPETE/OhmmsMatrix.h"
@@ -77,6 +78,29 @@ public:
 
   ///get modes
   inline DTModes getModes() const { return modes_; }
+
+  /** abort if this table's host copy is not maintained
+   *
+   * A table in MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST never receives the
+   * `omp target update from` that refreshes distances_ and displacements_, so
+   * reading them returns whatever was last in that memory. Nothing said so: the
+   * accessors are bare array reads. Dropping NEED_VP_FULL_TABLE_ON_HOST from one
+   * component therefore produced a total energy 14 per cent out on CO2/Cu(110)
+   * and 14.5 standard errors out on monoO with a batched driver, with no error
+   * and no warning anywhere.
+   *
+   * This is a diagnostic guard, on to find the reader. It is not the shipping
+   * form: the shipping form is for the accessor to be unavailable on such a
+   * table, or for the table to refresh on demand.
+   */
+  void assertHostCopyMaintained(const char* what) const
+  {
+    if (modes_ & DTModes::MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST)
+      throw std::runtime_error(std::string("DistanceTable '") + name_ + "': " + what +
+                               " read on a table whose host copy is never transferred back. "
+                               "The value would be stale.");
+  }
+
 
   ///set modes
   inline void setModes(DTModes modes) { modes_ = modes; }
@@ -270,19 +294,35 @@ public:
 
   /** return full table distances
    */
-  const std::vector<DistRow>& getDistances() const { return distances_; }
+  const std::vector<DistRow>& getDistances() const
+  {
+    assertHostCopyMaintained("getDistances");
+    return distances_;
+  }
 
   /** return full table displacements
    */
-  const std::vector<DisplRow>& getDisplacements() const { return displacements_; }
+  const std::vector<DisplRow>& getDisplacements() const
+  {
+    assertHostCopyMaintained("getDisplacements");
+    return displacements_;
+  }
 
   /** return a row of distances for a given target particle
    */
-  const DistRow& getDistRow(int iel) const { return distances_[iel]; }
+  const DistRow& getDistRow(int iel) const
+  {
+    assertHostCopyMaintained("getDistRow");
+    return distances_[iel];
+  }
 
   /** return a row of displacements for a given target particle
    */
-  const DisplRow& getDisplRow(int iel) const { return displacements_[iel]; }
+  const DisplRow& getDisplRow(int iel) const
+  {
+    assertHostCopyMaintained("getDisplRow");
+    return displacements_[iel];
+  }
 
   /** return the temporary distances when a move is proposed
    */
@@ -386,19 +426,35 @@ public:
 
   /** return full table distances
    */
-  const std::vector<DistRow>& getDistances() const { return distances_; }
+  const std::vector<DistRow>& getDistances() const
+  {
+    assertHostCopyMaintained("getDistances");
+    return distances_;
+  }
 
   /** return full table displacements
    */
-  const std::vector<DisplRow>& getDisplacements() const { return displacements_; }
+  const std::vector<DisplRow>& getDisplacements() const
+  {
+    assertHostCopyMaintained("getDisplacements");
+    return displacements_;
+  }
 
   /** return a row of distances for a given target particle
    */
-  const DistRow& getDistRow(int iel) const { return distances_[iel]; }
+  const DistRow& getDistRow(int iel) const
+  {
+    assertHostCopyMaintained("getDistRow");
+    return distances_[iel];
+  }
 
   /** return a row of displacements for a given target particle
    */
-  const DisplRow& getDisplRow(int iel) const { return displacements_[iel]; }
+  const DisplRow& getDisplRow(int iel) const
+  {
+    assertHostCopyMaintained("getDisplRow");
+    return displacements_[iel];
+  }
 
   /** return the temporary distances when a move is proposed
    */
