@@ -12,12 +12,16 @@
 
 #ifndef QMCPLUSPLUS_EEIJASTROW_OPTIMIZED_SOA_H
 #define QMCPLUSPLUS_EEIJASTROW_OPTIMIZED_SOA_H
+#include <atomic>
+
 #include "Configuration.h"
 #if !defined(QMC_BUILD_SANDBOX_ONLY)
 #include "QMCWaveFunctions/WaveFunctionComponent.h"
+#include "ResourceCollection.h"
 #endif
 #include "Particle/DistanceTable.h"
 #include "CPU/SIMD/aligned_allocator.hpp"
+#include "OMPTarget/OffloadAlignedAllocators.hpp"
 #include "CPU/SIMD/algorithm.hpp"
 #include <map>
 #include <numeric>
@@ -32,6 +36,252 @@ namespace qmcplusplus
  *For electrons, distinct pair correlation functions are used
  *for spins up-up/down-down and up-down/down-up.
  */
+
+/** Device-side mirrors of the state JeeIOrbitalSoA::computeU walks on the host.
+ *
+ * elecs_inside is Array<std::vector<int>,2>: ragged, and a target region cannot follow
+ * it. Everything here is the same information in offsets-plus-values form, refreshed
+ * per call rather than kept in sync with accepted moves, which keeps the invariant
+ * trivial at the price of one repack per ratio evaluation.
+ */
+
+template<typename VALT>
+struct JeeIMultiWalkerMem : public Resource
+{
+  Vector<size_t, OffloadPinnedAllocator<size_t>> memb_offsets;
+  Vector<int, OffloadPinnedAllocator<int>> memb_elec;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> memb_dist;
+  /** the displacement of each member from its ion, three components back to back
+   *
+   * The value of a triplet needs only distances. A gradient or a laplacian needs the
+   * displacement of the other electron from the ion as well, so the accept ships it.
+   */
+  Vector<VALT, OffloadPinnedAllocator<VALT>> memb_displ;
+  /** the same entries indexed by the electron they land on rather than by the ion
+   *
+   * A scatter accumulated with atomics sums in whatever order the threads arrive, so two
+   * runs of the same move differ in the last bits and the trajectories part. Grouping the
+   * entries by their target lets one thread own an electron and sum its contributions in
+   * a fixed order, which is the same arithmetic every time and needs no atomics.
+   */
+  Vector<int, OffloadPinnedAllocator<int>> memb_ion, memb_grp;
+  Vector<size_t, OffloadPinnedAllocator<size_t>> inv_offsets;
+  Vector<int, OffloadPinnedAllocator<int>> inv_entry;
+  size_t inv_walker_stride = 0;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> gamma_flat;
+  Vector<char, OffloadPinnedAllocator<char>> fn_have;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
+  Vector<int, OffloadPinnedAllocator<int>> ion_group;
+  /// each electron's spin group, which the accept needs and which never changes
+  Vector<int, OffloadPinnedAllocator<int>> elec_group;
+
+  /// pack it once; a walker's electrons do not change group
+  void packElecGroups(const ParticleSet& P, int nelec)
+  {
+    if (elec_group.size() == static_cast<size_t>(nelec))
+      return;
+    elec_group.resize(nelec);
+    for (int jel = 0; jel < nelec; jel++)
+      elec_group[jel] = P.GroupID[jel];
+    elec_group.updateTo();
+  }
+  Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
+  /** what the accept brings back: per walker the change every other electron sees, and
+   * the moved electron's own value, gradient and laplacian before and after the move
+   *
+   * The change is accumulated as one difference rather than as a new set and an old set,
+   * because that is what the accept applies and it halves both the buffer and the atomic
+   * traffic that fills it.
+   */
+  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_delta;
+  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_reduce;
+  /// per electron partials of the moved electron's own sum, summed in electron order
+  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_jpart;
+  /// which walker each accepted entry belongs to
+  Vector<int, OffloadPinnedAllocator<int>> acc_walker;
+
+  /// membership stamps the device copy was built from, one per walker
+  std::vector<size_t> packed_versions;
+
+  size_t memb_walker_stride = 0;
+  size_t gamma_size         = 0;
+  int N_eI = 0, N_ee = 0, C = 0;
+  VALT L = 0;
+
+  JeeIMultiWalkerMem() : Resource("JeeIMultiWalkerMem") {}
+  JeeIMultiWalkerMem(const JeeIMultiWalkerMem&) : JeeIMultiWalkerMem() {}
+  std::unique_ptr<Resource> makeClone() const override { return std::make_unique<JeeIMultiWalkerMem>(*this); }
+
+  /// flatten every walker's elecs_inside into one offsets/values pair
+  template<typename WFCPTRS>
+  void packMembership(const WFCPTRS& wfcs, int eGroups, int Nion, int nelec)
+  {
+    const size_t nw = wfcs.size();
+    /* elecs_inside changes only when a move is accepted, and a pass over the quadrature
+     * points of one configuration evaluates many ratios without accepting anything, so
+     * most calls would rebuild the copy the device already holds. The stamps the last
+     * pack read identify that copy.
+     */
+    bool packed_current = (packed_versions.size() == nw);
+    for (size_t iw = 0; packed_current && iw < nw; iw++)
+      packed_current = (packed_versions[iw] == wfcs[iw]->getMembershipVersion());
+    if (packed_current)
+      return;
+
+    packed_versions.resize(nw);
+    for (size_t iw = 0; iw < nw; iw++)
+      packed_versions[iw] = wfcs[iw]->getMembershipVersion();
+
+    memb_walker_stride = static_cast<size_t>(eGroups) * Nion;
+    size_t total       = 0;
+    memb_offsets.resize(nw * memb_walker_stride + 1);
+
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const auto& wfc = *wfcs[iw];
+      for (int kg = 0; kg < eGroups; kg++)
+        for (int iat = 0; iat < Nion; iat++)
+        {
+          memb_offsets[iw * memb_walker_stride + static_cast<size_t>(kg) * Nion + iat] = total;
+          total += wfc.getElecsInside(kg, iat).size();
+        }
+    }
+    memb_offsets[nw * memb_walker_stride] = total;
+    memb_elec.resize(total);
+    memb_dist.resize(total);
+    memb_displ.resize(total * 3);
+    memb_ion.resize(total);
+    memb_grp.resize(total);
+
+    size_t at = 0;
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const auto& wfc = *wfcs[iw];
+      for (int kg = 0; kg < eGroups; kg++)
+        for (int iat = 0; iat < Nion; iat++)
+        {
+          const auto& els = wfc.getElecsInside(kg, iat);
+          const auto& dst = wfc.getElecsInsideDist(kg, iat);
+          const auto& dsp = wfc.getElecsInsideDispl(kg, iat);
+          for (size_t n = 0; n < els.size(); n++, at++)
+          {
+            memb_elec[at] = els[n];
+            memb_dist[at] = dst[n];
+            memb_ion[at]  = iat;
+            memb_grp[at]  = kg;
+            for (int idim = 0; idim < 3; idim++)
+              memb_displ[at * 3 + idim] = dsp[n][idim];
+          }
+        }
+    }
+
+    /* The same entries again, grouped by the electron they land on. Counting first and
+     * filling second keeps each electron's list in increasing entry order, so the sum a
+     * thread forms over it does not depend on how the threads were scheduled.
+     */
+    const int nelec_l = nelec;
+    inv_walker_stride = static_cast<size_t>(nelec_l);
+    inv_offsets.resize(nw * inv_walker_stride + 1);
+    std::vector<size_t> counts(nw * inv_walker_stride, 0);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const size_t begin = memb_offsets[iw * memb_walker_stride];
+      const size_t end   = memb_offsets[(iw + 1) * memb_walker_stride];
+      for (size_t idx = begin; idx < end; idx++)
+        counts[iw * inv_walker_stride + memb_elec[idx]]++;
+    }
+    size_t running = 0;
+    for (size_t slot = 0; slot < nw * inv_walker_stride; slot++)
+    {
+      inv_offsets[slot] = running;
+      running += counts[slot];
+    }
+    inv_offsets[nw * inv_walker_stride] = running;
+    inv_entry.resize(running);
+    std::vector<size_t> cursor(inv_offsets.begin(), inv_offsets.end() - 1);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      const size_t begin = memb_offsets[iw * memb_walker_stride];
+      const size_t end   = memb_offsets[(iw + 1) * memb_walker_stride];
+      for (size_t idx = begin; idx < end; idx++)
+        inv_entry[cursor[iw * inv_walker_stride + memb_elec[idx]]++] = static_cast<int>(idx);
+    }
+
+
+    memb_offsets.updateTo();
+    memb_elec.updateTo();
+    memb_dist.updateTo();
+    memb_displ.updateTo();
+    memb_ion.updateTo();
+    memb_grp.updateTo();
+    inv_offsets.updateTo();
+    inv_entry.updateTo();
+  }
+
+  /// one flat gamma block per (ion group, j group, k group), plus a present/absent flag
+  template<typename FARRAY>
+  void packFunctors(const FARRAY& F, int eGroups, int iGroups)
+  {
+    /* The flat index below is built from an ion group and two electron groups,
+     * so the table has iGroups * eGroups * eGroups entries and not eGroups
+     * cubed. Sizing it by the electron count is only large enough while there
+     * are no more ion species than electron groups, which holds for a cell of
+     * one ion species and two spin channels and not in general. With three ion
+     * species and two spin channels the index
+     * reaches 11 in a table of 8.
+     */
+    const size_t ncombo = static_cast<size_t>(iGroups) * eGroups * eGroups;
+    fn_have.resize(ncombo);
+    std::fill(fn_have.begin(), fn_have.end(), char(0));
+
+    const auto* sample = [&]() -> decltype(F(0, 0, 0)) {
+      for (int ig = 0; ig < iGroups; ig++)
+        for (int jg = 0; jg < eGroups; jg++)
+          for (int kg = 0; kg < eGroups; kg++)
+            if (F(ig, jg, kg))
+              return F(ig, jg, kg);
+      return nullptr;
+    }();
+    if (sample == nullptr)
+      return;
+
+    gamma_size = sample->gammaFlatSize();
+    N_eI       = sample->getNeI();
+    N_ee       = sample->getNee();
+    C          = sample->getC();
+    L          = VALT(0.5) * sample->cutoff_radius;
+
+    gamma_flat.resize(gamma_size * ncombo);
+    std::fill(gamma_flat.begin(), gamma_flat.end(), VALT(0));
+    for (int ig = 0; ig < iGroups; ig++)
+      for (int jg = 0; jg < eGroups; jg++)
+        for (int kg = 0; kg < eGroups; kg++)
+          if (F(ig, jg, kg))
+          {
+            const size_t fidx = (static_cast<size_t>(ig) * eGroups + jg) * eGroups + kg;
+            F(ig, jg, kg)->copyGammaFlat(gamma_flat.data() + fidx * gamma_size);
+            fn_have[fidx] = char(1);
+          }
+    gamma_flat.updateTo();
+    fn_have.updateTo();
+  }
+
+  template<typename CUTVEC, typename GRPVEC>
+  void packIons(const CUTVEC& cutoffs, const GRPVEC& groups, int Nion)
+  {
+    ion_cutoff.resize(Nion);
+    ion_group.resize(Nion);
+    for (int iat = 0; iat < Nion; iat++)
+    {
+      ion_cutoff[iat] = cutoffs[iat];
+      ion_group[iat]  = groups[iat];
+    }
+    ion_cutoff.updateTo();
+    ion_group.updateTo();
+  }
+};
+
 template<class FT>
 class JeeIOrbitalSoA : public WaveFunctionComponent
 {
@@ -78,12 +328,28 @@ class JeeIOrbitalSoA : public WaveFunctionComponent
 
   /// the cutoff for e-I pairs
   std::vector<valT> Ion_cutoff;
+  /** stamp identifying the contents of elecs_inside
+   *
+   * Drawn from a counter that never repeats, so a stamp identifies one state of one
+   * object and a consumer holding a copy can tell whether the copy still describes it.
+   * A per object counter would let a later object reach a stamp an earlier one had
+   * already handed out.
+   */
+  size_t membership_version_ = 0;
+  static inline std::atomic<size_t> membership_stamp_source_{0};
+  /// record that elecs_inside no longer matches any copy taken of it
+  void touchMembership() { membership_version_ = ++membership_stamp_source_; }
+
   /// the electrons around ions within the cutoff radius, grouped by species
   Array<std::vector<int>, 2> elecs_inside;
   Array<std::vector<valT>, 2> elecs_inside_dist;
   Array<std::vector<posT>, 2> elecs_inside_displ;
   /// the ids of ions within the cutoff radius of an electron on which a move is proposed
   std::vector<int> ions_nearby_old, ions_nearby_new;
+
+  /// device path for mw_evaluateRatios; off unless the target particle set is offloaded
+  bool use_offload_ = false;
+  ResourceHandle<JeeIMultiWalkerMem<valT>> mw_mem_handle_;
 
   /// work buffer size
   size_t Nbuffer;
@@ -147,7 +413,15 @@ public:
   ///alias FuncType
   using FuncType = FT;
 
-  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs)
+  /** @param use_offload take the device ratio path
+   *
+   * The builder decides this from the deck's gpu attribute, defaulting to the
+   * coordinate kind, which is how the one- and two-body Jastrows are told. The device
+   * path reads the virtual-particle tables through getMultiWalkerDataPtr, which only
+   * the offload tables provide, so it also needs offload coordinates and is refused
+   * here without them.
+   */
+  JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false)
       : WaveFunctionComponent(obj_name),
         ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
         ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
@@ -155,14 +429,34 @@ public:
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
+    use_offload_ = use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
     init(elecs);
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
 
+  void createResource(ResourceCollection& collection) const override
+  {
+    collection.addResource(std::make_unique<JeeIMultiWalkerMem<valT>>());
+  }
+
+  void acquireResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override
+  {
+    auto& wfc_leader          = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    wfc_leader.mw_mem_handle_ = collection.lendResource<JeeIMultiWalkerMem<valT>>();
+  }
+
+  void releaseResource(ResourceCollection& collection,
+                       const RefVectorWithLeader<WaveFunctionComponent>& wfc_list) const override
+  {
+    auto& wfc_leader = wfc_list.getCastedLeader<JeeIOrbitalSoA<FT>>();
+    collection.takebackResource(wfc_leader.mw_mem_handle_);
+  }
+
   std::unique_ptr<WaveFunctionComponent> makeClone(ParticleSet& elecs) const override
   {
-    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs);
+    auto eeIcopy = std::make_unique<JeeIOrbitalSoA<FT>>(my_name_, Ions, elecs, use_offload_);
     std::map<const FT*, FT*> fcmap;
     for (int iG = 0; iG < iGroups; iG++)
       for (int eG1 = 0; eG1 < eGroups; eG1++)
@@ -375,6 +669,7 @@ public:
             elecs_inside_dist(jg, iat).push_back(eI_dists[jel][iat]);
             elecs_inside_displ(jg, iat).push_back(eI_displs[jel][iat]);
           }
+    touchMembership();
   }
 
   LogValue evaluateLog(const ParticleSet& P,
@@ -486,8 +781,31 @@ public:
     dUat(iat)  = cur_dUat;
     d2Uat[iat] = cur_d2Uat;
 
+    updateMembershipAfterAccept(P, iat);
+  }
+
+  /** move the moved electron between the per ion member lists
+   *
+   * Extracted so the batched accept can reuse it. computeU3 leaves the two ion lists
+   * behind as a side effect of walking the triplets; a form that does the walking on
+   * the device has to rebuild them, and the test is the one computeU3 applies.
+   */
+  void updateMembershipAfterAccept(const ParticleSet& P, int iat)
+  {
+    const auto& eI_table = P.getDistTableAB(ei_Table_ID_);
+    ions_nearby_old.clear();
+    ions_nearby_new.clear();
+    for (int jat = 0; jat < Nion; jat++)
+    {
+      if (eI_table.getDistRow(iat)[jat] < Ion_cutoff[jat])
+        ions_nearby_old.push_back(jat);
+      if (eI_table.getTempDists()[jat] < Ion_cutoff[jat])
+        ions_nearby_new.push_back(jat);
+    }
+
     const int ig = P.GroupID[iat];
     // update compact list elecs_inside
+    touchMembership();
     // if the old position exists in elecs_inside
     for (int iind = 0; iind < ions_nearby_old.size(); iind++)
     {
