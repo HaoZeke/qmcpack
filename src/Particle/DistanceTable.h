@@ -450,6 +450,16 @@ public:
     throw std::runtime_error(name_ + " multi walker data pointer not supported");
   }
 
+  /** the device address of the multi-walker table, or null
+   *
+   * The address above is the host side of a pinned buffer. A kernel handed that
+   * through is_device_ptr does dereference it, across the interconnect, and reads
+   * whatever the table last transferred back, so a device consumer naming it is
+   * correct only while the table keeps making that transfer. A consumer that wants
+   * the device copy has to name it, and a table without one says so.
+   */
+  virtual const RealType* getMultiWalkerDeviceDataPtr() const { return nullptr; }
+
   /// return stride of per target pctl data. full table data = stride * num of target particles
   [[noreturn]] virtual size_t getPerTargetPctlStrideSize() const
   {

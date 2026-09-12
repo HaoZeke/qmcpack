@@ -155,6 +155,11 @@ public:
 
   const T* getMultiWalkerDataPtr() const override { return mw_mem_handle_.getResource().mw_r_dr.data(); }
 
+  const RealType* getMultiWalkerDeviceDataPtr() const override
+  {
+    return mw_mem_handle_.getResource().mw_r_dr.device_data();
+  }
+
   size_t getPerTargetPctlStrideSize() const override { return getAlignedSize<T>(num_sources_) * (D + 1); }
 
   /** evaluate the full table */
