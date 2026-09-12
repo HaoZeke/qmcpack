@@ -72,34 +72,8 @@ struct JeeIMultiWalkerMem : public Resource
   Vector<char, OffloadPinnedAllocator<char>> fn_have;
   Vector<VALT, OffloadPinnedAllocator<VALT>> ion_cutoff;
   Vector<int, OffloadPinnedAllocator<int>> ion_group;
-  /// each electron's spin group, which the accept needs and which never changes
-  Vector<int, OffloadPinnedAllocator<int>> elec_group;
-
-  /// pack it once; a walker's electrons do not change group
-  void packElecGroups(const ParticleSet& P, int nelec)
-  {
-    if (elec_group.size() == static_cast<size_t>(nelec))
-      return;
-    elec_group.resize(nelec);
-    for (int jel = 0; jel < nelec; jel++)
-      elec_group[jel] = P.GroupID[jel];
-    elec_group.updateTo();
-  }
   Vector<int, OffloadPinnedAllocator<int>> vp_walker, vp_jg;
   Vector<VALT, OffloadPinnedAllocator<VALT>> vals;
-  /** what the accept brings back: per walker the change every other electron sees, and
-   * the moved electron's own value, gradient and laplacian before and after the move
-   *
-   * The change is accumulated as one difference rather than as a new set and an old set,
-   * because that is what the accept applies and it halves both the buffer and the atomic
-   * traffic that fills it.
-   */
-  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_delta;
-  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_reduce;
-  /// per electron partials of the moved electron's own sum, summed in electron order
-  Vector<VALT, OffloadPinnedAllocator<VALT>> acc_jpart;
-  /// which walker each accepted entry belongs to
-  Vector<int, OffloadPinnedAllocator<int>> acc_walker;
 
   /// membership stamps the device copy was built from, one per walker
   std::vector<size_t> packed_versions;
