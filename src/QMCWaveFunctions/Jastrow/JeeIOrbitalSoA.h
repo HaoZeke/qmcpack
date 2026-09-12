@@ -397,14 +397,44 @@ public:
    */
   JeeIOrbitalSoA(const std::string& obj_name, const ParticleSet& ions, ParticleSet& elecs, bool use_offload = false)
       : WaveFunctionComponent(obj_name),
-        ee_Table_ID_(elecs.addTable(elecs, DTModes::NEED_TEMP_DATA_ON_HOST | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
-        ei_Table_ID_(elecs.addTable(ions, DTModes::NEED_FULL_TABLE_ANYTIME | DTModes::NEED_VP_FULL_TABLE_ON_HOST)),
+        /* NEED_VP_FULL_TABLE_ON_HOST is the host path's request, and only its.
+         *
+         * VirtualParticleSet withholds MW_EVALUATE_RESULT_NO_TRANSFER_TO_HOST from
+         * a VP table whenever any component asked for the host copy, so one
+         * component asking makes every quadrature evaluation copy the whole
+         * multi-walker distance and displacement array back, for every consumer of
+         * that table. On a 33 ion, 586 electron slab that array is about 11 MB and
+         * the copy is a third of the run.
+         *
+         * The device path does not read it: its kernel names the tables' device
+         * addresses. The one- and two-body Jastrows already withdraw the same
+         * request when they are offloaded, and on a spline deck this is the only
+         * other component that makes it.
+         */
+        ee_Table_ID_(elecs.addTable(elecs,
+                                    DTModes::NEED_TEMP_DATA_ON_HOST |
+                                        (wantsOffload(elecs, use_offload) ? DTModes::ALL_OFF
+                                                                          : DTModes::NEED_VP_FULL_TABLE_ON_HOST))),
+        ei_Table_ID_(elecs.addTable(ions,
+                                    DTModes::NEED_FULL_TABLE_ANYTIME |
+                                        (wantsOffload(elecs, use_offload) ? DTModes::ALL_OFF
+                                                                          : DTModes::NEED_VP_FULL_TABLE_ON_HOST))),
         Ions(ions)
   {
     if (my_name_.empty())
       throw std::runtime_error("JeeIOrbitalSoA object name cannot be empty!");
     use_offload_ = use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
     init(elecs);
+  }
+
+  /** the offload decision, in a form the initializer list can use
+   *
+   * use_offload_ is assigned in the constructor body and the table requests are
+   * made before it, so the same test lives here.
+   */
+  static bool wantsOffload(const ParticleSet& elecs, bool use_offload)
+  {
+    return use_offload && elecs.getCoordinates().getKind() == DynamicCoordinateKind::DC_POS_OFFLOAD;
   }
 
   std::string getClassName() const override { return "JeeIOrbitalSoA"; }
@@ -706,8 +736,17 @@ public:
     const RealType* mw_ee = nullptr;
     try
     {
-      mw_ei = dt_ei.getMultiWalkerDataPtr();
-      mw_ee = dt_ee.getMultiWalkerDataPtr();
+      /* The device address, not the host one.
+       *
+       * getMultiWalkerDataPtr publishes the host side of a pinned buffer, and a
+       * kernel handed that through is_device_ptr does dereference it, across the
+       * interconnect, reading whatever the table last transferred back. So naming
+       * the host address is correct only while the table keeps making that
+       * transfer, and it puts every distance this kernel reads on the interconnect
+       * rather than in device memory.
+       */
+      mw_ei = dt_ei.getMultiWalkerDeviceDataPtr();
+      mw_ee = dt_ee.getMultiWalkerDeviceDataPtr();
     }
     catch (...)
     {
