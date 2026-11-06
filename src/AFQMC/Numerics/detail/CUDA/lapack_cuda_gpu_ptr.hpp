@@ -16,6 +16,7 @@
 #define AFQMC_LAPACK_GPU_HPP
 
 #include <cassert>
+#include <limits>
 #include "AFQMC/Utilities/type_conversion.hpp"
 #include "AFQMC/Memory/custom_pointers.hpp"
 #include "AFQMC/Memory/arch.hpp"
@@ -111,7 +112,10 @@ template<typename T>
 inline static void getri_bufferSize(int n, device_pointer<T> a, int lda, int& lwork)
 {
   // gpu uses getrs to invert matrix, which requires n*n workspace
-  lwork = n * n;
+  const long nn = static_cast<long>(n) * n;
+  if (nn > std::numeric_limits<int>::max())
+    throw std::runtime_error("Error: getri_bufferSize n*n workspace exceeds int range.");
+  lwork = static_cast<int>(nn);
 }
 
 // write separate query function to avoid hack!!!
@@ -124,7 +128,7 @@ inline static void getri(int n,
                          int n1,
                          int& status)
 {
-  if (n1 < n * n)
+  if (static_cast<long>(n1) < static_cast<long>(n) * n)
     throw std::runtime_error("Error: getri<GPU_MEMORY_POINTER_TYPE> required buffer space of n*n.");
   if (lda != n)
     throw std::runtime_error("Error: getri<GPU_MEMORY_POINTER_TYPE> required lda = 1.");
@@ -433,7 +437,9 @@ inline static void geqrfStrided(int M,
 template<typename T>
 inline static void gesvd_bufferSize(const int m, const int n, device_pointer<T> a, int& lwork)
 {
-  cusolver::cusolver_gesvd_bufferSize(*a.handles.cusolverDn_handle, m, n, to_address(a), &lwork);
+  if (CUSOLVER_STATUS_SUCCESS !=
+      cusolver::cusolver_gesvd_bufferSize(*a.handles.cusolverDn_handle, m, n, to_address(a), &lwork))
+    throw std::runtime_error("Error: cusolver_gesvd_bufferSize returned error code.");
 }
 
 template<typename T, typename R>

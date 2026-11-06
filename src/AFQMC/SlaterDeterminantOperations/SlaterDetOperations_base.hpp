@@ -12,7 +12,9 @@
 #ifndef QMCPLUSPLUS_AFQMC_SLATERDETOPERATIONS_BASE_HPP
 #define QMCPLUSPLUS_AFQMC_SLATERDETOPERATIONS_BASE_HPP
 
+#include <algorithm>
 #include <fstream>
+#include <stdexcept>
 
 #include "AFQMC/config.h"
 #include "AFQMC/Utilities/Utils.hpp"
@@ -87,7 +89,8 @@ public:
     int NAEA = (herm ? get<0>(hermA.sizes()) : get<1>(hermA.sizes()));
     TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TNM({NAEA, NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     return SlaterDeterminantOperations::base::MixedDensityMatrix<T>(hermA, B, std::forward<MatC>(C), LogOverlapFactor,
                                                                     TNN, TNM, IWORK, WORK, compact, herm);
@@ -102,7 +105,8 @@ public:
     int NAEA = get<1>(A.sizes());
     TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TNM({NAEA, NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     return SlaterDeterminantOperations::base::MixedDensityMatrix<T>(A, A, std::forward<MatC>(C), LogOverlapFactor, TNN,
                                                                     TNM, IWORK, WORK, compact, false);
@@ -125,7 +129,9 @@ public:
       TMatrix TNN2({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
       TMatrix TNM({NAEA, NMO}, buffer_manager.get_generator().template get_allocator<T>());
       TMatrix TMN({NMO, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
-      TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+      TVector WORK(extents_t<1u>{workspace_for(ma::getrf_optimal_workspace_size(TNN1),
+                                                 ma::gesvd_optimal_workspace_size(TNN1))},
+                   buffer_manager.get_generator().template get_allocator<T>());
       RVector RWORK(extents_t<1u>{6 * NAEA + 1}, buffer_manager.get_generator().template get_allocator<R>());
       IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
       return SlaterDeterminantOperations::base::MixedDensityMatrix_noHerm_wSVD<T>(A, B, std::forward<MatC>(C),
@@ -136,7 +142,8 @@ public:
     {
       TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
       TMatrix TNM({NAEA, NMO}, buffer_manager.get_generator().template get_allocator<T>());
-      TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+      TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                   buffer_manager.get_generator().template get_allocator<T>());
       IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
       return SlaterDeterminantOperations::base::MixedDensityMatrix_noHerm<T>(A, B, std::forward<MatC>(C),
                                                                              LogOverlapFactor, TNN, TNM, IWORK, WORK,
@@ -163,7 +170,8 @@ public:
     TMatrix TNN({NEL, NEL}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TAB({Nact, NEL}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TNM({NEL, NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     return SlaterDeterminantOperations::base::MixedDensityMatrixForWoodbury<T>(hermA, B, std::forward<MatC>(C),
                                                                                LogOverlapFactor,
@@ -187,7 +195,8 @@ public:
     TMatrix TNN({NEL, NEL}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TAB({Nact, NEL}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TNM({NEL, NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     return SlaterDeterminantOperations::base::MixedDensityMatrixFromConfiguration<T>(hermA, B, std::forward<MatC>(C),
                                                                                      LogOverlapFactor, ref, TNN, TAB,
@@ -200,9 +209,10 @@ public:
     using std::get;
     int NAEA = get<1>(A.sizes());
     TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
-    TMatrix TNN2({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::getrf_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NAEA + 1}, buffer_manager.get_generator().template get_allocator<int>());
-    return SlaterDeterminantOperations::base::Overlap<T>(A, A, LogOverlapFactor, TNN, IWORK, TNN2.elements(), false);
+    return SlaterDeterminantOperations::base::Overlap<T>(A, A, LogOverlapFactor, TNN, IWORK, WORK, false);
   }
 
   template<class MatA, class MatB>
@@ -211,9 +221,10 @@ public:
     using std::get;
     int NAEA = (herm ? get<0>(hermA.sizes()) : get<1>(hermA.sizes()));
     TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
-    TMatrix TNN2({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::getrf_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NAEA + 1}, buffer_manager.get_generator().template get_allocator<int>());
-    return SlaterDeterminantOperations::base::Overlap<T>(hermA, B, LogOverlapFactor, TNN, IWORK, TNN2.elements(), herm);
+    return SlaterDeterminantOperations::base::Overlap<T>(hermA, B, LogOverlapFactor, TNN, IWORK, WORK, herm);
   }
 
   template<class MatA, class MatB>
@@ -222,9 +233,10 @@ public:
     using std::get;
     int NAEA = get<1>(A.sizes());
     TMatrix TNN({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
-    TMatrix TNN2({NAEA, NAEA}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::getrf_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NAEA + 1}, buffer_manager.get_generator().template get_allocator<int>());
-    return SlaterDeterminantOperations::base::Overlap<T>(A, B, LogOverlapFactor, TNN, IWORK, TNN2.elements(), false);
+    return SlaterDeterminantOperations::base::Overlap<T>(A, B, LogOverlapFactor, TNN, IWORK, WORK, false);
   }
 
   // routines for PHMSD
@@ -239,7 +251,8 @@ public:
     assert(get<1>(QQ0.sizes()) == NEL);
     TMatrix TNN({NEL, NEL}, buffer_manager.get_generator().template get_allocator<T>());
     TMatrix TMN({Nact, NEL}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::invert_optimal_workspace_size(TNN))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{Nact + 1}, buffer_manager.get_generator().template get_allocator<int>());
     return SlaterDeterminantOperations::base::OverlapForWoodbury<T>(hermA, B, LogOverlapFactor, std::forward<MatC>(QQ0),
                                                                     ref, TNN, TMN, IWORK, WORK);
@@ -301,7 +314,9 @@ public:
     TMatrix AT({NAEA, NMO}, buffer_manager.get_generator().template get_allocator<T>());
     TVector scl(extents_t<1u>{NMO}, buffer_manager.get_generator().template get_allocator<T>());
     TVector TAU(extents_t<1u>{NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::geqrf_optimal_workspace_size(AT),
+                                             ma::gqr_optimal_workspace_size(AT))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     ma::transpose(A, AT);
     ma::geqrf(AT, TAU, WORK);
@@ -314,7 +329,9 @@ public:
 #else
     int NMO = A.size();
     TVector TAU(extents_t<1u>{NMO}, buffer_manager.get_generator().template get_allocator<T>());
-    TVector WORK(extents_t<1u>{work_size}, buffer_manager.get_generator().template get_allocator<T>());
+    TVector WORK(extents_t<1u>{workspace_for(ma::gelqf_optimal_workspace_size(A),
+                                             ma::glq_optimal_workspace_size(A))},
+                 buffer_manager.get_generator().template get_allocator<T>());
     IVector IWORK(extents_t<1u>{NMO + 1}, buffer_manager.get_generator().template get_allocator<int>());
     ma::gelqf(std::forward<Mat>(A), TAU, WORK);
     T res(0.0);
@@ -339,6 +356,22 @@ public:
 
 protected:
   BufferManager buffer_manager;
+
+  // Workspace for the LAPACK calls made on the operands actually passed. work_size was queried for the
+  // constructor's NAEA only; callers also pass NAEB- and NEL-sized operands, and the cuSOLVER queries are
+  // not documented to be monotone in the matrix dimensions.
+  template<class... Queries>
+  std::ptrdiff_t workspace_for(Queries... queried) const
+  {
+    std::ptrdiff_t lwork = work_size;
+    for (std::ptrdiff_t q : {std::ptrdiff_t(queried)...})
+    {
+      if (q < 0)
+        throw std::runtime_error("Error: negative LAPACK workspace query in SlaterDetOperations_base.");
+      lwork = std::max(lwork, q);
+    }
+    return lwork;
+  }
 
   // keeping this to avoid having to know which routines are called in the lower level
   //  and let's me use static arrays
