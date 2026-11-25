@@ -643,7 +643,8 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
   const size_t nw = o_list.size();
   std::vector<int> num_accepted(nw, 0);
 
-  if (move_op.getMoveKind() != TmoveKind::V1)
+  const bool is_v3 = move_op.getMoveKind() == TmoveKind::V3;
+  if (move_op.getMoveKind() != TmoveKind::V1 && !is_v3)
   {
     for (size_t iw = 0; iw < nw; iw++)
       num_accepted[iw] =
@@ -670,6 +671,25 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
     auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
     for (int jel = 0; jel < rng_vals.cols(); jel++)
       rng_vals[iw][jel] = (*O.myRNG)();
+  }
+
+  // v3 starts each walker from the Txy of the preceding energy evaluation,
+  // grouped by electron, and recomputes an electron's candidates only after
+  // an accepted move has touched it. move_op keeps a single grouped table,
+  // so the per-walker tables live here.
+  std::vector<std::vector<std::vector<NonLocalData>>> txy_by_elec;
+  if (is_v3)
+  {
+    const size_t num_elec = pset_leader.getTotalNum();
+    txy_by_elec.resize(nw);
+    for (size_t iw = 0; iw < nw; iw++)
+    {
+      auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+      O.elecTMAffected.assign(num_elec, false);
+      txy_by_elec[iw].resize(num_elec);
+      for (const NonLocalData& txy : O.tmove_xy_all_)
+        txy_by_elec[iw][txy.PID].push_back(txy);
+    }
   }
 
   RefVectorWithLeader<NonLocalECPComponent> ecp_component_list(**pp_component);
@@ -704,6 +724,9 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
         auto& jobs = jel_jobs[iw];
         jobs.clear();
         tmove_xy[iw].clear();
+        // v3: an electron no accepted move has touched keeps its grouped Txy
+        if (is_v3 && !O.elecTMAffected[jel])
+          continue;
         const auto& myTable = P.getDistTableAB(O.myTableIndex);
         const auto& dist    = myTable.getDistRow(jel);
         const auto& displ   = myTable.getDisplRow(jel);
@@ -751,11 +774,13 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
       }
 
       // selection and accepts per walker: identical calls, RNG draw order,
-      // and accept bookkeeping as the single-walker v1 sweep
+      // and accept bookkeeping as the single-walker v1 and v3 sweeps
       for (size_t iw = 0; iw < nw; iw++)
       {
-        auto& O                      = o_list.getCastedElement<NonLocalECPotential>(iw);
-        const NonLocalData* oneTMove = move_op.selectMove(rng_vals[iw][jel], tmove_xy[iw]);
+        auto& O = o_list.getCastedElement<NonLocalECPotential>(iw);
+        const bool use_grouped_txy   = is_v3 && !O.elecTMAffected[jel];
+        const NonLocalData* oneTMove =
+            move_op.selectMove(rng_vals[iw][jel], use_grouped_txy ? txy_by_elec[iw][jel] : tmove_xy[iw]);
         if (oneTMove)
         {
           TrialWaveFunction& psi = wf_list[iw];
@@ -764,6 +789,8 @@ std::vector<int> NonLocalECPotential::mw_makeNonLocalMovesPbyP(const RefVectorWi
           if (P.makeMoveAndCheck(jel, oneTMove->Delta) && psi.calcRatioGrad(P, jel, grad_iat) != ValueType(0))
           {
             psi.acceptMove(P, jel, true);
+            if (is_v3)
+              O.neighbor_lists.markAffectedElecs(P.getDistTableAB(O.myTableIndex), jel, O.elecTMAffected);
             P.acceptMove(jel);
             num_accepted[iw]++;
           }

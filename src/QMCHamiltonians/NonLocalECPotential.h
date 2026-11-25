@@ -108,8 +108,11 @@ public:
    * batched across walkers through NonLocalECPComponent::mw_evaluateOne,
    * synchronizing walkers at electron-index granularity; move selection and
    * the (rare) accepts stay per walker, so each walker reproduces the
-   * sequential single-walker v1 sweep, including its RNG draw order. Other
-   * T-move kinds fall back to the per-walker implementation.
+   * sequential single-walker v1 sweep, including its RNG draw order.
+   * TmoveKind::V3 takes the same path: at each electron only the walkers in
+   * which an accepted move has touched that electron join the batch, and the
+   * others select from the Txy of the preceding energy evaluation. V0 falls
+   * back to the per-walker implementation.
    *
    * @return the number of accepted moves per walker
    */

@@ -314,11 +314,11 @@ struct TmoveV1Result
   std::vector<QMCTraits::PosType> final_R;
 };
 
-/** run a two-walker v1 T-move sweep with fixed quadrature grids and
+/** run a two-walker v1 or v3 T-move sweep with fixed quadrature grids and
  *  per-walker seeded RNGs; batched and serial paths must agree walker by
  *  walker in accepted counts and final electron positions.
  */
-TmoveV1Result runTmoveV1(bool batched, bool use_VP)
+TmoveV1Result runTmoveV1(bool batched, bool use_VP, TmoveKind kind = TmoveKind::V1)
 {
   using FullPrecReal = QMCTraits::FullPrecRealType;
 
@@ -358,10 +358,12 @@ TmoveV1Result runTmoveV1(bool batched, bool use_VP)
   testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp);
   testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp2);
 
-  // the energy evaluation builds the neighbor lists the v1 sweep reads
-  testing::TestNonLocalECPotential::mw_evaluateImpl(nl_ecp, o_list, twf_list, p_list, false, std::nullopt, true);
+  // the energy evaluation builds the neighbor lists the v1 sweep reads, and
+  // for v3 the Txy of every electron that the sweep starts from
+  testing::TestNonLocalECPotential::mw_evaluateImpl(nl_ecp, o_list, twf_list, p_list, kind == TmoveKind::V3,
+                                                    std::nullopt, true);
 
-  NonLocalTOperator move_op(TmoveKind::V1, 0.5 /*tau*/, 0.0 /*alpha*/, 0.0 /*gamma*/);
+  NonLocalTOperator move_op(kind, 0.5 /*tau*/, 0.0 /*alpha*/, 0.0 /*gamma*/);
 
   TmoveV1Result res;
   if (batched)
@@ -386,6 +388,26 @@ TEST_CASE("NonLocalECPotential Tmove v1 batched matches serial", "[hamiltonian]"
   {
     const auto serial  = runTmoveV1(false, use_VP);
     const auto batched = runTmoveV1(true, use_VP);
+
+    REQUIRE(serial.accepts.size() == batched.accepts.size());
+    CHECK(serial.accepts == batched.accepts);
+    // a sweep with no accepted move would leave the accept path untested
+    const int total_accepts = std::accumulate(serial.accepts.begin(), serial.accepts.end(), 0);
+    CHECK(total_accepts > 0);
+
+    REQUIRE(serial.final_R.size() == batched.final_R.size());
+    for (size_t i = 0; i < serial.final_R.size(); ++i)
+      for (int d = 0; d < 3; ++d)
+        CHECK(serial.final_R[i][d] == Approx(batched.final_R[i][d]).epsilon(1e-12));
+  }
+}
+
+TEST_CASE("NonLocalECPotential Tmove v3 batched matches serial", "[hamiltonian]")
+{
+  for (const bool use_VP : {false, true})
+  {
+    const auto serial  = runTmoveV1(false, use_VP, TmoveKind::V3);
+    const auto batched = runTmoveV1(true, use_VP, TmoveKind::V3);
 
     REQUIRE(serial.accepts.size() == batched.accepts.size());
     CHECK(serial.accepts == batched.accepts);
