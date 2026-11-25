@@ -535,7 +535,7 @@ ompBLAS_status gemv_batched_impl(ompBLAS_handle& handle,
     if (incx != 1)
       throw std::runtime_error("incx!=1 are not implemented in ompBLAS::gemv_batched_impl trans='N'!");
 
-    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * n) \
+    PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(batch_count * m) \
                                is_device_ptr(A, x, y, alpha, beta)")
     for (uint32_t ib = 0; ib < batch_count; ib++)
       for (uint32_t i = 0; i < m; i++)
