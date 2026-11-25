@@ -95,6 +95,9 @@ void WalkerControl::start(const std::string& root_name)
   }
 }
 
+/// how often DMC.dat is flushed, in steps; see writeDMCdat
+static constexpr int dmc_stream_flush_interval = 100;
+
 void WalkerControl::writeDMCdat(int iter, const std::vector<FullPrecRealType>& curData)
 {
   //taking average over the walkers
@@ -127,8 +130,12 @@ void WalkerControl::writeDMCdat(int iter, const std::vector<FullPrecRealType>& c
     // this is not actually true. Apparently it doesn't actually and can loose ownership then it is
     // either leaked or not flushed before it is destroyed.
     // \todo fix this, you don't want to flush every step since you really hope that could be very rapid.
-    (*dmcStream)
-        << std::endl; //'\n'; // this is definitely not a place to put an endl as that is also a signal for a flush.
+    // A newline, not std::endl: endl flushes, and this runs once per step. The stream is
+    // flushed periodically instead of left to the destructor because ownership of dmcStream
+    // is not reliably held to destruction, per the note above.
+    (*dmcStream) << '\n';
+    if (iter % dmc_stream_flush_interval == 0)
+      dmcStream->flush();
   }
 }
 
