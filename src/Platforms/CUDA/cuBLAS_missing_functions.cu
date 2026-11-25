@@ -360,7 +360,7 @@ __global__ void copy_batched_kernel(const int n, const T* const in[], const int 
   else
   {
     if (col_id < n)
-      out_iw[col_id * incx] = in_iw[col_id * incx];
+      out_iw[col_id * incy] = in_iw[col_id * incx];
   }
 }
 
