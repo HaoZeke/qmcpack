@@ -14,6 +14,7 @@
 #include "Numerics/MatrixOperators.h"
 #include "CPU/BLAS.hpp"
 #include "OMPTarget/ompBLAS.hpp"
+#include "OMPTarget/ompReductionComplex.hpp"
 #include <ResourceCollection.h>
 #include <AccelBLAS.hpp>
 

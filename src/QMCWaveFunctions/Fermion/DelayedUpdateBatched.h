@@ -18,6 +18,7 @@
 #include "OhmmsPETE/OhmmsMatrix.h"
 #include "QMCWaveFunctions/Fermion/DiracMatrix.h"
 #include "Platforms/OMPTarget/ompBLAS.hpp"
+#include "Platforms/OMPTarget/ompReductionComplex.hpp"
 #include "detail/AccelMatrixUpdate.hpp"
 #include "WaveFunctionTypes.hpp"
 #include "QueueAliases.hpp"
