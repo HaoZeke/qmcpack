@@ -231,6 +231,9 @@ void SOECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase>& o_l
   pset_list.reserve(nw);
   psi_list.reserve(nw);
   batch_list.reserve(nw);
+  // crowd walker index of each batch slot; the batch lists are compacted
+  std::vector<int> walker_index_list;
+  walker_index_list.reserve(nw);
 
   for (size_t ig = 0; ig < pset_leader.groups(); ig++)
   {
@@ -250,6 +253,7 @@ void SOECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase>& o_l
       pset_list.clear();
       psi_list.clear();
       batch_list.clear();
+      walker_index_list.clear();
       vp_list.reserve(nw);
       for (size_t iw = 0; iw < nw; iw++)
       {
@@ -258,6 +262,7 @@ void SOECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase>& o_l
         {
           const auto& job = O.sopp_jobs_[ig][jobid];
           soecp_potential_list.push_back(O);
+          walker_index_list.push_back(iw);
           soecp_component_list.push_back(*O.pp_[job.ion_id]);
           pset_list.push_back(p_list[iw]);
           if (O.vp_)
@@ -290,7 +295,7 @@ void SOECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase>& o_l
         {
           auto& ve_samples = O_leader.mw_res_handle_.getResource().ve_samples;
           auto& vi_samples = O_leader.mw_res_handle_.getResource().vi_samples;
-          int iw           = j;
+          const int iw     = walker_index_list[j];
           ve_samples(iw, batch_list[j].get().electron_id) += pairpots[j];
           vi_samples(iw, batch_list[j].get().ion_id) += pairpots[j];
         }

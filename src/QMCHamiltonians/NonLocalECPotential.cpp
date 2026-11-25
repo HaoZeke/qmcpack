@@ -329,6 +329,9 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
   psi_list.reserve(nw);
   batch_list.reserve(nw);
   tmove_xy_all_batch_list.reserve(nw);
+  // crowd walker index of each batch slot; the batch lists are compacted
+  std::vector<int> walker_index_list;
+  walker_index_list.reserve(nw);
 
   for (int ig = 0; ig < pset_leader.groups(); ++ig) //loop over species
   {
@@ -350,6 +353,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
       psi_list.clear();
       batch_list.clear();
       tmove_xy_all_batch_list.clear();
+      walker_index_list.clear();
       vp_list.reserve(nw);
       for (size_t iw = 0; iw < nw; iw++)
       {
@@ -358,6 +362,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         {
           const auto& job = O.nlpp_jobs[ig][jobid];
           ecp_potential_list.push_back(O);
+          walker_index_list.push_back(iw);
           ecp_component_list.push_back(*O.PP[job.ion_id]);
           pset_list.push_back(p_list[iw]);
           if (O.vp_)
@@ -399,8 +404,7 @@ void NonLocalECPotential::mw_evaluateImpl(const RefVectorWithLeader<OperatorBase
         {
           auto& ve_samples = O_leader.mw_res_handle_.getResource().ve_samples;
           auto& vi_samples = O_leader.mw_res_handle_.getResource().vi_samples;
-          // CAUTION! This may not be so simple in the future
-          int iw = j;
+          const int iw = walker_index_list[j];
           ve_samples(iw, batch_list[j].get().electron_id) += 0.5 * pairpots[j];
           vi_samples(iw, batch_list[j].get().ion_id) += 0.5 * pairpots[j];
         }
