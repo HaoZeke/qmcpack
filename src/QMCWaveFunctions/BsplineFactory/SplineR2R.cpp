@@ -470,7 +470,6 @@ void SplineR2R<ST>::mw_evaluateVGLandDetRatioGrads(const RefVectorWithLeader<SPO
     }
 
     PRAGMA_OFFLOAD("omp target teams distribute collapse(2) num_teams(NumTeams*num_pos) \
-                    map(always, to: buffer_H2D_ptr[:buffer_H2D.size()]) \
                     map(always, from: rg_private_ptr[:NumTeams*num_pos*4])")
     for (int iw = 0; iw < num_pos; iw++)
       for (int team_id = 0; team_id < NumTeams; team_id++)
