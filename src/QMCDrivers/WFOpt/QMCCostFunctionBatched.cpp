@@ -796,8 +796,6 @@ QMCCostFunctionBatched::EffectiveWeight QMCCostFunctionBatched::correlatedSampli
   for (int i = 0; i < opt_eval.size(); i++)
     wgt_tot += opt_eval[i]->get_wgt() * inv_n_samples;
 
-  //this is MPI barrier
-  OHMMS::Controller->barrier();
   //collect the total weight for normalization and apply maximum weight
   myComm.allreduce(wgt_tot);
   Return_rt wgtnorm = (wgt_tot == 0) ? 0 : wgt_tot;
@@ -814,17 +812,13 @@ QMCCostFunctionBatched::EffectiveWeight QMCCostFunctionBatched::correlatedSampli
   myComm.allreduce(wgt_tot);
 
   wgtnorm = (wgt_tot == 0) ? 1 : 1.0 / wgt_tot;
-  wgt_tot = 0.0;
   {
     for (int iw = 0; iw < rank_local_num_samples_; iw++)
     {
       Return_rt* restrict saved = RecordsOnNode_[iw];
       saved[REWEIGHT]           = std::min(saved[REWEIGHT] * wgtnorm, MaxWeight);
-      wgt_tot += inv_n_samples * saved[REWEIGHT];
     }
   }
-  myComm.allreduce(wgt_tot);
-  //    app_log()<<"After Purge"<<wgt_tot<<" "<< std::endl;
   for (int i = 0; i < SumValue.size(); i++)
     SumValue[i] = 0.0;
   {
