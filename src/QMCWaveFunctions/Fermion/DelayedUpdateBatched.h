@@ -391,6 +391,8 @@ public:
     assert(nw == mw_dspin.rows());
     assert(nw == grad_now.size());
     assert(nw == spingrad_now.size());
+    if (!no_delayed_update_)
+      mw_prepareInvRow(psiMinv_refs, rowchanged);
     auto& buffer_H2D = evalGrad_buffer_H2D;
 
     //Need to pack these into a transfer buffer since psiMinv and dpsiM_row_list are not multiwalker data
@@ -402,9 +404,14 @@ public:
     Matrix<const Value*> ptr_buffer(reinterpret_cast<const Value**>(buffer_H2D.data()), num_ptrs_packed, nw);
     for (int iw = 0; iw < nw; iw++)
     {
-      DualMatrix<Value>& psiMinv = psiMinv_refs[iw];
-      ptr_buffer[0][iw]          = psiMinv.device_data() + rowchanged * psiMinv.cols();
-      ptr_buffer[1][iw]          = dpsiM_row_list[iw];
+      if (no_delayed_update_)
+      {
+        DualMatrix<Value>& psiMinv = psiMinv_refs[iw];
+        ptr_buffer[0][iw]          = psiMinv.device_data() + rowchanged * psiMinv.cols();
+      }
+      else
+        ptr_buffer[0][iw] = invRow_at(iw);
+      ptr_buffer[1][iw] = dpsiM_row_list[iw];
     }
     constexpr unsigned DIM = GT::Size;
     grads_value_v.resize(nw, DIM);
