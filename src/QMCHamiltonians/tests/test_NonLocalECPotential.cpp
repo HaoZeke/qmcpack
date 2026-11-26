@@ -735,4 +735,86 @@ TEST_CASE("NonLocalECPotential mw_evaluate ragged job counts", "[hamiltonian]")
   CHECK(nl_ecp2.getValue() == Approx(mw_value2));
   CHECK(nl_ecp3.getValue() == Approx(mw_value3));
 }
+/** Per-particle listener samples must land on the walker that owns the job.
+ *  The walker with one job fewer sits in the middle of the crowd, so at the
+ *  last job index the batch lists hold walkers 1 and 3 and batch slot 1 is
+ *  walker 3.
+ */
+TEST_CASE("NonLocalECPotential mw_evaluate listeners with ragged job counts", "[hamiltonian]")
+{
+  using Real         = QMCTraits::RealType;
+  using FullPrecReal = QMCTraits::FullPrecRealType;
+  using testing::getParticularListener;
+
+  const SimulationCell simulation_cell = makeTmoveV1SimulationCell();
+  ParticleSet ions                     = makeTmoveV1Ions(simulation_cell);
+  ParticleSet elec = makeTmoveV1Elec(simulation_cell, ions, {0.4, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 0.0, 0.0});
+
+  // 2.0 from ion 0 and 4.0 from ion 1; the Na.BFD.xml cutoff lies between
+  ParticleSet elec2(elec);
+  elec2.R[2] = {0.0, 3.0, 0.0};
+  elec2.update();
+  ParticleSet elec3(elec);
+  elec3.update();
+
+  RefVectorWithLeader<ParticleSet> p_list(elec, {elec, elec2, elec3});
+
+  RuntimeOptions runtime_options;
+  TrialWaveFunction psi(runtime_options);
+  TrialWaveFunction psi2(runtime_options);
+  TrialWaveFunction psi3(runtime_options);
+  RefVectorWithLeader<TrialWaveFunction> twf_list(psi, {psi, psi2, psi3});
+
+  NonLocalECPotential nl_ecp(ions, elec, false /*use_DLA*/, false /*use_VP*/);
+  nl_ecp.addComponent(0, readTmoveV1PPComponent());
+  UPtr<OperatorBase> nl_ecp2_ptr = nl_ecp.makeClone(elec2, psi2);
+  auto& nl_ecp2                  = dynamic_cast<NonLocalECPotential&>(*nl_ecp2_ptr);
+  UPtr<OperatorBase> nl_ecp3_ptr = nl_ecp.makeClone(elec3, psi3);
+  auto& nl_ecp3                  = dynamic_cast<NonLocalECPotential&>(*nl_ecp3_ptr);
+
+  StdRandom<FullPrecReal> rng(10101);
+  StdRandom<FullPrecReal> rng2(10201);
+  StdRandom<FullPrecReal> rng3(10301);
+  nl_ecp.setRandomGenerator(&rng);
+  nl_ecp2.setRandomGenerator(&rng2);
+  nl_ecp3.setRandomGenerator(&rng3);
+
+  RefVectorWithLeader<OperatorBase> o_list(nl_ecp, {nl_ecp, nl_ecp2, nl_ecp3});
+  ResourceCollection pset_res("test_pset_res");
+  elec.createResource(pset_res);
+  ResourceCollectionTeamLock<ParticleSet> pset_lock(pset_res, p_list);
+  ResourceCollection nl_ecp_res("test_nl_ecp_res");
+  nl_ecp.createResource(nl_ecp_res);
+  ResourceCollectionTeamLock<OperatorBase> nl_ecp_lock(nl_ecp_res, o_list);
+
+  testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp);
+  testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp2);
+  testing::TestNonLocalECPotential::copyGridUnrotatedForTest(nl_ecp3);
+
+  const int num_walkers = 3;
+  const int max_values  = 10;
+  Matrix<Real> elec_pots(num_walkers, max_values);
+  Matrix<Real> ion_pots(num_walkers, max_values);
+  std::vector<ListenerVector<Real>> listeners;
+  listeners.emplace_back("nonlocalpotential", getParticularListener(elec_pots));
+  std::vector<ListenerVector<Real>> ion_listeners;
+  ion_listeners.emplace_back("nonlocalpotential", getParticularListener(ion_pots));
+  ListenerOption<Real> listener_opt{listeners, ion_listeners};
+
+  testing::TestNonLocalECPotential::mw_evaluateImpl(nl_ecp, o_list, twf_list, p_list, false, listener_opt, true);
+
+  const std::vector<double> values{static_cast<double>(nl_ecp.getValue()), static_cast<double>(nl_ecp2.getValue()),
+                                   static_cast<double>(nl_ecp3.getValue())};
+  // walkers 1 and 3 are identical and walker 2 differs, so samples filed
+  // under the wrong walker cannot satisfy the per-walker sums below
+  CHECK(values[0] == Approx(values[2]));
+  CHECK(values[1] != Approx(values[0]));
+
+  for (int iw = 0; iw < num_walkers; iw++)
+  {
+    double sum = std::accumulate(elec_pots[iw], elec_pots[iw] + elec_pots.cols(), 0.0);
+    sum += std::accumulate(ion_pots[iw], ion_pots[iw] + ion_pots.cols(), 0.0);
+    CHECK(sum == Approx(values[iw]));
+  }
+}
 } // namespace qmcplusplus
